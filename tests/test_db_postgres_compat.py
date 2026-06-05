@@ -155,6 +155,13 @@ class PostgresCompatSqlTranslationTests(unittest.TestCase):
         self.assertNotIn("COLLATE NOCASE", sql)
         self.assertIn("EXTRACT(EPOCH FROM NOW())", sql)
 
+    def test_strftime_iso_default_becomes_postgres_text_default(self):
+        sql = compat.translate_sqlite_sql("pushed_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now'))")
+
+        self.assertIn("TO_CHAR(CURRENT_TIMESTAMP", sql)
+        self.assertIn('YYYY-MM-DD"T"HH24:MI:SS', sql)
+        self.assertNotIn("strftime", sql)
+
     def test_compat_row_behaves_like_sqlite_row_for_common_access(self):
         row = compat.CompatRow(["id", "subject"], [7, "Hello"])
 
@@ -231,6 +238,16 @@ class PostgresCompatSqlTranslationTests(unittest.TestCase):
         self.assertEqual(connection._raw.rollbacks, 1)
         self.assertEqual(row["id"], 99)
         self.assertEqual(cursor.fetchall(), [])
+
+    def test_sqlite_master_query_returns_temp_message_schema(self):
+        connection = make_connection(FakeRawConnection())
+        cursor = connection.cursor()
+
+        cursor.execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'temp_email_messages'")
+        row = cursor.fetchone()
+
+        self.assertIsNotNone(row)
+        self.assertIn("UNIQUE(email_address, message_id)", row["sql"])
 
     def test_pragma_table_info_uses_information_schema_rows(self):
         pg_cursor = FakePgCursor(rows=[(0, "id", "integer", 1, None, 0)])
