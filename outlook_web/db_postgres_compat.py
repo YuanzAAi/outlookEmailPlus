@@ -322,7 +322,7 @@ def translate_sqlite_sql(sql: str) -> str:
         translated,
         flags=re.I,
     )
-    translated = re.sub(r"\s+COLLATE\s+NOCASE\b", "", translated, flags=re.I)
+    translated = re.sub(r" COLLATE NOCASE\b", "", translated, flags=re.I)
     translated = translated.replace("unixepoch('now')", "EXTRACT(EPOCH FROM NOW())")
     translated = translated.replace("strftime('%s','now')", "EXTRACT(EPOCH FROM NOW())")
     translated = translated.replace('strftime("%s","now")', "EXTRACT(EPOCH FROM NOW())")
