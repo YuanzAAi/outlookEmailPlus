@@ -43,3 +43,61 @@ jobs:
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+
+      - name: Print Sonar security hotspot metadata
+        if: always() && github.event_name == 'pull_request'
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          python - <<'PY'
+          import base64
+          import json
+          import os
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+
+          token = os.environ.get("SONAR_TOKEN") or ""
+          host = (os.environ.get("SONAR_HOST_URL") or "https://sonarcloud.io").rstrip("/")
+          pr_number = os.environ.get("PR_NUMBER") or ""
+          if not token:
+              print("SONAR_TOKEN unavailable; cannot query hotspot metadata")
+              raise SystemExit(0)
+
+          params = urllib.parse.urlencode(
+              {
+                  "projectKey": "ZeroPointSix_outlookEmailPlus",
+                  "pullRequest": pr_number,
+                  "status": "TO_REVIEW",
+                  "ps": "50",
+              }
+          )
+          request = urllib.request.Request(f"{host}/api/hotspots/search?{params}")
+          auth = base64.b64encode(f"{token}:".encode()).decode()
+          request.add_header("Authorization", f"Basic {auth}")
+
+          try:
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  payload = json.loads(response.read().decode())
+          except urllib.error.HTTPError as exc:
+              body = exc.read().decode(errors="replace")[:500]
+              print(f"hotspot API error: status={exc.code} body={body}")
+              raise SystemExit(0)
+
+          selected = []
+          for hotspot in payload.get("hotspots", []):
+              selected.append(
+                  {
+                      "key": hotspot.get("key"),
+                      "ruleKey": hotspot.get("ruleKey"),
+                      "message": hotspot.get("message"),
+                      "component": hotspot.get("component"),
+                      "line": hotspot.get("line"),
+                      "status": hotspot.get("status"),
+                      "resolution": hotspot.get("resolution"),
+                  }
+              )
+          print(json.dumps({"hotspots": selected}, indent=2, ensure_ascii=False))
+          PY
