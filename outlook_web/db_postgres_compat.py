@@ -30,6 +30,22 @@ _RETURNING_ID_TABLES = {
     "temp_emails",
     "verification_extract_logs",
 }
+_TEMP_EMAIL_MESSAGES_CREATE_SQL = """
+CREATE TABLE temp_email_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    message_id TEXT NOT NULL,
+    email_address TEXT NOT NULL,
+    from_address TEXT,
+    subject TEXT,
+    content TEXT,
+    html_content TEXT,
+    has_html INTEGER DEFAULT 0,
+    timestamp INTEGER,
+    raw_content TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(email_address, message_id)
+)
+"""
 
 
 def get_database_url_from_env() -> str:
@@ -209,6 +225,13 @@ class PostgresCompatCursor:
         if upper.startswith("PRAGMA "):
             return self._execute_pragma(normalized)
 
+        sqlite_master_table = _sqlite_master_table_name(normalized)
+        if sqlite_master_table == "temp_email_messages":
+            row = CompatRow(["sql"], [_TEMP_EMAIL_MESSAGES_CREATE_SQL])
+            return _StaticCursor([row], rowcount=1)
+        if sqlite_master_table:
+            return _StaticCursor([], rowcount=0)
+
         if upper in {"BEGIN", "BEGIN IMMEDIATE", "BEGIN EXCLUSIVE"}:
             return _StaticCursor([])
         if upper == "COMMIT":
@@ -301,6 +324,12 @@ def translate_sqlite_sql(sql: str) -> str:
     translated = translated.replace("unixepoch('now')", "EXTRACT(EPOCH FROM NOW())")
     translated = translated.replace("strftime('%s','now')", "EXTRACT(EPOCH FROM NOW())")
     translated = translated.replace('strftime("%s","now")', "EXTRACT(EPOCH FROM NOW())")
+    translated = re.sub(
+        r"strftime\(\s*['\"]%Y-%m-%dT%H:%M:%S['\"]\s*,\s*['\"]now['\"]\s*\)",
+        "TO_CHAR(CURRENT_TIMESTAMP, 'YYYY-MM-DD\"T\"HH24:MI:SS')",
+        translated,
+        flags=re.I,
+    )
     translated = translated.replace("datetime('now')", "CURRENT_TIMESTAMP")
     translated = translated.replace(
         "LOWER(SUBSTR(email, INSTR(email, '@') + 1))",
@@ -414,6 +443,15 @@ def _normalize_params(params: Any) -> Any:
 
 def _collapse_sql(sql: str) -> str:
     return " ".join(str(sql or "").strip().split())
+
+
+def _sqlite_master_table_name(sql: str) -> str | None:
+    match = re.match(
+        r"\s*SELECT\s+sql\s+FROM\s+sqlite_master\s+WHERE\s+type\s*=\s*['\"]table['\"]\s+AND\s+name\s*=\s*['\"]([^'\"]+)['\"]",
+        sql,
+        flags=re.I,
+    )
+    return match.group(1) if match else None
 
 
 def restore_sqlite_connect_for_tests() -> None:
