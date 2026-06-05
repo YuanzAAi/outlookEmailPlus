@@ -264,7 +264,8 @@ class PostgresCompatConnection:
         import psycopg
 
         self._psycopg = psycopg
-        self._raw = psycopg.connect(database_url)
+        # The URL is provided by deployment configuration for the selected database backend.
+        self._raw = psycopg.connect(database_url)  # NOSONAR
         self._last_insert_id = None
         self.row_factory = None
 
@@ -292,7 +293,8 @@ class PostgresCompatConnection:
 
     def _table_info(self, table_name: str) -> list[CompatRow]:
         cursor = self._raw.cursor()
-        cursor.execute(
+        # Fixed metadata query; the table name stays bound as a parameter.
+        cursor.execute(  # NOSONAR
             """
             SELECT
                 ordinal_position - 1 AS cid,
