@@ -5,8 +5,10 @@ database deployments such as Neon, set `DATABASE_URL` to a PostgreSQL URL before
 starting the app:
 
 ```env
-DATABASE_URL=postgresql://user:password@host:5432/dbname?sslmode=require
+DATABASE_URL=postgresql://db-user@db-host.example/db-name?sslmode=require
 ```
+
+Use the complete connection string from your database provider when deploying.
 
 ## Behavior
 
