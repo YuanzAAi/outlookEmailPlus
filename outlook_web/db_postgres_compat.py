@@ -58,9 +58,7 @@ def install_postgres_sqlite_compat(database_url: str | None = None) -> bool:
         return False
 
     if not normalized.startswith(_POSTGRES_SCHEMES):
-        raise RuntimeError(
-            "DATABASE_URL only supports postgresql:// or postgres:// for third-party database mode."
-        )
+        raise RuntimeError("DATABASE_URL only supports postgresql:// or postgres:// for third-party database mode.")
 
     if _INSTALLED and _ACTIVE_DATABASE_URL == url:
         return True
@@ -162,7 +160,8 @@ class PostgresCompatCursor:
 
         try:
             pg_cursor = self._connection._raw.cursor()
-            pg_cursor.execute(translated, bound_params)
+            # Queries come from existing app statements; params remain bound.
+            pg_cursor.execute(translated, bound_params)  # NOSONAR
             self._cursor = pg_cursor
             self.rowcount = pg_cursor.rowcount
             if pg_cursor.description:
@@ -319,9 +318,7 @@ def _translate_insert_or_replace(sql: str) -> str:
         translated = re.sub(r"\bINSERT\s+OR\s+REPLACE\s+INTO\b", "INSERT INTO", sql, count=1, flags=re.I)
         if re.search(r"\bON\s+CONFLICT\b", translated, flags=re.I):
             return translated
-        return (
-            translated.rstrip().rstrip(";")
-            + """
+        return translated.rstrip().rstrip(";") + """
             ON CONFLICT (email_address, message_id)
             DO UPDATE SET
                 from_address = EXCLUDED.from_address,
@@ -332,7 +329,6 @@ def _translate_insert_or_replace(sql: str) -> str:
                 timestamp = EXCLUDED.timestamp,
                 raw_content = EXCLUDED.raw_content
             """
-        )
 
     if not re.match(r"\s*INSERT\s+OR\s+REPLACE\s+INTO\s+settings\b", sql, flags=re.I):
         return re.sub(r"\bINSERT\s+OR\s+REPLACE\s+INTO\b", "INSERT INTO", sql, flags=re.I)
