@@ -183,6 +183,8 @@ services:
       - WATCHTOWER_HTTP_API_TOKEN=${WATCHTOWER_HTTP_API_TOKEN:-outlook-mail-plus-watchtower-default}
       - WATCHTOWER_HTTP_API_UPDATE=true
       - WATCHTOWER_CLEANUP=true
+      # Docker 29+ requires client API >= 1.44; Watchtower's historical default is too low
+      - DOCKER_API_VERSION=${WATCHTOWER_DOCKER_API_VERSION:-1.44}
       - WATCHTOWER_HTTP_API_PERIODIC_POLLS=false
     command: --http-api-update --label-enable
     labels:
@@ -209,12 +211,11 @@ Notes:
 3. Switch "Update Method" to "Docker API" in Settings
 4. ⚠️ Please fully understand the security implications before enabling
 
-> ⚠️ **Troubleshooting**: If you see `client version 1.25 is too old. Minimum supported API version is 1.44` in Watchtower logs, your local Watchtower image cache is stale (the embedded Docker client API is too old). Fix:
+> ⚠️ **Troubleshooting**: If you see `client version 1.25 is too old. Minimum supported API version is 1.44` in Watchtower logs, Docker Engine requires API 1.44+ but Watchtower's historical default API version is too low. The current `docker-compose.yml` sets `DOCKER_API_VERSION=${WATCHTOWER_DOCKER_API_VERSION:-1.44}`. Existing deployments can run:
 > ```bash
-> docker compose pull watchtower    # Pull the latest image
-> docker compose up -d watchtower   # Recreate the container
+> docker compose pull watchtower    # Pull the image
+> docker compose up -d watchtower   # Recreate with the new config
 > ```
-> The `docker-compose.yml` in this repo has pinned Watchtower to `1.7.1` to prevent this issue.
 
 #### ClawCloud / Reverse Proxy Deployment Notes
 
@@ -275,6 +276,8 @@ python -m unittest discover -s tests -v
   Watchtower API auth token. **Can be left empty** — both app and watchtower automatically use the same built-in default, making it work out of the box; for production, use a random strong password
 - `WATCHTOWER_API_URL`
   Watchtower API address, default `http://watchtower:8080` (Docker internal network, usually no need to change)
+- `WATCHTOWER_DOCKER_API_VERSION`
+  Docker API version Watchtower uses to connect to Docker Engine. Default: `1.44`; usually no need to change
 - `DOCKER_SELF_UPDATE_ALLOW`
   Whether to enable Docker API self-update, default `false`. ⚠️ Grants container Docker API access when enabled
 - `DOCKER_IMAGE`
