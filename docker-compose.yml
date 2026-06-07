@@ -85,8 +85,9 @@ services:
       - WATCHTOWER_HTTP_API_TOKEN=${WATCHTOWER_HTTP_API_TOKEN:-outlook-mail-plus-watchtower-default}
       - WATCHTOWER_HTTP_API_UPDATE=true
       - WATCHTOWER_CLEANUP=true
-      # Docker 29+ 要求客户端 API >= 1.44；Watchtower 默认值偏低，需显式指定
-      - DOCKER_API_VERSION=${WATCHTOWER_DOCKER_API_VERSION:-1.44}
+      # 可选：Docker 29.0-29.2 若报 client version too old，可在 .env 设置 WATCHTOWER_DOCKER_API_VERSION=1.44
+      # 默认留空以保留 Docker API 自动协商，避免旧 Docker Engine 被强制使用过高 API 版本
+      - DOCKER_API_VERSION=${WATCHTOWER_DOCKER_API_VERSION:-}
       # 禁用定时轮询，仅通过界面触发更新
       - WATCHTOWER_HTTP_API_PERIODIC_POLLS=false
     command: --http-api-update --label-enable
