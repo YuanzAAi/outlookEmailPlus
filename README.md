@@ -77,7 +77,7 @@ OutlookMail Plus 是一款面向个人与团队的注册邮箱管理器。
 - 当前模式固定面向个人 Microsoft 账号：Public Client、`tenant=consumers`、不支持 `client_secret`
 - Azure 应用注册的 **Supported account types** 应选择 **Accounts in any identity provider or organizational directory and personal Microsoft accounts**；仅组织目录会报 `unauthorized_client`，而 **Personal Microsoft accounts only** 会在写入前 `/common` 验证阶段报 `AADSTS9002331`
 - 如果 Azure 门户在切换 Supported account types 时提示 `Property api.requestedAccessTokenVersion is invalid`，请到 **Manifest** 中把 `api.requestedAccessTokenVersion` 改为 `2`
-- 如果已经开启 Public Client 仍然报"必须包含 `client_secret`"，说明当前回调仍被 Azure 视为机密 Web 客户端；此时应改用 **Mobile and desktop applications** 平台的 public redirect（如 `http://localhost`），并在工具里走手动粘贴回调 URL
+- 如果已经开启 Public Client仍然报"必须包含 `client_secret`"，说明当前回调仍被 Azure 视为机密 Web 客户端；此时应改用 **Mobile and desktop applications** 平台的 public redirect（如 `http://localhost`），并在工具里走手动粘贴回调 URL
 - 如果遇到 `AADSTS70000`（scope 未授权/失效），优先检查"授权时 scope"和"验证时 scope"是否一致，并重新执行一次 **强制 Consent** 授权
 - Graph 场景建议最小权限：**offline_access + Mail.Read + User.Read**；如需 IMAP 再额外补 **Office 365 Exchange Online → IMAP.AccessAsUser.All**
 - 支持 Graph / IMAP Scope 预设、错误引导、JWT audience/scope 诊断；前端默认推荐 **Graph 邮件预设**（后端环境变量 fallback 保持 IMAP 兼容 Scope）
@@ -188,6 +188,8 @@ services:
       - WATCHTOWER_HTTP_API_TOKEN=${WATCHTOWER_HTTP_API_TOKEN:-outlook-mail-plus-watchtower-default}
       - WATCHTOWER_HTTP_API_UPDATE=true
       - WATCHTOWER_CLEANUP=true
+      # Docker 29+ 要求客户端 API >= 1.44；Watchtower 默认值偏低，需显式指定
+      - DOCKER_API_VERSION=${WATCHTOWER_DOCKER_API_VERSION:-1.44}
       - WATCHTOWER_HTTP_API_PERIODIC_POLLS=false
     command: --http-api-update --label-enable
     labels:
@@ -214,12 +216,11 @@ networks:
 3. 在设置页选择"更新方式"为"Docker API"
 4. ⚠️ 请充分了解安全风险后再启用
 
-> ⚠️ **常见问题**：如果 Watchtower 容器日志中出现 `client version 1.25 is too old. Minimum supported API version is 1.44` 错误，说明你本地缓存了旧版 Watchtower 镜像（内嵌的 Docker 客户端 API 版本过旧）。解决方法：
+> ⚠️ **常见问题**：如果 Watchtower 容器日志中出现 `client version 1.25 is too old. Minimum supported API version is 1.44` 错误，说明当前 Docker Engine 要求 Docker API 1.44+，而 Watchtower 历史默认 API 版本偏低。当前 `docker-compose.yml` 已内置 `DOCKER_API_VERSION=${WATCHTOWER_DOCKER_API_VERSION:-1.44}`；已部署用户可执行：
 > ```bash
-> docker compose pull watchtower    # 拉取最新镜像
-> docker compose up -d watchtower   # 重建容器
+> docker compose pull watchtower    # 拉取镜像
+> docker compose up -d watchtower   # 用新配置重建容器
 > ```
-> 本项目 `docker-compose.yml` 已固定 Watchtower 版本为 `1.7.1`，可避免此类问题。
 
 #### ClawCloud / 反向代理部署注意事项
 
@@ -284,6 +285,8 @@ python -m unittest discover -s tests -v
   Watchtower API 鉴权令牌。**可留空**，留空时 app 和 watchtower 两边自动使用同一内置默认值，开箱即用；生产环境建议设置随机强密码
 - `WATCHTOWER_API_URL`
   Watchtower API 地址，默认 `http://watchtower:8080`（Docker 内部网络，通常无需修改）
+- `WATCHTOWER_DOCKER_API_VERSION`
+  Watchtower 连接 Docker Engine 时使用的 Docker API 版本，默认 `1.44`，通常无需修改
 - `DOCKER_SELF_UPDATE_ALLOW`
   是否启用 Docker API 自更新功能，默认 `false`。⚠️ 启用后容器可访问 Docker API，存在安全风险
 - `DOCKER_IMAGE`
