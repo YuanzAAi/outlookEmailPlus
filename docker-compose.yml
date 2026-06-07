@@ -83,6 +83,8 @@ services:
     environment:
       # 与上方 app 服务的 WATCHTOWER_HTTP_API_TOKEN 保持一致；留空均使用同一内置默认值
       - WATCHTOWER_HTTP_API_TOKEN=${WATCHTOWER_HTTP_API_TOKEN:-outlook-mail-plus-watchtower-default}
+      # Docker Engine 29+ 要求 Docker API >= 1.44；Watchtower 默认 API 版本较低，需显式覆盖
+      - DOCKER_API_VERSION=${WATCHTOWER_DOCKER_API_VERSION:-1.44}
       - WATCHTOWER_HTTP_API_UPDATE=true
       - WATCHTOWER_CLEANUP=true
       # 禁用定时轮询，仅通过界面触发更新
