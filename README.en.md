@@ -183,8 +183,9 @@ services:
       - WATCHTOWER_HTTP_API_TOKEN=${WATCHTOWER_HTTP_API_TOKEN:-outlook-mail-plus-watchtower-default}
       - WATCHTOWER_HTTP_API_UPDATE=true
       - WATCHTOWER_CLEANUP=true
-      # Docker 29+ requires client API >= 1.44; Watchtower's historical default is too low
-      - DOCKER_API_VERSION=${WATCHTOWER_DOCKER_API_VERSION:-1.44}
+      # Optional: set WATCHTOWER_DOCKER_API_VERSION=1.44 in .env if Docker 29.0-29.2 reports client version too old
+      # Empty by default to keep Docker API negotiation and avoid forcing too-new API versions on older engines
+      - DOCKER_API_VERSION=${WATCHTOWER_DOCKER_API_VERSION:-}
       - WATCHTOWER_HTTP_API_PERIODIC_POLLS=false
     command: --http-api-update --label-enable
     labels:
@@ -211,11 +212,12 @@ Notes:
 3. Switch "Update Method" to "Docker API" in Settings
 4. ⚠️ Please fully understand the security implications before enabling
 
-> ⚠️ **Troubleshooting**: If you see `client version 1.25 is too old. Minimum supported API version is 1.44` in Watchtower logs, Docker Engine requires API 1.44+ but Watchtower's historical default API version is too low. The current `docker-compose.yml` sets `DOCKER_API_VERSION=${WATCHTOWER_DOCKER_API_VERSION:-1.44}`. Existing deployments can run:
+> ⚠️ **Troubleshooting**: If you see `client version 1.25 is too old. Minimum supported API version is 1.44` in Watchtower logs, Docker Engine requires a newer Docker API version than Watchtower's default client API. To avoid breaking older Docker Engines, `docker-compose.yml` keeps the override empty by default. Set `WATCHTOWER_DOCKER_API_VERSION=1.44` in `.env`, then run:
 > ```bash
 > docker compose pull watchtower    # Pull the image
 > docker compose up -d watchtower   # Recreate with the new config
 > ```
+> If you are still on Docker 24 or older, do not set this override, or set it to an API version supported by that engine.
 
 #### ClawCloud / Reverse Proxy Deployment Notes
 
@@ -277,7 +279,7 @@ python -m unittest discover -s tests -v
 - `WATCHTOWER_API_URL`
   Watchtower API address, default `http://watchtower:8080` (Docker internal network, usually no need to change)
 - `WATCHTOWER_DOCKER_API_VERSION`
-  Docker API version Watchtower uses to connect to Docker Engine. Default: `1.44`; usually no need to change
+  Optional Docker API version override for Watchtower. Default: empty, preserving API negotiation; set to `1.44` only if Docker 29.0-29.2 reports `client version too old`
 - `DOCKER_SELF_UPDATE_ALLOW`
   Whether to enable Docker API self-update, default `false`. ⚠️ Grants container Docker API access when enabled
 - `DOCKER_IMAGE`
