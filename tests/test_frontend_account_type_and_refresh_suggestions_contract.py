@@ -52,6 +52,8 @@ class FrontendAccountTypeContractTests(unittest.TestCase):
         )
         self.assertIn('let tokenBadge = `<span class="badge badge-gray">IMAP</span>`;', groups_js)
         self.assertIn("if (supportsTokenRefresh) {", groups_js)
+        self.assertIn("translateAppTextLocal('未刷新')", groups_js)
+        self.assertNotIn("– ${translateAppTextLocal('未知')}", groups_js)
         self.assertIn(
             '<span class="account-api-tag">${acc.method || defaultMethodLabel}</span>',
             groups_js,

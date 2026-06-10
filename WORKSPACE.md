@@ -4,6 +4,45 @@
 
 ---
 
+## 2026-06-10
+
+### 操作记录
+
+#### 277. Issue #78 导入邮箱初始状态显示“未知”修复
+
+**时间**：2026-06-10
+
+**操作背景**：
+CodeXWeb 自动巡检在最近活跃的 `ZeroPointSix/EnsoAI`、`ZeroPointSix/outlookEmailPlus`、`ZeroPointSix/Cliprompt` 中只认领并处理 `outlookEmailPlus` Issue #78（“导入了邮箱，显示未知？”）。认领评论：https://github.com/ZeroPointSix/outlookEmailPlus/issues/78#issuecomment-4672692172
+
+**设计与范围确认**：
+
+1. 已核对 Issue #60 号池管理 FD/TD/TDD/TODO 与现有 `pool_admin` 实现。
+2. “移出号池”按设计只清空 `pool_status`，账号仍保留在账号管理中；因此“20 个号池移出 2 个，账号管理仍显示 20 个”属于既有设计，不在本次改动范围。
+3. 本轮只修复普通账号卡片中可刷新 Outlook 账号在尚未有 token 状态时显示“未知”的文案问题，避免用户误解为导入账号类型未知或导入异常。
+
+**修改内容**：
+
+1. `static/js/features/groups.js`：将可刷新 Outlook 账号的默认 token 状态徽标从“未知”改为“未刷新”。
+2. `static/js/i18n.js`：新增英文翻译 `未刷新 -> Not refreshed`。
+3. `tests/test_frontend_account_type_and_refresh_suggestions_contract.py`：补充前端合约断言，确保默认状态使用“未刷新”且不回退到旧的“未知”。
+
+**验证**：
+
+1. 针对性测试通过：`.venv/bin/python -m pytest tests/test_frontend_account_type_and_refresh_suggestions_contract.py tests/test_auto_import.py tests/test_pool_admin_service.py` → 40 passed。
+2. 完整测试已在远程沙箱运行：`.venv/bin/python -m pytest` → 1523 passed, 7 skipped, 4 failed。4 个失败均来自 `tests/test_pool_cf_real_e2e.py`，错误为真实 CF Worker 上游创建邮箱返回 HTTP 400 / `UPSTREAM_BAD_PAYLOAD`；仓库历史记录中同文件已作为外部真实 E2E 已知失败出现，本次未改动 CF Worker、外部池或删除逻辑。
+3. 运行完整测试前补齐了 Playwright、Chromium 与浏览器系统依赖；浏览器流程测试已执行并通过。
+
+**后续记录**：
+
+- 分支：`codexweb/issue-78-import-token-state-label`
+- Draft PR：待分支推送后补充
+- 不自动合并。
+
+**是否改动代码**：是（前端状态文案、i18n 与前端合约测试）
+
+---
+
 ## 2026-05-19
 
 ### 操作记录

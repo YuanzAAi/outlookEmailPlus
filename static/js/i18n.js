@@ -861,6 +861,7 @@
         '收件箱为空': 'Inbox is empty',
         '暂无邮件': 'No messages yet',
         '未知': 'Unknown',
+        '未刷新': 'Not refreshed',
         '未知错误': 'Unknown error',
         '未知发件人': 'Unknown sender',
         '有效': 'Valid',

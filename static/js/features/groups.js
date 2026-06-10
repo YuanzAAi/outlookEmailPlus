@@ -289,7 +289,7 @@
 
                 let tokenBadge = `<span class="badge badge-gray">IMAP</span>`;
                 if (supportsTokenRefresh) {
-                    tokenBadge = `<span class="badge badge-gray">– ${translateAppTextLocal('未知')}</span>`;
+                    tokenBadge = `<span class="badge badge-gray">– ${translateAppTextLocal('未刷新')}</span>`;
                     if (acc.token_status === 'valid') {
                         tokenBadge = `<span class="badge badge-green">✓ ${translateAppTextLocal('有效')}</span>`;
                     } else if (acc.token_status === 'invalid' || acc.token_status === 'expired') {
