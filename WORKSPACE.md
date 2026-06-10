@@ -4,6 +4,48 @@
 
 ---
 
+## 2026-06-10
+
+### 操作记录
+
+#### 277. PR #81 Watchtower Docker API 版本兼容巡检
+
+**时间**：2026-06-10 14:05 PDT
+
+**操作对象**：PR #81 — `[codex] Fix Watchtower Docker API version for Docker 29`
+
+**认领记录**：CodeXWeb 自动巡检认领评论 https://github.com/ZeroPointSix/outlookEmailPlus/pull/81#issuecomment-4674759805
+
+**操作背景**：
+本轮自动巡检只处理 1 个对象。PR #81 已有维护者评论要求补充确认 Watchtower/Docker API 兼容性与测试结果，因此本轮仅围绕该 PR 的 `DOCKER_API_VERSION` 配置和验证边界做复核，不切换到其他 Issue/PR。
+
+**复核依据**：
+
+1. Docker CLI 官方文档说明 `DOCKER_API_VERSION` 可覆盖协商得到的 API 版本。
+2. Docker Engine API 官方版本矩阵显示 Docker Engine 29.0/29.1/29.2 的最低 API 版本为 1.44。
+3. PR #81 当前实现将 Watchtower 环境变量设置为 `DOCKER_API_VERSION=${WATCHTOWER_DOCKER_API_VERSION:-1.44}`，并在 `.env.example` 中提供可覆盖项，符合上述兼容性方向。
+
+**验证结果**：
+
+1. `.venv/bin/python -m unittest tests.test_watchtower_docker_api_config -v` → 2 tests passed。
+2. `.venv/bin/python -m unittest tests.test_version_update -v` → 51 tests passed。
+3. `.venv/bin/python -m pytest -q`（启动本地 Flask 测试服务后执行）→ 1524 passed, 7 skipped, 31 subtests passed, 5 failed, 用时 669.49s。
+4. 全量 pytest 失败项：
+   - `tests/test_csrf_browser_recovery.py::CsrfBrowserRecoveryTests::test_browser_recovers_after_stale_csrf_token_and_retries_once`：等待“导入完成” toast 超时，日志显示 stale CSRF 后第二次 `/api/accounts` 仍返回 400。
+   - `tests/test_pool_cf_real_e2e.py::RealCFWorkerE2ETests::test_01_claim_random_creates_real_cf_mailbox`。
+   - `tests/test_pool_cf_real_e2e.py::RealCFWorkerE2ETests::test_02_claim_then_read_messages_empty`。
+   - `tests/test_pool_cf_real_e2e.py::RealCFWorkerE2ETests::test_03_claim_complete_deletes_remote_mailbox`。
+   - `tests/test_pool_cf_real_e2e.py::RealCFWorkerE2ETests::test_04_claim_complete_timeout_skips_delete`。
+5. Docker/Watchtower 容器级 smoke 未能执行：沙箱远程环境没有 `docker`/`docker compose` CLI，无法真实拉起 Watchtower 容器验证实际镜像行为。
+
+**结论**：
+- 本轮未修改 PR 的业务代码或 Docker 配置；只补充 Workspace 巡检记录。
+- PR #81 的 Watchtower Docker API 配置与 Docker 官方文档方向一致，聚焦回归测试通过。
+- 完整 pytest 存在 5 个失败；从失败文件和错误看，未直接指向 Watchtower Docker API 配置变更，但仍需在 PR 中如实保留为验证风险。
+- 不自动合并 PR。
+
+**是否改动代码**：否（仅补充本 Workspace 记录）
+
 ## 2026-05-19
 
 ### 操作记录
