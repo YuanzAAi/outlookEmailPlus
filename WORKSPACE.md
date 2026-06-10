@@ -4,6 +4,38 @@
 
 ---
 
+## 2026-06-10
+
+### 操作记录
+
+#### 277. PR #77 Postgres/Neon review 启动路径回归补测
+
+**时间**：2026-06-10
+
+**操作背景**：
+CodeXWeb 自动巡检检查最近活跃的 3 个仓库后，本轮只认领并处理 `ZeroPointSix/outlookEmailPlus` PR #77。认领评论：<https://github.com/ZeroPointSix/outlookEmailPlus/pull/77#issuecomment-4673743558>。处理目标是 review 评论 `4670508474` 提到的高优先级补测：用 fake psycopg 覆盖 `DATABASE_URL`、`install_postgres_sqlite_compat()` 与 `init_db()` 的完整启动路径，确保最终发送给 PostgreSQL 的 SQL 不再包含 SQLite-only 片段。
+
+**修改内容**：
+
+1. **outlook_web/db_postgres_compat.py**：补齐 email 字符串函数翻译，覆盖小写/大小写混用的 `instr(email, '@')` 与 `substr(...)`，转换为 PostgreSQL `POSITION` / `SPLIT_PART`。
+2. **tests/test_db_postgres_compat.py**：新增 email 函数翻译单测；新增 fake psycopg 启动路径回归测试，直接运行 `db.init_db()` 并断言最终 SQL 中不含 `sqlite_master`、`PRAGMA`、`strftime`、`INSERT OR REPLACE`、`INSERT OR IGNORE`、`AUTOINCREMENT`、`COLLATE NOCASE`、`unixepoch`、`instr(`、`substr(`。
+
+**验证结果**：
+
+1. `.venv/bin/python -m unittest tests.test_db_postgres_compat -v` → 21 passed。
+2. `.venv/bin/python -m py_compile outlook_web/db_postgres_compat.py tests/test_db_postgres_compat.py` → 通过。
+3. `git diff --check` → 通过。
+4. `.venv/bin/python -m pytest -q`（补装 pytest、Playwright，并启动本地服务覆盖 UI 脚本）→ 1544 passed, 7 skipped, 31 subtests passed；4 failed，均为 `tests/test_pool_cf_real_e2e.py::RealCFWorkerE2ETests`，失败原因是真实 Cloudflare Worker 上游返回 HTTP 400 / `UPSTREAM_BAD_PAYLOAD`，与本次 Postgres/Neon SQL 翻译和 `init_db()` 启动路径补测不相邻。
+
+**剩余风险**：
+
+- 本轮没有连接真实 Neon/PostgreSQL 实例做 smoke test；review 建议的 fake psycopg 启动路径回归已覆盖并通过。
+- 真实 CF Worker E2E 仍受外部上游状态影响，需由对应服务侧继续排查。
+
+**是否改动代码**：是（Postgres 兼容层 + 回归测试）
+
+---
+
 ## 2026-05-19
 
 ### 操作记录

@@ -333,15 +333,38 @@ def translate_sqlite_sql(sql: str) -> str:
         flags=re.I,
     )
     translated = translated.replace("datetime('now')", "CURRENT_TIMESTAMP")
-    translated = translated.replace(
-        "LOWER(SUBSTR(email, INSTR(email, '@') + 1))",
-        "LOWER(SPLIT_PART(email, '@', 2))",
-    )
-    translated = translated.replace("INSTR(email, '@')", "POSITION('@' IN email)")
+    translated = _translate_email_sqlite_functions(translated)
     translated = _translate_insert_or_replace(translated)
     translated = _translate_insert_or_ignore(translated)
     translated = _replace_qmark_placeholders(translated)
     return translated
+
+
+def _translate_email_sqlite_functions(sql: str) -> str:
+    translated = re.sub(
+        r"\bLOWER\s*\(\s*SUBSTR\s*\(\s*email\s*,\s*INSTR\s*\(\s*email\s*,\s*['\"]@['\"]\s*\)\s*\+\s*1\s*\)\s*\)",
+        "LOWER(SPLIT_PART(email, '@', 2))",
+        sql,
+        flags=re.I,
+    )
+    translated = re.sub(
+        r"\bSUBSTR\s*\(\s*email\s*,\s*1\s*,\s*INSTR\s*\(\s*email\s*,\s*['\"]@['\"]\s*\)\s*-\s*1\s*\)",
+        "SPLIT_PART(email, '@', 1)",
+        translated,
+        flags=re.I,
+    )
+    translated = re.sub(
+        r"\bSUBSTR\s*\(\s*email\s*,\s*INSTR\s*\(\s*email\s*,\s*['\"]@['\"]\s*\)\s*\+\s*1\s*\)",
+        "SPLIT_PART(email, '@', 2)",
+        translated,
+        flags=re.I,
+    )
+    return re.sub(
+        r"\bINSTR\s*\(\s*email\s*,\s*['\"]@['\"]\s*\)",
+        "POSITION('@' IN email)",
+        translated,
+        flags=re.I,
+    )
 
 
 def _translate_insert_or_replace(sql: str) -> str:

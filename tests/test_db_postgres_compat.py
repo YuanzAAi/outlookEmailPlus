@@ -72,6 +72,74 @@ def make_connection(raw):
     return connection
 
 
+class RecordingPgCursor:
+    def __init__(self, raw):
+        self.raw = raw
+        self.description = None
+        self.rows = []
+        self.rowcount = -1
+        self.closed = False
+
+    def execute(self, sql, params=None):
+        self.raw.executions.append((sql, params))
+        lowered = sql.lower().lstrip()
+        self.description = None
+        self.rows = []
+        self.rowcount = 1
+
+        if "returning id" in lowered:
+            self.description = [types.SimpleNamespace(name="id")]
+            self.rows = [(len(self.raw.executions),)]
+        elif lowered.startswith("select"):
+            name = "c" if "count(" in lowered else "value"
+            self.description = [types.SimpleNamespace(name=name)]
+            self.rowcount = 0
+
+        return self
+
+    def fetchall(self):
+        rows = list(self.rows)
+        self.rows.clear()
+        return rows
+
+    def close(self):
+        self.closed = True
+
+
+class RecordingRawConnection:
+    def __init__(self):
+        self.executions = []
+        self.commits = 0
+        self.rollbacks = 0
+        self.closes = 0
+
+    def cursor(self):
+        return RecordingPgCursor(self)
+
+    def commit(self):
+        self.commits += 1
+
+    def rollback(self):
+        self.rollbacks += 1
+
+    def close(self):
+        self.closes += 1
+
+
+class RecordingPsycopg:
+    IntegrityError = FakeIntegrityError
+
+    def __init__(self):
+        self.database_urls = []
+        self.connections = []
+
+    def connect(self, database_url):
+        self.database_urls.append(database_url)
+        raw = RecordingRawConnection()
+        self.connections.append(raw)
+        return raw
+
+
 class PostgresCompatSqlTranslationTests(unittest.TestCase):
     def tearDown(self) -> None:
         compat.restore_sqlite_connect_for_tests()
@@ -161,6 +229,29 @@ class PostgresCompatSqlTranslationTests(unittest.TestCase):
         self.assertIn("TO_CHAR(CURRENT_TIMESTAMP", sql)
         self.assertIn('YYYY-MM-DD"T"HH24:MI:SS', sql)
         self.assertNotIn("strftime", sql)
+
+    def test_email_address_sqlite_helpers_become_postgres_functions(self):
+        sql = compat.translate_sqlite_sql("""
+            UPDATE temp_emails
+            SET prefix = substr(email, 1, instr(email, '@') - 1),
+                domain = substr(email, instr(email, '@') + 1)
+            WHERE instr(email, '@') > 1
+            """)
+
+        self.assertIn("prefix = SPLIT_PART(email, '@', 1)", sql)
+        self.assertIn("domain = SPLIT_PART(email, '@', 2)", sql)
+        self.assertIn("POSITION('@' IN email) > 1", sql)
+        self.assertNotIn("instr(", sql.lower())
+        self.assertNotIn("substr(", sql.lower())
+
+        domain_sql = compat.translate_sqlite_sql(
+            "UPDATE accounts SET email_domain = LOWER(SUBSTR(email, INSTR(email, '@') + 1)) "
+            "WHERE INSTR(email, '@') > 1"
+        )
+        self.assertIn("LOWER(SPLIT_PART(email, '@', 2))", domain_sql)
+        self.assertIn("POSITION('@' IN email) > 1", domain_sql)
+        self.assertNotIn("instr(", domain_sql.lower())
+        self.assertNotIn("substr(", domain_sql.lower())
 
     def test_compat_row_behaves_like_sqlite_row_for_common_access(self):
         row = compat.CompatRow(["id", "subject"], [7, "Hello"])
@@ -289,6 +380,54 @@ class PostgresCompatSqlTranslationTests(unittest.TestCase):
             sql,
             "SELECT '?' AS literal, 'it''s ?' AS escaped, value FROM settings WHERE key = %s",
         )
+
+    def test_postgres_shim_runs_full_init_db_without_sqlite_only_sql(self):
+        fake_psycopg = RecordingPsycopg()
+
+        with patch.dict(sys.modules, {"psycopg": fake_psycopg}):
+            with patch.dict(
+                os.environ,
+                {
+                    "DATABASE_URL": "postgresql://example/db",
+                    "SECRET_KEY": "test-secret-key",
+                    "LOGIN_PASSWORD": "admin123",
+                    "TEMP_MAIL_API_KEY": "test-temp-api-key",
+                },
+                clear=False,
+            ):
+                self.assertTrue(compat.install_postgres_sqlite_compat())
+                from outlook_web import db
+
+                db.init_db("/tmp/ignored.sqlite")
+
+        self.assertEqual(fake_psycopg.database_urls, ["postgresql://example/db"])
+        raw = fake_psycopg.connections[0]
+        executed_sql = "\n".join(sql for sql, _ in raw.executions)
+
+        self.assertGreater(len(raw.executions), 100)
+        self.assertGreaterEqual(raw.commits, 1)
+        self.assertEqual(raw.rollbacks, 0)
+        self.assertEqual(raw.closes, 1)
+        self.assertIn("CREATE TABLE IF NOT EXISTS telegram_push_log", executed_sql)
+        self.assertIn("CREATE TABLE IF NOT EXISTS temp_email_messages", executed_sql)
+        self.assertIn("TO_CHAR(CURRENT_TIMESTAMP", executed_sql)
+        self.assertIn("ON CONFLICT (key) DO UPDATE", executed_sql)
+
+        sqlite_only_fragments = [
+            "sqlite_master",
+            "PRAGMA ",
+            "strftime",
+            "INSERT OR REPLACE",
+            "INSERT OR IGNORE",
+            "AUTOINCREMENT",
+            "COLLATE NOCASE",
+            "unixepoch",
+            "instr(",
+            "substr(",
+        ]
+        lowered_sql = executed_sql.lower()
+        for fragment in sqlite_only_fragments:
+            self.assertNotIn(fragment.lower(), lowered_sql)
 
 
 if __name__ == "__main__":
