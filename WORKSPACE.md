@@ -36,7 +36,7 @@ CodeXWeb 自动巡检在最近活跃的 `ZeroPointSix/EnsoAI`、`ZeroPointSix/ou
 **后续记录**：
 
 - 分支：`codexweb/issue-78-import-token-state-label`
-- Draft PR：待分支推送后补充
+- Draft PR：https://github.com/ZeroPointSix/outlookEmailPlus/pull/82
 - 不自动合并。
 
 **是否改动代码**：是（前端状态文案、i18n 与前端合约测试）
