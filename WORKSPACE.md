@@ -4,6 +4,51 @@
 
 ---
 
+## 2026-06-11
+
+### 操作记录
+
+#### 277. PR #67 自动巡检认领并处理 IMAP detail 缺失回归
+
+**时间**：2026-06-11
+
+**操作背景**：
+本轮 GitHub Issue/PR 自动巡检先检查最近活跃的 3 个非归档仓库：`ZeroPointSix/outlookEmailPlus`、`ZeroPointSix/remote-dev-mcp`、`ZeroPointSix/modeltestweb`。筛选 open Issues/PRs 后，仅认领并处理 `ZeroPointSix/outlookEmailPlus` PR #67 上的 review comment `4677387316`。已在 PR 留下认领评论 `4677822431`，说明 CodeXWeb 本轮只处理这一项，不自动合并。
+
+**设计与上下文依据**：
+
+1. `README.md`：系统会拉取最新邮件并提取验证码，IMAP 账号路径应继续支持。
+2. `WORKSPACE.md` 既有 Issue #52 记录：最新邮件选择影响验证码命中率。
+3. `docs/TD/2026-04-11-邮件获取性能优化TD.md`：IMAP 复用路径返回 `emails + detail`，业务侧以最新邮件继续提取。
+4. `docs/TDD/2026-04-11-邮件获取性能优化-TDD.md`：覆盖 IMAP 连接复用与最新邮件读取语义。
+5. Google Drive 检索未找到更直接的 PR #67/IMAP detail mismatch 设计文档，因此以仓库当前实现和上述仓库文档为准。
+
+**修改内容**：
+
+1. `outlook_web/services/verification_channel_routing.py`：当 IMAP batch 返回 `latest_id`，但 `detail` 为 `None`、空对象或不含同一 `id` 时，都会按 `latest_id` 重新获取详情。
+2. `tests/test_verification_extract_log.py`：新增回归测试 `test_imap_missing_detail_refetches_latest_message_detail`，覆盖 `emails` 有最新邮件但 `detail=None` 的场景，断言会重新按 message id `5` 获取详情并提取验证码 `701280`。
+
+**验证结果**：
+
+1. `git diff --check`：通过。
+2. `.venv/bin/python -m pytest tests/test_imap_connection_reuse.py tests/test_verification_extract_log.py -q`：19 passed。
+3. `.venv/bin/python -m compileall -q outlook_web web_outlook_app.py outlook_mail_reader.py start.py tests && .venv/bin/python -m unittest discover -s tests -v`：执行完成，退出码 1；本次新增/相关验证码提取测试全部通过，失败集中在既有真实 CF Worker E2E。
+4. `.venv/bin/python -m unittest tests.test_pool_cf_real_e2e -v`：单独复现 4 failures，首个失败为 `UPSTREAM_BAD_PAYLOAD`，上游返回 `CF Worker 创建邮箱失败 HTTP 400`，与本次 IMAP detail 重取逻辑无直接交集。
+5. 根目录 `pytest -q`：不作为最终验证依据；它会收集根级 Playwright 脚本并要求预先启动 `localhost:5000`，与仓库 CI/README 指定的 `tests/` unittest 路径不同。
+
+**沙箱执行备注**：
+
+1. 新建沙箱工作区时遇到 `Unable to reserve default workspace ports`，改用已有远程工作区继续验证。
+2. 曾有一次命令因默认工作区切换到其他 workspace 而找不到目标目录，后续均显式传入 workspace id。
+3. 为运行浏览器相关测试，远程环境中补装了 Playwright、Chromium 与系统依赖。
+
+**结论**：
+本轮只处理 PR #67。补丁符合 review comment `4677387316` 的范围：有 `latest_id` 时，即使 batch detail 缺失也会重新取最新邮件详情。目标回归测试和相关 IMAP/验证码测试通过；全量 unittest 仍受既有真实 CF Worker 上游 400 失败影响，需要在独立任务中处理或隔离。
+
+**是否改动代码**：是（IMAP detail 重取条件 + 回归测试 + 本记录）
+
+---
+
 ## 2026-05-19
 
 ### 操作记录

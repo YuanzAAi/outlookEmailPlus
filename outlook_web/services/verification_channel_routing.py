@@ -412,7 +412,7 @@ def extract_verification_for_outlook(
         if channel.startswith("imap_"):
             detail = channel_result.get("detail")
             detail_id = str((detail or {}).get("id") or "")
-            if latest_id and detail_id and detail_id != latest_id:
+            if latest_id and detail_id != latest_id:
                 detail = fetch_email_detail_for_channel(
                     account=account,
                     channel=channel,
