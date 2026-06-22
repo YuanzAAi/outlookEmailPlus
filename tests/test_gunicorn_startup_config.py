@@ -4,7 +4,6 @@ import tempfile
 import unittest
 from pathlib import Path
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -20,8 +19,7 @@ class GunicornStartupConfigTests(unittest.TestCase):
             args_file = tmp / "gunicorn.args"
             fake_gunicorn = tmp / "gunicorn"
             fake_gunicorn.write_text(
-                "#!/bin/sh\n"
-                "printf '%s\\n' \"$@\" > \"$GUNICORN_ARGS_FILE\"\n",
+                "#!/bin/sh\n" 'printf \'%s\\n\' "$@" > "$GUNICORN_ARGS_FILE"\n',
                 encoding="utf-8",
             )
             fake_gunicorn.chmod(0o755)
