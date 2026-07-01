@@ -59,6 +59,35 @@ class TempMailboxPoolTests(unittest.TestCase):
         finally:
             conn.close()
 
+    def _make_legacy_null_domain_email(self, domain):
+        # 模拟老库：active 临时邮箱但 domain/prefix 为 NULL（v24 之前入库）
+        conn = self.create_conn()
+        try:
+            local = f"legacy{secrets.token_hex(4)}"
+            email = f"{local}@{domain}"
+            conn.execute(
+                """
+                INSERT INTO temp_emails (email, status, mailbox_type, source, prefix, domain)
+                VALUES (?, 'active', 'user', 'custom_domain_temp_mail', NULL, NULL)
+                """,
+                (email,),
+            )
+            conn.commit()
+            row = conn.execute("SELECT id FROM temp_emails WHERE email = ?", (email,)).fetchone()
+            return row["id"], email
+        finally:
+            conn.close()
+
+    def test_claim_random_domain_filter_matches_null_domain_row(self):
+        # 回归 (Issue #85 审查)：domain 为 NULL 的历史行按 email_domain 领取时不应漏掉
+        domain = f"legacy{secrets.token_hex(4)}.test"
+        temp_id, email = self._make_legacy_null_domain_email(domain)
+        result = self.pool_service.claim_random(
+            caller_id="reg_bot", task_id="t_null_dom", provider="custom", email_domain=domain
+        )
+        self.assertEqual(result["email"], email)
+        self.assertEqual(result["id"], temp_id + self.pool_repo.TEMP_POOL_ID_OFFSET)
+
     def test_claim_random_custom_claims_temp_mailbox(self):
         temp_id, email, domain = self._make_temp_email()
         result = self.pool_service.claim_random(caller_id="reg_bot", task_id="t_claim", provider="custom", email_domain=domain)

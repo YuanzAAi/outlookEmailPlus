@@ -1212,6 +1212,18 @@ def init_db(database_path: Optional[str] = None):
             CREATE INDEX IF NOT EXISTS idx_temp_emails_claim_token
             ON temp_emails(claim_token)
             """)
+        # 回填历史行的 domain/prefix：老库存在 domain IS NULL 的临时邮箱，
+        # 否则按 email_domain 领取时会被过滤而继续返回 NO_AVAILABLE_ACCOUNT。
+        cursor.execute("""
+            UPDATE temp_emails
+            SET domain = substr(email, instr(email, '@') + 1)
+            WHERE (domain IS NULL OR domain = '') AND instr(email, '@') > 0
+            """)
+        cursor.execute("""
+            UPDATE temp_emails
+            SET prefix = substr(email, 1, instr(email, '@') - 1)
+            WHERE (prefix IS NULL OR prefix = '') AND instr(email, '@') > 0
+            """)
 
         # 迁移现有明文数据为加密数据
         migrate_sensitive_data(conn)

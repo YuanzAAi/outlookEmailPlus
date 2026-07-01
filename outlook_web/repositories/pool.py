@@ -681,7 +681,8 @@ def claim_temp_mailbox_atomic(
     """
     params: list = []
     if email_domain:
-        sql += " AND domain = ? COLLATE NOCASE"
+        # 兼容 domain 为空的历史行：回退用 email 的 @ 后缀派生域名匹配
+        sql += " AND lower(COALESCE(NULLIF(domain, '')," " substr(email, instr(email, '@') + 1))) = ?"
         params.append(email_domain.strip().lower())
     sql += " ORDER BY RANDOM() LIMIT 1"
 
