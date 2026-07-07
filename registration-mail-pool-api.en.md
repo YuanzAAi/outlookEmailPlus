@@ -104,7 +104,8 @@ Time fields use ISO 8601, for example:
 
 | Endpoint | Purpose | Recommended |
 | --- | --- | --- |
-| `POST /api/external/pool/claim-random` | claim a mailbox | Common |
+| `POST /api/external/pool/claim-random` | claim a mailbox, optionally filtered by domain | Common |
+| `POST /api/external/pool/claim-domain` | claim a mailbox from a required domain | Common |
 | `POST /api/external/pool/claim-release` | release a mailbox | Common |
 | `POST /api/external/pool/claim-complete` | submit the task result | Common |
 | `GET /api/external/pool/stats` | inspect pool counts | Optional |
@@ -324,12 +325,15 @@ Request body:
 | `caller_id` | string | Yes | caller instance, node, or worker identity |
 | `task_id` | string | Yes | unique task ID |
 | `provider` | string | No | provider filter: `outlook` / `imap` / `custom` / `cloudflare_temp_mail` |
+| `project_key` | string | No | project-level reuse and duplicate-prevention context |
+| `email_domain` | string | No | mailbox domain filter; when provided, only eligible mailboxes in that domain are claimed |
 
 Current implementation notes:
 
-- the current pool API supports filtering only by `provider`
-- `outlook.com`, `hotmail.com`, `live.com`, and `live.cn` all map to `provider=outlook`
-- the current external pool API does not support extra filtering by domain, group, or tags
+- `claim-random` claims an eligible mailbox randomly by default; when `email_domain` is provided, it claims randomly within that domain
+- for a clearer domain-specific contract, use `POST /api/external/pool/claim-domain`; that endpoint requires `email_domain`
+- `outlook.com`, `hotmail.com`, `live.com`, and `live.cn` all map to `provider=outlook`; use `email_domain` when those domains need to be distinguished
+- the current external pool API does not support claiming a specific full mailbox, group, or tag
 - when `provider=cloudflare_temp_mail` and no eligible mailbox exists in pool, the service dynamically creates a CF temp mailbox and returns it as claimed
 
 Success response fields:
@@ -389,6 +393,35 @@ No-available response example:
   "message": "No eligible mailbox available in pool",
   "data": null
 }
+```
+
+### `POST /api/external/pool/claim-domain`
+
+Purpose: claim a mailbox from a specific domain. This is the explicit endpoint for `claim-random + email_domain`; internally it reuses the same pool claim, lease, audit, and completion state machine.
+
+Request body:
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `caller_id` | string | Yes | caller instance, node, or worker identity |
+| `task_id` | string | Yes | unique task ID |
+| `email_domain` | string | Yes | mailbox domain to claim from, for example `zerodotsix.top` |
+| `provider` | string | No | optional provider filter |
+| `project_key` | string | No | project-level reuse and duplicate-prevention context |
+
+If `email_domain` is missing or blank, the endpoint returns HTTP `400` with code `EMAIL_DOMAIN_REQUIRED`.
+
+Copy-paste example:
+
+```bash
+curl -X POST https://api.example.com/api/external/pool/claim-domain \
+  -H "X-API-Key: YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "caller_id": "reg-worker-001",
+    "task_id": "task-20260409-0001",
+    "email_domain": "zerodotsix.top"
+  }'
 ```
 
 ### `POST /api/external/pool/claim-release`
