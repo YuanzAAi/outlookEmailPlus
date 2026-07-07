@@ -6,6 +6,7 @@ All notable changes to OutlookMail Plus are documented in this file.
 
 ### 修复 / Bug Fixes
 
+- **验证码提取大小写被篡改**：验证码提取收口处（规则分支 `_smart_extract_code_by_keywords` / `_fallback_extract_code` 及历史函数 `smart_extract_verification_code` / `fallback_extract_verification_code`，以及 AI 回退 `enhance_verification_with_ai_fallback`）不再强制 `.upper()`，`verification_code` 与 `formatted` 保持邮件原文大小写（如 `ab12cd` 不再返回 `AB12CD`）。补充回归测试。
 - **Issue #65 Watchtower 容器镜像过时**：`docker-compose.yml` 中固定 Watchtower 版本为 `containrrr/watchtower:1.7.1`，避免本地缓存的旧版镜像（内嵌 Docker 客户端 API 1.25）连接新版本 Docker Engine（要求 API 1.44+）时失败。README 新增故障排查指引。
 
 ## [v2.7.0] - 2026-05-29
