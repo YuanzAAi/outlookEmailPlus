@@ -428,18 +428,36 @@ def get_emails_imap_with_server(
             return {"success": True, "emails": []}
 
         paged_ids = message_ids[start_idx:end_idx][::-1]
+
+        # 批量 FETCH：一次请求取所有消息（避免 N 次串行网络往返）
+        id_list = b",".join(paged_ids)
         emails_data = []
+        status, msg_data = connection.fetch(id_list, "(RFC822)")
 
-        ids_str = b",".join(paged_ids)
-        status, all_data = connection.fetch(ids_str, "(RFC822)")
-        if status != "OK":
-            _LOGGER.debug(
-                "[PERF] imap_fetch | account=%s | batch fetch失败 status=%s",
-                account,
-                status,
-            )
-            return {"success": True, "emails": emails_data}
+        if status == "OK" and msg_data:
+            for item in msg_data:
+                if not isinstance(item, tuple) or len(item) < 2:
+                    continue
+                try:
+                    raw_email = item[1]
+                    msg = email.message_from_bytes(raw_email)
+                    seq = item[0].split(b" ", 1)[0] if isinstance(item[0], bytes) else b"0"
+                    msg_id_str = seq.decode() if isinstance(seq, bytes) else str(seq)
 
+                    body_preview = get_email_body(msg)
+                    emails_data.append(
+                        {
+                            "id": msg_id_str,
+                            "subject": decode_header_value(msg.get("Subject", "无主题")),
+                            "from": decode_header_value(msg.get("From", "未知发件人")),
+                            "date": msg.get("Date", "未知时间"),
+                            "body_preview": (body_preview[:200] + "..." if len(body_preview) > 200 else body_preview),
+                        }
+                    )
+                except Exception:
+                    continue
+
+        return {"success": True, "emails": emails_data}
         for msg_id_str, raw_email in _parse_batch_fetch_response(all_data or []):
             try:
                 msg = email.message_from_bytes(raw_email)
@@ -778,3 +796,116 @@ def delete_emails_imap(
         return {"success": False, "error": "IMAP 删除暂不支持 (ID 格式不兼容)"}
     except Exception as e:
         return {"success": False, "error": str(e)}
+IMAP_SERVER_OLD = "outlook.office365.com"
+
+
+def stream_emails_imap(
+    account: str,
+    client_id: str,
+    refresh_token: str,
+    folder: str = "inbox",
+    skip: int = 0,
+    top: int = 20,
+):
+    """Generator：逐条 yield 邮件，供 SSE 流式推送。并发尝试新旧 IMAP 服务器。"""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    token_result = get_access_token_imap_result(client_id, refresh_token)
+    if not token_result.get("success"):
+        yield {"type": "error", "data": token_result.get("error", {})}
+        return
+
+    access_token = token_result.get("access_token")
+
+    # 并发尝试两个 IMAP 服务器，用第一个成功连接的
+    def _try_connect(server):
+        try:
+            conn = imaplib.IMAP4_SSL(server, IMAP_PORT)
+            auth_string = f"user={account}\1auth=Bearer {access_token}\1\1".encode("utf-8")
+            conn.authenticate("XOAUTH2", lambda x: auth_string)
+
+            folder_map = {
+                "inbox": ['"INBOX"', "INBOX"],
+                "junkemail": ['"Junk"', '"Junk Email"', "Junk"],
+                "deleteditems": ['"Deleted"', '"Deleted Items"', '"Trash"', "Deleted"],
+                "trash": ['"Deleted"', '"Deleted Items"', '"Trash"', "Deleted"],
+            }
+            for imap_folder in folder_map.get((folder or "").lower(), ['"INBOX"']):
+                try:
+                    status, _ = conn.select(imap_folder, readonly=True)
+                    if status == "OK":
+                        return conn, server
+                except Exception:
+                    continue
+            conn.logout()
+            return None, server
+        except Exception:
+            return None, server
+
+    connection = None
+    winner_server = None
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        futures = [ex.submit(_try_connect, s) for s in [IMAP_SERVER_NEW, IMAP_SERVER_OLD]]
+        for f in as_completed(futures):
+            conn, srv = f.result()
+            if conn and not connection:
+                connection = conn
+                winner_server = srv
+            elif conn:
+                try:
+                    conn.logout()
+                except Exception:
+                    pass
+
+    if not connection:
+        yield {"type": "error", "data": {"code": "IMAP_CONNECT_FAILED", "message": "所有 IMAP 服务器连接失败"}}
+        return
+
+    try:
+        status, messages = connection.search(None, "ALL")
+        if status != "OK" or not messages or not messages[0]:
+            yield {"type": "done", "method": "IMAP", "count": 0}
+            return
+
+        message_ids = messages[0].split()
+        total = len(message_ids)
+        start_idx = max(0, total - skip - top)
+        end_idx = total - skip
+        if start_idx >= end_idx:
+            yield {"type": "done", "method": "IMAP", "count": 0}
+            return
+
+        paged_ids = message_ids[start_idx:end_idx][::-1]
+        method = "IMAP (New)" if winner_server == IMAP_SERVER_NEW else "IMAP (Old)"
+        count = 0
+
+        for msg_id in paged_ids:
+            try:
+                status, msg_data = connection.fetch(msg_id, "(RFC822)")
+                if status == "OK" and msg_data and msg_data[0]:
+                    raw_email = msg_data[0][1]
+                    msg = email.message_from_bytes(raw_email)
+                    body_preview = get_email_body(msg)
+                    count += 1
+                    yield {
+                        "type": "email",
+                        "data": {
+                            "id": (msg_id.decode() if isinstance(msg_id, bytes) else str(msg_id)),
+                            "subject": decode_header_value(msg.get("Subject", "无主题")),
+                            "from": decode_header_value(msg.get("From", "未知发件人")),
+                            "date": msg.get("Date", "未知时间"),
+                            "body_preview": (body_preview[:200] + "..." if len(body_preview) > 200 else body_preview),
+                        },
+                    }
+            except Exception:
+                continue
+
+        yield {"type": "done", "method": method, "count": count}
+    finally:
+        try:
+            connection.logout()
+        except Exception:
+            pass
+
+
+

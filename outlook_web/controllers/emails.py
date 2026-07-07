@@ -4,7 +4,9 @@ import logging
 import time
 from typing import Any, Dict, List, Optional
 
-from flask import current_app, jsonify, request
+import json
+
+from flask import Response, current_app, jsonify, request, stream_with_context
 
 from outlook_web import config
 from outlook_web.audit import log_audit
@@ -19,6 +21,8 @@ from outlook_web.services import external_api as external_api_service
 from outlook_web.services import graph as graph_service
 from outlook_web.services import imap as imap_service
 from outlook_web.services import verification_channel_routing as verification_channel_service
+from outlook_web.services.channel_cache import get_cached_channel, set_cached_channel
+from outlook_web.services.email_cache import get_cached_emails, set_cached_emails
 from outlook_web.services.imap_generic import (
     get_email_detail_imap_generic_result,
     get_emails_imap_generic,
@@ -1549,3 +1553,102 @@ def api_external_get_probe_status(probe_id: str) -> Any:
             details={"code": "INTERNAL_ERROR", "probe_id": probe_id},
         )
         return jsonify(external_api_service.fail("INTERNAL_ERROR", "服务内部错误")), 500
+
+def api_stream_emails(email_addr: str) -> Any:
+    """SSE 流式获取邮件：IMAP 每拉到一封就推一条 event，前端边收边渲染。"""
+    account = accounts_repo.get_account_by_email(email_addr)
+    if not account:
+        return build_error_response(
+            "ACCOUNT_NOT_FOUND", "账号不存在",
+            message_en="Account not found", err_type="NotFoundError",
+            status=404, details=f"email={email_addr}",
+        )
+
+    folder = request.args.get("folder", "inbox")
+    skip = int(request.args.get("skip", 0))
+    top = int(request.args.get("top", 20))
+    force = request.args.get("force", "").lower() in ("1", "true")
+
+    account_type = (account.get("account_type") or "outlook").strip().lower()
+
+    # 获取分组代理设置
+    proxy_url = ""
+    if account.get("group_id"):
+        group = groups_repo.get_group_by_id(account["group_id"])
+        if group:
+            proxy_url = group.get("proxy_url", "") or ""
+
+    def _sse(event: str, data: dict) -> str:
+        return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+    def generate():
+        # --- 服务端缓存（2h TTL）---
+        if not force:
+            cached = get_cached_emails(email_addr, folder)
+            if cached:
+                for e in cached["emails"]:
+                    yield _sse("email", e)
+                yield _sse("done", {
+                    "method": cached["method"] + " (cached)",
+                    "count": len(cached["emails"]),
+                    "has_more": cached["has_more"],
+                })
+                return
+
+        collected_emails = []
+        cached_channel = get_cached_channel(email_addr)
+
+        # --- Graph API 尝试 ---
+        if account_type != "imap" and cached_channel != "imap":
+            graph_result = graph_service.get_emails_graph(
+                account["client_id"], account["refresh_token"], folder, skip, top, proxy_url,
+            )
+            if graph_result.get("success"):
+                set_cached_channel(email_addr, "graph")
+                emails = graph_result.get("emails", [])
+                for e in emails:
+                    fmt = {
+                        "id": e.get("id"),
+                        "subject": e.get("subject", "无主题"),
+                        "from": e.get("from", {}).get("emailAddress", {}).get("address", "未知"),
+                        "date": e.get("receivedDateTime", ""),
+                        "is_read": e.get("isRead", False),
+                        "has_attachments": e.get("hasAttachments", False),
+                        "body_preview": e.get("bodyPreview", ""),
+                    }
+                    collected_emails.append(fmt)
+                    yield _sse("email", fmt)
+                has_more = len(emails) >= top
+                set_cached_emails(email_addr, folder, collected_emails, "Graph API", has_more)
+                yield _sse("done", {"method": "Graph API", "count": len(emails), "has_more": has_more})
+                return
+            elif graph_result.get("no_mail_permission"):
+                set_cached_channel(email_addr, "imap")
+
+        # --- IMAP 流式 ---
+        yield _sse("status", {"message": "IMAP connecting..."})
+        imap_method = "IMAP"
+        for item in imap_service.stream_emails_imap(
+            account["email"], account["client_id"], account["refresh_token"],
+            folder, skip, top,
+        ):
+            if item.get("type") == "email":
+                collected_emails.append(item["data"])
+                yield _sse("email", item["data"])
+            elif item.get("type") == "done":
+                imap_method = item.get("method", "IMAP")
+                set_cached_channel(email_addr, "imap")
+                set_cached_emails(email_addr, folder, collected_emails, imap_method, False)
+                yield _sse("done", {"method": imap_method, "count": item.get("count", 0), "has_more": False})
+            elif item.get("type") == "error":
+                yield _sse("error", item.get("data", {}))
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@login_required
+

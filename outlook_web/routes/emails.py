@@ -22,6 +22,11 @@ def create_blueprint() -> Blueprint:
         methods=["GET"],
     )
     bp.add_url_rule(
+        "/api/emails/<email_addr>/stream",
+        view_func=emails_controller.api_stream_emails,
+        methods=["GET"],
+    )
+    bp.add_url_rule(
         "/api/emails/<email_addr>/extract-verification",
         view_func=emails_controller.api_extract_verification,
         methods=["GET"],
