@@ -4,6 +4,7 @@ from typing import Any
 
 from flask import jsonify, request
 
+from outlook_web.repositories import accounts as accounts_repo
 from outlook_web.repositories import settings as settings_repo
 from outlook_web.security.auth import api_key_required, get_external_api_consumer
 from outlook_web.security.external_api_guard import external_api_guards
@@ -40,11 +41,7 @@ def _error_response(endpoint: str, exc: PoolServiceError):
 def _check_pool_external_enabled(endpoint: str):
     if settings_repo.get_pool_external_enabled():
         return None
-    _audit(
-        endpoint,
-        "error",
-        details={"code": "FEATURE_DISABLED", "feature": "external_pool"},
-    )
+    _audit(endpoint, "error", details={"code": "FEATURE_DISABLED", "feature": "external_pool"})
     return (
         jsonify(
             external_api_service.fail(
@@ -64,11 +61,7 @@ def _check_pool_access(endpoint: str):
     _audit(
         endpoint,
         "error",
-        details={
-            "code": "FORBIDDEN",
-            "feature": "external_pool",
-            "reason": "pool_access_required",
-        },
+        details={"code": "FORBIDDEN", "feature": "external_pool", "reason": "pool_access_required"},
     )
     return (
         jsonify(
@@ -82,6 +75,32 @@ def _check_pool_access(endpoint: str):
     )
 
 
+def _get_consumer_key() -> str:
+    consumer = get_external_api_consumer() or {}
+    return str(consumer.get("consumer_key") or "").strip()
+
+
+def _account_payload(account_id: int, *, pool_status: str) -> dict[str, Any]:
+    account = accounts_repo.get_account_by_id(account_id) or {}
+    return {
+        "account_id": account_id,
+        "pool_status": pool_status,
+        "provider": account.get("provider") or "",
+        "email_domain": account.get("email_domain") or "",
+    }
+
+
+def _parse_account_id(endpoint: str, raw_value) -> int | tuple:
+    if raw_value is None:
+        _audit(endpoint, "error", details={"code": "ACCOUNT_ID_MISSING"})
+        return jsonify(external_api_service.fail("ACCOUNT_ID_MISSING", "account_id 不能为空")), 400
+    try:
+        return int(raw_value)
+    except (TypeError, ValueError):
+        _audit(endpoint, "error", details={"code": "ACCOUNT_ID_INVALID"})
+        return jsonify(external_api_service.fail("ACCOUNT_ID_INVALID", "account_id 必须为整数")), 400
+
+
 def _claim_pool_account(endpoint: str, *, require_email_domain: bool = False):
     disabled_resp = _check_pool_external_enabled(endpoint)
     if disabled_resp is not None:
@@ -89,11 +108,13 @@ def _claim_pool_account(endpoint: str, *, require_email_domain: bool = False):
     access_resp = _check_pool_access(endpoint)
     if access_resp is not None:
         return access_resp
+
+    consumer_key = _get_consumer_key()
     body = request.get_json(silent=True) or {}
     caller_id = body.get("caller_id", "")
     task_id = body.get("task_id", "")
+    project_key = body.get("project_key", "")
     provider = body.get("provider")
-    project_key = body.get("project_key")
     email_domain = body.get("email_domain")
 
     if require_email_domain and not str(email_domain or "").strip():
@@ -102,15 +123,17 @@ def _claim_pool_account(endpoint: str, *, require_email_domain: bool = False):
 
     try:
         account = claim_random(
+            consumer_key=consumer_key,
+            project_key=project_key,
             caller_id=caller_id,
             task_id=task_id,
             provider=provider,
-            project_key=project_key,
             email_domain=email_domain,
         )
         data = {
             "account_id": account["id"],
             "email": account["email"],
+            "provider": account.get("provider") or "",
             "email_domain": account.get("email_domain") or "",
             "claim_token": account["claim_token"],
             "claimed_at": account.get("claimed_at") or "",
@@ -120,21 +143,18 @@ def _claim_pool_account(endpoint: str, *, require_email_domain: bool = False):
             endpoint,
             "ok",
             details={
-                "provider": provider or "",
-                "project_key": project_key or "",
-                "email_domain": email_domain or "",
+                "provider": data["provider"],
+                "email_domain": data["email_domain"],
+                "project_key": project_key,
                 "account_id": data["account_id"],
             },
+            email_addr=data["email"],
         )
         return jsonify(external_api_service.ok(data))
     except PoolServiceError as exc:
         return _error_response(endpoint, exc)
     except Exception as exc:
-        _audit(
-            endpoint,
-            "error",
-            details={"code": "INTERNAL_ERROR", "err": type(exc).__name__},
-        )
+        _audit(endpoint, "error", details={"code": "INTERNAL_ERROR", "err": type(exc).__name__})
         return jsonify(external_api_service.fail("INTERNAL_ERROR", "服务内部错误")), 500
 
 
@@ -160,40 +180,35 @@ def api_external_pool_claim_release():
     access_resp = _check_pool_access(endpoint)
     if access_resp is not None:
         return access_resp
+
+    consumer_key = _get_consumer_key()
     body = request.get_json(silent=True) or {}
-    account_id = body.get("account_id")
+    account_id = _parse_account_id(endpoint, body.get("account_id"))
+    if isinstance(account_id, tuple):
+        return account_id
+
     claim_token = body.get("claim_token", "")
     caller_id = body.get("caller_id", "")
     task_id = body.get("task_id", "")
+    project_key = body.get("project_key", "")
     reason = body.get("reason")
-
-    if account_id is None:
-        _audit(endpoint, "error", details={"code": "ACCOUNT_ID_MISSING"})
-        return jsonify(external_api_service.fail("ACCOUNT_ID_MISSING", "account_id 不能为空")), 400
-    try:
-        account_id = int(account_id)
-    except (TypeError, ValueError):
-        _audit(endpoint, "error", details={"code": "ACCOUNT_ID_INVALID"})
-        return jsonify(external_api_service.fail("ACCOUNT_ID_INVALID", "account_id 必须为整数")), 400
 
     try:
         release_claim(
+            consumer_key=consumer_key,
+            project_key=project_key,
             account_id=account_id,
             claim_token=claim_token,
             caller_id=caller_id,
             task_id=task_id,
             reason=reason,
         )
-        _audit(endpoint, "ok", details={"account_id": account_id})
-        return jsonify(external_api_service.ok({"account_id": account_id, "pool_status": "available"}))
+        _audit(endpoint, "ok", details={"account_id": account_id, "project_key": project_key})
+        return jsonify(external_api_service.ok(_account_payload(account_id, pool_status="available")))
     except PoolServiceError as exc:
         return _error_response(endpoint, exc)
     except Exception as exc:
-        _audit(
-            endpoint,
-            "error",
-            details={"code": "INTERNAL_ERROR", "err": type(exc).__name__},
-        )
+        _audit(endpoint, "error", details={"code": "INTERNAL_ERROR", "err": type(exc).__name__})
         return jsonify(external_api_service.fail("INTERNAL_ERROR", "服务内部错误")), 500
 
 
@@ -207,25 +222,24 @@ def api_external_pool_claim_complete():
     access_resp = _check_pool_access(endpoint)
     if access_resp is not None:
         return access_resp
+
+    consumer_key = _get_consumer_key()
     body = request.get_json(silent=True) or {}
-    account_id = body.get("account_id")
+    account_id = _parse_account_id(endpoint, body.get("account_id"))
+    if isinstance(account_id, tuple):
+        return account_id
+
     claim_token = body.get("claim_token", "")
     caller_id = body.get("caller_id", "")
     task_id = body.get("task_id", "")
+    project_key = body.get("project_key", "")
     result = body.get("result", "")
     detail = body.get("detail")
 
-    if account_id is None:
-        _audit(endpoint, "error", details={"code": "ACCOUNT_ID_MISSING"})
-        return jsonify(external_api_service.fail("ACCOUNT_ID_MISSING", "account_id 不能为空")), 400
-    try:
-        account_id = int(account_id)
-    except (TypeError, ValueError):
-        _audit(endpoint, "error", details={"code": "ACCOUNT_ID_INVALID"})
-        return jsonify(external_api_service.fail("ACCOUNT_ID_INVALID", "account_id 必须为整数")), 400
-
     try:
         new_status = complete_claim(
+            consumer_key=consumer_key,
+            project_key=project_key,
             account_id=account_id,
             claim_token=claim_token,
             caller_id=caller_id,
@@ -238,19 +252,16 @@ def api_external_pool_claim_complete():
             "ok",
             details={
                 "account_id": account_id,
+                "project_key": project_key,
                 "result": result,
                 "pool_status": new_status,
             },
         )
-        return jsonify(external_api_service.ok({"account_id": account_id, "pool_status": new_status}))
+        return jsonify(external_api_service.ok(_account_payload(account_id, pool_status=new_status)))
     except PoolServiceError as exc:
         return _error_response(endpoint, exc)
     except Exception as exc:
-        _audit(
-            endpoint,
-            "error",
-            details={"code": "INTERNAL_ERROR", "err": type(exc).__name__},
-        )
+        _audit(endpoint, "error", details={"code": "INTERNAL_ERROR", "err": type(exc).__name__})
         return jsonify(external_api_service.fail("INTERNAL_ERROR", "服务内部错误")), 500
 
 
@@ -269,9 +280,5 @@ def api_external_pool_stats():
         _audit(endpoint, "ok", details={"snapshot": True})
         return jsonify(external_api_service.ok(stats))
     except Exception as exc:
-        _audit(
-            endpoint,
-            "error",
-            details={"code": "INTERNAL_ERROR", "err": type(exc).__name__},
-        )
+        _audit(endpoint, "error", details={"code": "INTERNAL_ERROR", "err": type(exc).__name__})
         return jsonify(external_api_service.fail("INTERNAL_ERROR", "服务内部错误")), 500

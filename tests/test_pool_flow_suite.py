@@ -51,6 +51,21 @@ class PoolFlowSuiteTests(unittest.TestCase):
     def _auth_headers():
         return {"X-API-Key": "abc123"}
 
+    def _claim(self, *, task_id: str, project_key: str = "register", provider: str = "outlook", email_domain: str | None = None):
+        payload = {
+            "caller_id": "suite_bot",
+            "task_id": task_id,
+            "project_key": project_key,
+            "provider": provider,
+        }
+        if email_domain is not None:
+            payload["email_domain"] = email_domain
+        return self.client.post(
+            "/api/external/pool/claim-random",
+            headers=self._auth_headers(),
+            json=payload,
+        )
+
     def _make_pool_account(
         self,
         *,
@@ -84,11 +99,7 @@ class PoolFlowSuiteTests(unittest.TestCase):
     def test_claim_complete_success_without_project_key_still_changes_status_to_used(self):
         self._make_pool_account()
 
-        claim_resp = self.client.post(
-            "/api/external/pool/claim-random",
-            headers=self._auth_headers(),
-            json={"caller_id": "suite_bot", "task_id": "success_flow"},
-        )
+        claim_resp = self._claim(task_id="success_flow", project_key="register")
         self.assertEqual(claim_resp.status_code, 200)
         claim_data = json.loads(claim_resp.data)
         self.assertTrue(claim_data["success"])
@@ -175,11 +186,7 @@ class PoolFlowSuiteTests(unittest.TestCase):
     def test_claim_complete_failure_changes_status_to_cooldown(self):
         self._make_pool_account()
 
-        claim_resp = self.client.post(
-            "/api/external/pool/claim-random",
-            headers=self._auth_headers(),
-            json={"caller_id": "suite_bot", "task_id": "cooldown_flow"},
-        )
+        claim_resp = self._claim(task_id="cooldown_flow", project_key="register")
         self.assertEqual(claim_resp.status_code, 200)
         claim_data = json.loads(claim_resp.data)
         self.assertTrue(claim_data["success"])

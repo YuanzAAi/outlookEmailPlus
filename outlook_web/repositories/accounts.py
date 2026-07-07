@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from outlook_web.db import get_db
 from outlook_web.security.crypto import decrypt_data, encrypt_data
+from outlook_web.services.providers import extract_email_domain
 
 COMPACT_SUMMARY_FIELDS = (
     "latest_email_subject",
@@ -98,6 +99,9 @@ def _hydrate_accounts(rows: List[sqlite3.Row], db: sqlite3.Connection) -> List[D
             account_id_value = int(account_id_value)
         except Exception:
             account_id_value = None
+
+        if not account.get("email_domain"):
+            account["email_domain"] = extract_email_domain(account.get("email") or "")
 
         account["tags"] = tags_by_account.get(account_id_value, []) if account_id_value is not None else []
         accounts.append(account)
@@ -251,11 +255,21 @@ def load_accounts_page(
 def get_account_by_email(email_addr: str) -> Optional[Dict]:
     """根据邮箱地址获取账号（自动解密敏感字段）"""
     db = get_db()
-    cursor = db.execute("SELECT * FROM accounts WHERE email = ?", (email_addr,))
+    cursor = db.execute(
+        """
+        SELECT *
+        FROM accounts
+        WHERE email = ? COLLATE NOCASE
+        ORDER BY CASE WHEN email = ? THEN 0 ELSE 1 END
+        LIMIT 1
+        """,
+        (email_addr, email_addr),
+    )
     row = cursor.fetchone()
     if not row:
         return None
     account = dict(row)
+    _normalize_account_email_domain(account)
     _decrypt_account_field(account, "password")
     _decrypt_account_field(account, "refresh_token")
     _decrypt_account_field(account, "imap_password")
@@ -278,6 +292,7 @@ def get_account_by_id(account_id: int) -> Optional[Dict]:
     if not row:
         return None
     account = dict(row)
+    _normalize_account_email_domain(account)
     _decrypt_account_field(account, "password")
     _decrypt_account_field(account, "refresh_token")
     _decrypt_account_field(account, "imap_password")
@@ -491,11 +506,13 @@ def update_account(
 
             if not email_addr:
                 return False
+            email_domain = extract_email_domain(email_addr)
 
             db.execute(
                 """
                 UPDATE accounts
                 SET email = ?,
+                    email_domain = ?,
                     imap_password = ?,
                     group_id = ?,
                     remark = ?,
@@ -506,6 +523,7 @@ def update_account(
             """,
                 (
                     email_addr,
+                    email_domain,
                     encrypted_imap_password,
                     group_id,
                     remark,
@@ -529,6 +547,7 @@ def update_account(
 
         if not email_addr or not new_client_id or not encrypted_refresh_token:
             return False
+        email_domain = extract_email_domain(email_addr)
 
         db.execute(
             """

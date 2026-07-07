@@ -68,14 +68,40 @@ def _parse_claimed_by(claimed_by: Optional[str]) -> tuple[str, str]:
     """从 claimed_by 字段解析 caller_id 和 task_id（兼容旧格式）。"""
     if not claimed_by:
         return "", ""
-    parts = (claimed_by or ":").split(":", 1)
-    return parts[0], parts[1] if len(parts) > 1 else ""
+    parts = str(claimed_by).split("||")
+    if len(parts) == 4:
+        return parts[2], parts[3]
+    legacy_parts = str(claimed_by).split(":", 1)
+    return legacy_parts[0], legacy_parts[1] if len(legacy_parts) > 1 else ""
+
+
+def _build_claimed_by(*, consumer_key: str, project_key: str, caller_id: str, task_id: str) -> str:
+    return "||".join([consumer_key, project_key, caller_id, task_id])
+
+
+def parse_claimed_by(claimed_by: str | None) -> dict:
+    parts = str(claimed_by or "").split("||")
+    if len(parts) == 4:
+        return {
+            "consumer_key": parts[0],
+            "project_key": parts[1],
+            "caller_id": parts[2],
+            "task_id": parts[3],
+        }
+    caller_id, task_id = _parse_claimed_by(claimed_by)
+    return {
+        "consumer_key": "",
+        "project_key": "",
+        "caller_id": caller_id,
+        "task_id": task_id,
+    }
 
 
 def insert_claimed_account(
     conn: sqlite3.Connection,
     *,
     email: str,
+    consumer_key: str,
     caller_id: str,
     task_id: str,
     lease_seconds: int,
@@ -133,7 +159,12 @@ def insert_claimed_account(
                 normalized_email,
                 account_type,
                 provider,
-                f"{caller_id}:{task_id}",
+                _build_claimed_by(
+                    consumer_key=consumer_key,
+                    project_key=project_key or "",
+                    caller_id=caller_id,
+                    task_id=task_id,
+                ),
                 now_str,
                 lease_expires_at_str,
                 token,
@@ -157,7 +188,7 @@ def insert_claimed_account(
         )
 
         # project_key 存在时写入 project usage
-        if project_key and caller_id:
+        if project_key and consumer_key:
             conn.execute(
                 """
                 INSERT INTO account_project_usage
@@ -166,7 +197,7 @@ def insert_claimed_account(
                 ON CONFLICT(account_id, consumer_key, project_key)
                 DO UPDATE SET last_claimed_at = excluded.last_claimed_at
                 """,
-                (account_id, caller_id, project_key, now_str, now_str),
+                (account_id, consumer_key, project_key, now_str, now_str),
             )
 
         conn.execute("COMMIT")
@@ -206,6 +237,9 @@ def insert_claimed_account(
 
 def claim_atomic(
     conn: sqlite3.Connection,
+    *,
+    consumer_key: str,
+    project_key: str,
     caller_id: str,
     task_id: str,
     lease_seconds: int,
@@ -213,7 +247,6 @@ def claim_atomic(
     group_id: Optional[int] = None,
     tags: Optional[List[str]] = None,
     exclude_recent_minutes: Optional[int] = None,
-    project_key: Optional[str] = None,
     email_domain: Optional[str] = None,
 ) -> Optional[dict]:
     sql = """
@@ -255,7 +288,7 @@ def claim_atomic(
     # PR#27 + v22 语义变更: project_key 防同项目复用
     # v22 前：NOT EXISTS 即排除（含 claim trace），导致 release 后需删 usage 行（Bug #28）
     # v22 后：只排除 success_count > 0 的记录，release/expire 产生的 trace 不阻断再次领取
-    if project_key and caller_id:
+    if project_key and consumer_key:
         sql += """
             AND NOT EXISTS (
                 SELECT 1 FROM account_project_usage apu
@@ -265,7 +298,7 @@ def claim_atomic(
                   AND apu.success_count > 0
             )
         """
-        params.append(caller_id)
+        params.append(consumer_key)
         params.append(project_key)
 
     sql += " ORDER BY RANDOM() LIMIT 1"
@@ -295,7 +328,12 @@ def claim_atomic(
         WHERE id = ?
         """,
         (
-            f"{caller_id}:{task_id}",
+            _build_claimed_by(
+                consumer_key=consumer_key,
+                project_key=project_key,
+                caller_id=caller_id,
+                task_id=task_id,
+            ),
             now_str,
             lease_expires_at_str,
             token,
@@ -314,8 +352,7 @@ def claim_atomic(
         (account["id"], token, caller_id, task_id, now_str),
     )
 
-    # PR#27: 记录 project 维度使用（project_key 存在时）
-    if project_key and caller_id:
+    if project_key and consumer_key:
         conn.execute(
             """
             INSERT INTO account_project_usage
@@ -324,7 +361,7 @@ def claim_atomic(
             ON CONFLICT(account_id, consumer_key, project_key)
             DO UPDATE SET last_claimed_at = excluded.last_claimed_at
             """,
-            (account["id"], caller_id, project_key, now_str, now_str),
+            (account["id"], consumer_key, project_key, now_str, now_str),
         )
 
     conn.execute("COMMIT")
@@ -413,6 +450,8 @@ def release(
     conn: sqlite3.Connection,
     account_id: int,
     claim_token: str,
+    consumer_key: str,
+    project_key: str,
     caller_id: str,
     task_id: str,
     reason: Optional[str],
@@ -455,6 +494,8 @@ def complete(
     conn: sqlite3.Connection,
     account_id: int,
     claim_token: str,
+    consumer_key: str,
+    project_key: str,
     caller_id: str,
     task_id: str,
     result: str,
@@ -540,7 +581,7 @@ def complete(
             """,
             (
                 account_id,
-                caller_id,
+                consumer_key,
                 effective_claimed_project_key,
                 now_str,
                 now_str,

@@ -90,12 +90,17 @@ def _validate_lease_seconds(lease_seconds: int, max_lease: int = 3600) -> None:
         raise PoolServiceError(f"lease_seconds 不能超过 {max_lease} 秒", "lease_seconds_too_large")
 
 
-def _validate_project_key(project_key: Optional[str]) -> Optional[str]:
-    if project_key is None:
-        return None
-    pk = project_key.strip()
+def _validate_consumer_key(consumer_key: str) -> str:
+    normalized = str(consumer_key or "").strip()
+    if not normalized:
+        raise PoolServiceError("consumer_key 不能为空", "consumer_key_empty", http_status=403)
+    return normalized
+
+
+def _validate_project_key(project_key: str) -> str:
+    pk = str(project_key or "").strip()
     if not pk:
-        return None
+        raise PoolServiceError("project_key 不能为空", "project_key_empty")
     if len(pk) > PROJECT_KEY_MAX_LEN:
         raise PoolServiceError(f"project_key 超过最大长度 {PROJECT_KEY_MAX_LEN}", "project_key_too_long")
     return pk
@@ -151,16 +156,18 @@ def _is_project_reuse_eligible_account(
 
 def claim_random(
     *,
+    consumer_key: str,
+    project_key: str,
     caller_id: str,
     task_id: str,
     provider: Optional[str] = None,
-    project_key: Optional[str] = None,
     email_domain: Optional[str] = None,
 ) -> dict:
+    consumer_key = _validate_consumer_key(consumer_key)
+    project_key = _validate_project_key(project_key)
     _validate_caller_id(caller_id)
     _validate_task_id(task_id)
     provider = _validate_provider(provider)
-    project_key = _validate_project_key(project_key)
     email_domain = _validate_email_domain(email_domain)
 
     conn = create_sqlite_connection()
@@ -172,11 +179,12 @@ def claim_random(
         try:
             account = pool_repo.claim_atomic(
                 conn,
+                consumer_key=consumer_key,
+                project_key=project_key,
                 caller_id=caller_id,
                 task_id=task_id,
                 lease_seconds=default_lease,
                 provider=provider,
-                project_key=project_key,
                 email_domain=email_domain,
             )
         except pool_repo.PoolRepositoryError as e:
@@ -209,6 +217,7 @@ def claim_random(
                 inserted = pool_repo.insert_claimed_account(
                     conn,
                     email=created_email,
+                    consumer_key=consumer_key,
                     caller_id=caller_id,
                     task_id=task_id,
                     lease_seconds=default_lease,
@@ -237,6 +246,8 @@ def _validate_claim_ownership(
     *,
     action: str,
     claim_token: str,
+    consumer_key: str,
+    project_key: str,
     caller_id: str,
     task_id: str,
 ) -> None:
@@ -251,7 +262,19 @@ def _validate_claim_ownership(
         )
     if row.get("claim_token") != claim_token:
         raise PoolServiceError("claim_token 不匹配", "token_mismatch", http_status=403)
-    if row.get("claimed_by") != f"{caller_id}:{task_id}":
+
+    claimed_by = str(row.get("claimed_by") or "")
+    if "||" in claimed_by:
+        claimed_context = pool_repo.parse_claimed_by(claimed_by)
+        if claimed_context["consumer_key"] and claimed_context["consumer_key"] != consumer_key:
+            raise PoolServiceError("consumer_key 与领取记录不一致", "consumer_mismatch", http_status=403)
+        if claimed_context["project_key"] and claimed_context["project_key"] != project_key:
+            raise PoolServiceError("project_key 与领取记录不一致", "project_mismatch", http_status=403)
+        if claimed_context["caller_id"] != caller_id:
+            raise PoolServiceError("caller_id 与领取记录不一致", "caller_mismatch", http_status=403)
+        if claimed_context["task_id"] != task_id:
+            raise PoolServiceError("task_id 与领取记录不一致", "task_mismatch", http_status=403)
+    elif claimed_by != f"{caller_id}:{task_id}":
         raise PoolServiceError(
             "caller_id 或 task_id 与领取记录不一致",
             "caller_mismatch",
@@ -261,6 +284,8 @@ def _validate_claim_ownership(
 
 def release_claim(
     *,
+    consumer_key: str,
+    project_key: str,
     account_id: int,
     claim_token: str,
     caller_id: str,
@@ -268,6 +293,8 @@ def release_claim(
     reason: Optional[str] = None,
 ) -> None:
     """释放已领取的邮箱账号（不计入成功/失败统计，直接回 available）。"""
+    consumer_key = _validate_consumer_key(consumer_key)
+    project_key = _validate_project_key(project_key)
     _validate_caller_id(caller_id)
     _validate_task_id(task_id)
     if not claim_token or not claim_token.strip():
@@ -282,7 +309,13 @@ def release_claim(
             temp_id = pool_repo.temp_id_from_account_id(account_id)
             temp_row = pool_repo.get_temp_mailbox_pool_row(conn, temp_id)
             _validate_claim_ownership(
-                temp_row, action="release", claim_token=claim_token, caller_id=caller_id, task_id=task_id
+                temp_row,
+                action="release",
+                claim_token=claim_token,
+                consumer_key=consumer_key,
+                project_key=project_key,
+                caller_id=caller_id,
+                task_id=task_id,
             )
             pool_repo.release_temp_mailbox(conn, temp_id, claim_token, caller_id, task_id, reason)
             return
@@ -295,17 +328,30 @@ def release_claim(
             dict(row) if row is not None else None,
             action="release",
             claim_token=claim_token,
+            consumer_key=consumer_key,
+            project_key=project_key,
             caller_id=caller_id,
             task_id=task_id,
         )
 
-        pool_repo.release(conn, account_id, claim_token, caller_id, task_id, reason)
+        pool_repo.release(
+            conn,
+            account_id,
+            claim_token,
+            consumer_key,
+            project_key,
+            caller_id,
+            task_id,
+            reason,
+        )
     finally:
         conn.close()
 
 
 def complete_claim(
     *,
+    consumer_key: str,
+    project_key: str,
     account_id: int,
     claim_token: str,
     caller_id: str,
@@ -318,6 +364,8 @@ def complete_claim(
 
     返回账号的新 pool_status。
     """
+    consumer_key = _validate_consumer_key(consumer_key)
+    project_key = _validate_project_key(project_key)
     _validate_caller_id(caller_id)
     _validate_task_id(task_id)
     if not claim_token or not claim_token.strip():
@@ -337,7 +385,13 @@ def complete_claim(
             temp_id = pool_repo.temp_id_from_account_id(account_id)
             temp_row = pool_repo.get_temp_mailbox_pool_row(conn, temp_id)
             _validate_claim_ownership(
-                temp_row, action="complete", claim_token=claim_token, caller_id=caller_id, task_id=task_id
+                temp_row,
+                action="complete",
+                claim_token=claim_token,
+                consumer_key=consumer_key,
+                project_key=project_key,
+                caller_id=caller_id,
+                task_id=task_id,
             )
             return pool_repo.complete_temp_mailbox(conn, temp_id, claim_token, caller_id, task_id, result, detail)
 
@@ -355,6 +409,8 @@ def complete_claim(
             dict(row) if row is not None else None,
             action="complete",
             claim_token=claim_token,
+            consumer_key=consumer_key,
+            project_key=project_key,
             caller_id=caller_id,
             task_id=task_id,
         )
@@ -373,6 +429,8 @@ def complete_claim(
             conn,
             account_id,
             claim_token,
+            consumer_key,
+            project_key,
             caller_id,
             task_id,
             result,
