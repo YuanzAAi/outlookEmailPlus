@@ -1554,6 +1554,8 @@ def api_external_get_probe_status(probe_id: str) -> Any:
         )
         return jsonify(external_api_service.fail("INTERNAL_ERROR", "服务内部错误")), 500
 
+
+@login_required
 def api_stream_emails(email_addr: str) -> Any:
     """SSE 流式获取邮件：IMAP 每拉到一封就推一条 event，前端边收边渲染。"""
     account = accounts_repo.get_account_by_email(email_addr)
@@ -1648,7 +1650,3 @@ def api_stream_emails(email_addr: str) -> Any:
         mimetype="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
-
-
-@login_required
-

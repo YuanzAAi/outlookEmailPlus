@@ -96,7 +96,7 @@ class PoolFlowSuiteTests(unittest.TestCase):
         finally:
             conn.close()
 
-    def test_claim_complete_success_without_project_key_still_changes_status_to_used(self):
+    def test_claim_complete_requires_project_key(self):
         self._make_pool_account()
 
         claim_resp = self._claim(task_id="success_flow", project_key="register")
@@ -116,23 +116,10 @@ class PoolFlowSuiteTests(unittest.TestCase):
                 "detail": "manual suite success",
             },
         )
-        self.assertEqual(complete_resp.status_code, 200)
+        self.assertEqual(complete_resp.status_code, 400)
         complete_data = json.loads(complete_resp.data)
-        self.assertTrue(complete_data["success"])
-        # 未传 project_key 时，旧行为仍为 success → used
-        self.assertEqual(complete_data["data"]["pool_status"], "used")
-
-        conn = self.create_conn()
-        try:
-            row = conn.execute(
-                "SELECT pool_status, success_count, fail_count FROM accounts WHERE id = ?",
-                (claim_data["data"]["account_id"],),
-            ).fetchone()
-            self.assertEqual(row["pool_status"], "used")
-            self.assertEqual(row["success_count"], 1)
-            self.assertEqual(row["fail_count"], 0)
-        finally:
-            conn.close()
+        self.assertFalse(complete_data["success"])
+        self.assertEqual(complete_data["code"], "PROJECT_KEY_EMPTY")
 
     def test_claim_complete_success_with_project_key_on_long_lived_account_returns_available(self):
         account = self._make_pool_account(email_domain=f"reuse_{uuid.uuid4().hex[:8]}.test")
@@ -159,6 +146,7 @@ class PoolFlowSuiteTests(unittest.TestCase):
                 "claim_token": claim_data["data"]["claim_token"],
                 "caller_id": "reuse_bot",
                 "task_id": "reuse_success_1",
+                "project_key": "project_alpha",
                 "result": "success",
             },
         )
@@ -199,6 +187,7 @@ class PoolFlowSuiteTests(unittest.TestCase):
                 "claim_token": claim_data["data"]["claim_token"],
                 "caller_id": "suite_bot",
                 "task_id": "cooldown_flow",
+                "project_key": "register",
                 "result": "verification_timeout",
                 "detail": "manual suite timeout",
             },
@@ -237,7 +226,7 @@ class PoolFlowSuiteTests(unittest.TestCase):
                 headers=self._auth_headers(),
                 json={
                     "caller_id": "suite_bot",
-                    "task_id": f"batch_claim_{idx}",
+                    "project_key": "test_project", "task_id": f"batch_claim_{idx}",
                     "email_domain": email_domain,  # 使用 email_domain 过滤
                 },
             )
@@ -264,7 +253,7 @@ class PoolFlowSuiteTests(unittest.TestCase):
                     "account_id": account_id,
                     "claim_token": claim_token,
                     "caller_id": "suite_bot",
-                    "task_id": task_id,
+                    "project_key": "test_project", "task_id": task_id,
                     "reason": "suite cleanup",
                 },
             )
@@ -293,7 +282,7 @@ class PoolFlowSuiteTests(unittest.TestCase):
         resp = self.client.post(
             "/api/external/pool/claim-random",
             headers=self._auth_headers(),
-            json={"caller_id": "domain_bot", "task_id": "domain_check"},
+            json={"caller_id": "domain_bot", "project_key": "test_project", "task_id": "domain_check"},
         )
         self.assertEqual(resp.status_code, 200)
         data = json.loads(resp.data)
@@ -306,7 +295,7 @@ class PoolFlowSuiteTests(unittest.TestCase):
         resp = self.client.post(
             "/api/external/pool/claim-domain",
             headers=self._auth_headers(),
-            json={"caller_id": "domain_bot", "task_id": "domain_required"},
+            json={"caller_id": "domain_bot", "project_key": "test_project", "task_id": "domain_required"},
         )
         self.assertEqual(resp.status_code, 400)
         data = json.loads(resp.data)
@@ -325,6 +314,7 @@ class PoolFlowSuiteTests(unittest.TestCase):
             json={
                 "caller_id": "domain_bot",
                 "task_id": "domain_claim",
+                "project_key": "test_project",
                 "email_domain": requested_domain.upper(),
             },
         )
@@ -367,6 +357,7 @@ class PoolFlowSuiteTests(unittest.TestCase):
                 "claim_token": data1["data"]["claim_token"],
                 "caller_id": "proj_bot",
                 "task_id": "proj_task_1",
+                "project_key": "project_alpha",
                 "result": "success",
             },
         )
@@ -423,6 +414,7 @@ class PoolFlowSuiteTests(unittest.TestCase):
                 "claim_token": data1["data"]["claim_token"],
                 "caller_id": "proj_bot",
                 "task_id": "pb_task_1",
+                "project_key": "project_beta",
                 "result": "success",
             },
         )
@@ -456,6 +448,7 @@ class PoolFlowSuiteTests(unittest.TestCase):
                 "claim_token": data2["data"]["claim_token"],
                 "caller_id": "proj_bot",
                 "task_id": "pg_task_1",
+                "project_key": "test_project",
             },
         )
 
@@ -485,6 +478,7 @@ class PoolFlowSuiteTests(unittest.TestCase):
                 "claim_token": claim_data["data"]["claim_token"],
                 "caller_id": "stats_bot",
                 "task_id": "stats_task_1",
+                "project_key": "project_stats",
                 "result": "success",
             },
         )
@@ -531,6 +525,7 @@ class PoolFlowSuiteTests(unittest.TestCase):
                 "claim_token": claim_data["data"]["claim_token"],
                 "caller_id": "timeout_bot",
                 "task_id": "timeout_task_1",
+                "project_key": "project_timeout",
                 "result": "verification_timeout",
             },
         )
@@ -588,6 +583,7 @@ class PoolFlowSuiteTests(unittest.TestCase):
                 "claim_token": claim_data["data"]["claim_token"],
                 "caller_id": "release_bot",
                 "task_id": "release_task_1",
+                "project_key": "project_release",
             },
         )
         self.assertEqual(release_resp.status_code, 200)
@@ -641,6 +637,7 @@ class PoolFlowSuiteTests(unittest.TestCase):
                 "claim_token": claim_data["data"]["claim_token"],
                 "caller_id": "cf_bot",
                 "task_id": "cf_task_1",
+                "project_key": "project_cf",
                 "result": "success",
             },
         )

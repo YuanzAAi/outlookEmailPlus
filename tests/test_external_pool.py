@@ -23,6 +23,9 @@ class ExternalPoolApiTests(unittest.TestCase):
             db.execute(
                 "DELETE FROM account_claim_logs WHERE account_id IN (SELECT id FROM accounts WHERE email LIKE '%@extpool.test')"
             )
+            db.execute(
+                "DELETE FROM account_project_usage WHERE account_id IN (SELECT id FROM accounts WHERE email LIKE '%@extpool.test')"
+            )
             db.execute("DELETE FROM accounts WHERE email LIKE '%@extpool.test'")
             db.commit()
             settings_repo.set_setting("external_api_key", "")
@@ -164,7 +167,7 @@ class ExternalPoolApiTests(unittest.TestCase):
         claim_resp = client.post(
             "/api/external/pool/claim-random",
             headers=self._auth_headers(),
-            json={"caller_id": "ext-worker-01", "task_id": "release-no-key", "provider": "outlook"},
+            json={"caller_id": "ext-worker-01", "project_key": "test_project", "task_id": "release-no-key", "provider": "outlook"},
         )
         self.assertEqual(claim_resp.status_code, 200)
         claim_data = claim_resp.get_json()["data"]
@@ -176,6 +179,7 @@ class ExternalPoolApiTests(unittest.TestCase):
                 "claim_token": claim_data["claim_token"],
                 "caller_id": "ext-worker-01",
                 "task_id": "release-no-key",
+                "project_key": "test_project",
             },
         )
 
@@ -194,7 +198,7 @@ class ExternalPoolApiTests(unittest.TestCase):
         claim_resp = client.post(
             "/api/external/pool/claim-random",
             headers=self._auth_headers(),
-            json={"caller_id": "ext-worker-01", "task_id": "complete-no-key", "provider": "outlook"},
+            json={"caller_id": "ext-worker-01", "project_key": "test_project", "task_id": "complete-no-key", "provider": "outlook"},
         )
         self.assertEqual(claim_resp.status_code, 200)
         claim_data = claim_resp.get_json()["data"]
@@ -206,6 +210,7 @@ class ExternalPoolApiTests(unittest.TestCase):
                 "claim_token": claim_data["claim_token"],
                 "caller_id": "ext-worker-01",
                 "task_id": "complete-no-key",
+                "project_key": "test_project",
                 "result": "success",
             },
         )
@@ -228,6 +233,7 @@ class ExternalPoolApiTests(unittest.TestCase):
             json={
                 "caller_id": "ext-worker-01",
                 "task_id": "task-ext-001",
+                "project_key": "test_project",
                 "provider": "outlook",
             },
         )
@@ -256,6 +262,7 @@ class ExternalPoolApiTests(unittest.TestCase):
             json={
                 "caller_id": "csrf-free-worker",
                 "task_id": "csrf-free-task",
+                "project_key": "test_project",
                 "provider": "outlook",
             },
         )
@@ -302,6 +309,7 @@ class ExternalPoolApiTests(unittest.TestCase):
             json={
                 "caller_id": "ext-worker-01",
                 "task_id": "task-ext-002",
+                "project_key": "test_project",
                 "provider": "outlook",
             },
         )
@@ -316,6 +324,7 @@ class ExternalPoolApiTests(unittest.TestCase):
                 "claim_token": claim_data["claim_token"],
                 "caller_id": "ext-worker-02",
                 "task_id": "task-ext-002",
+                "project_key": "test_project",
             },
         )
 
@@ -339,6 +348,7 @@ class ExternalPoolApiTests(unittest.TestCase):
             json={
                 "caller_id": "ext-worker-01",
                 "task_id": "task-ext-complete",
+                "project_key": "test_project",
                 "provider": "outlook",
             },
         )
@@ -353,6 +363,7 @@ class ExternalPoolApiTests(unittest.TestCase):
                 "claim_token": claim_data["claim_token"],
                 "caller_id": "ext-worker-01",
                 "task_id": "task-ext-complete",
+                "project_key": "test_project",
                 "result": "success",
                 "detail": "done",
             },
@@ -362,7 +373,7 @@ class ExternalPoolApiTests(unittest.TestCase):
         data = complete_resp.get_json()
         self.assertTrue(data.get("success"))
         self.assertEqual(data.get("code"), "OK")
-        self.assertEqual(data.get("data", {}).get("pool_status"), "used")
+        self.assertEqual(data.get("data", {}).get("pool_status"), "available")
 
     def test_external_pool_stats_success(self):
         client = self.app.test_client()
@@ -429,7 +440,7 @@ class ExternalPoolApiTests(unittest.TestCase):
         resp = client.post(
             "/api/external/pool/claim-random",
             headers=self._auth_headers(),
-            json={"caller_id": "ext-worker-01", "task_id": "task-ext-disabled"},
+            json={"caller_id": "ext-worker-01", "project_key": "test_project", "task_id": "task-ext-disabled"},
         )
 
         self.assertEqual(resp.status_code, 403)
@@ -451,6 +462,7 @@ class ExternalPoolApiTests(unittest.TestCase):
             json={
                 "caller_id": "ext-worker-01",
                 "task_id": "task-ext-rel",
+                "project_key": "test_project",
                 "provider": "outlook",
             },
         )
@@ -469,6 +481,7 @@ class ExternalPoolApiTests(unittest.TestCase):
                 "claim_token": claim_data["claim_token"],
                 "caller_id": "ext-worker-01",
                 "task_id": "task-ext-rel",
+                "project_key": "test_project",
             },
         )
 
@@ -491,6 +504,7 @@ class ExternalPoolApiTests(unittest.TestCase):
             json={
                 "caller_id": "ext-worker-01",
                 "task_id": "task-ext-comp",
+                "project_key": "test_project",
                 "provider": "outlook",
             },
         )
@@ -509,6 +523,7 @@ class ExternalPoolApiTests(unittest.TestCase):
                 "claim_token": claim_data["claim_token"],
                 "caller_id": "ext-worker-01",
                 "task_id": "task-ext-comp",
+                "project_key": "test_project",
                 "result": "success",
             },
         )
@@ -551,6 +566,7 @@ class ExternalPoolApiTests(unittest.TestCase):
             json={
                 "caller_id": "ext-worker-01",
                 "task_id": "task-ext-no-access",
+                "project_key": "test_project",
                 "provider": "outlook",
             },
         )
@@ -572,7 +588,7 @@ class ExternalPoolApiTests(unittest.TestCase):
         claim_resp = client.post(
             "/api/external/pool/claim-random",
             headers=self._auth_headers("multi-pool-release-allow"),
-            json={"caller_id": "ext-worker-01", "task_id": "release-deny", "provider": "outlook"},
+            json={"caller_id": "ext-worker-01", "project_key": "test_project", "task_id": "release-deny", "provider": "outlook"},
         )
         self.assertEqual(claim_resp.status_code, 200)
         claim_data = claim_resp.get_json()["data"]
@@ -585,6 +601,7 @@ class ExternalPoolApiTests(unittest.TestCase):
                 "claim_token": claim_data["claim_token"],
                 "caller_id": "ext-worker-01",
                 "task_id": "release-deny",
+                "project_key": "test_project",
             },
         )
 
@@ -604,7 +621,7 @@ class ExternalPoolApiTests(unittest.TestCase):
         claim_resp = client.post(
             "/api/external/pool/claim-random",
             headers=self._auth_headers("multi-pool-complete-allow"),
-            json={"caller_id": "ext-worker-01", "task_id": "complete-deny", "provider": "outlook"},
+            json={"caller_id": "ext-worker-01", "project_key": "test_project", "task_id": "complete-deny", "provider": "outlook"},
         )
         self.assertEqual(claim_resp.status_code, 200)
         claim_data = claim_resp.get_json()["data"]
@@ -617,6 +634,7 @@ class ExternalPoolApiTests(unittest.TestCase):
                 "claim_token": claim_data["claim_token"],
                 "caller_id": "ext-worker-01",
                 "task_id": "complete-deny",
+                "project_key": "test_project",
                 "result": "success",
             },
         )
