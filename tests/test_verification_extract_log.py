@@ -327,3 +327,74 @@ class VerificationChannelRoutingLogChannelTests(unittest.TestCase):
 
             self.assertIn("_log_channel", result)
             self.assertEqual(result["_log_channel"], "ai_fallback")
+
+    def test_imap_detail_mismatch_refetches_latest_message_detail(self):
+        """IMAP 连接复用返回的 detail 与最新邮件不一致时，应按 latest.id 重新取详情。"""
+        with self.app.app_context():
+            from outlook_web.services import verification_channel_routing as vcr
+
+            fake_account = {
+                "id": 3,
+                "email": "imap@outlook.com",
+                "account_type": "outlook",
+                "provider": "outlook",
+                "group_id": None,
+                "preferred_verification_channel": "imap_new",
+                "client_id": "cid",
+                "refresh_token": "rt",
+            }
+
+            fake_channel_result = {
+                "success": True,
+                "emails": [
+                    {
+                        "id": "3",
+                        "subject": "Old code",
+                        "from": "OpenAI",
+                        "date": "Tue, 19 May 2026 10:01:15 +0000",
+                    },
+                    {
+                        "id": "5",
+                        "subject": "New code",
+                        "from": "OpenAI",
+                        "date": "Tue, 19 May 2026 10:38:27 +0000",
+                    },
+                ],
+                "detail": {
+                    "id": "3",
+                    "subject": "Old code",
+                    "from": "OpenAI",
+                    "date": "Tue, 19 May 2026 10:01:15 +0000",
+                    "body": "Your code is 990595",
+                },
+            }
+            latest_detail = {
+                "id": "5",
+                "subject": "New code",
+                "from": "OpenAI",
+                "date": "Tue, 19 May 2026 10:38:27 +0000",
+                "body": "Your code is 701280",
+            }
+
+            with (
+                patch.object(vcr, "build_verification_channel_plan", return_value=["imap_new"]),
+                patch.object(vcr, "fetch_emails_and_detail_for_channel", return_value=fake_channel_result),
+                patch.object(vcr, "fetch_email_detail_for_channel", return_value=latest_detail) as mock_fetch_detail,
+                patch(
+                    "outlook_web.services.graph.get_access_token_graph_result",
+                    return_value={"success": False},
+                ),
+                patch("outlook_web.repositories.accounts.update_preferred_verification_channel"),
+            ):
+                result = vcr.extract_verification_for_outlook(
+                    account=fake_account,
+                    resolved_policy={"code_regex": r"(?<!\d)\d{6}(?!\d)", "code_length": "6-6"},
+                    code_source="all",
+                    expected_field="verification_code",
+                )
+
+            self.assertTrue(result.get("success"))
+            self.assertEqual(result.get("data", {}).get("matched_email_id"), "5")
+            self.assertEqual(result.get("data", {}).get("verification_code"), "701280")
+            mock_fetch_detail.assert_called_once()
+            self.assertEqual(mock_fetch_detail.call_args.kwargs.get("message_id"), "5")
