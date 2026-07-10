@@ -32,9 +32,7 @@ class TestAccountsGroupsApiContract(unittest.TestCase):
                 "INSERT INTO groups (name, color, is_system) VALUES (?, '#123456', 0)",
                 (name,),
             )
-            gid = db.execute(
-                "SELECT id FROM groups WHERE name = ?", (name,)
-            ).fetchone()["id"]
+            gid = db.execute("SELECT id FROM groups WHERE name = ?", (name,)).fetchone()["id"]
             db.execute(
                 """
                 INSERT INTO accounts
