@@ -6,25 +6,18 @@ import {
   type ProColumns,
 } from '@ant-design/pro-components';
 import { useQuery } from '@tanstack/react-query';
+import { useIntl } from '@umijs/max';
 import { App, Button, Select, Space, Tag } from 'antd';
 import React, { useMemo, useRef, useState } from 'react';
 import { fetchGroups, type GroupItem } from '@/services/outlook/groups';
 import {
+  actionsForPoolRow,
   applyPoolAction,
+  batchPoolAction,
   fetchPoolAccounts,
   pickPoolError,
   type PoolAccountItem,
 } from '@/services/outlook/poolAdmin';
-
-// 与 outlook_web/services/pool_admin.ACTION_RULES + force_release 对齐
-const ACTIONS = [
-  { label: '移入池', value: 'move_into_pool' },
-  { label: '移出池', value: 'move_out_of_pool' },
-  { label: '恢复可用', value: 'restore_available' },
-  { label: '冻结', value: 'freeze' },
-  { label: '退役', value: 'retire' },
-  { label: '强制释放申领', value: 'force_release' },
-];
 
 const statusColor = (status?: string) => {
   const s = String(status || '').toLowerCase();
@@ -35,13 +28,25 @@ const statusColor = (status?: string) => {
   return 'default';
 };
 
+const BATCH_ACTIONS = [
+  { label: '移入池', value: 'move_into_pool' },
+  { label: '移出池', value: 'move_out_of_pool' },
+  { label: '恢复可用', value: 'restore_available' },
+  { label: '冻结', value: 'freeze' },
+  { label: '退役', value: 'retire' },
+  { label: '强制释放申领', value: 'force_release' },
+];
+
 const PoolAdminPage: React.FC = () => {
-  const { message } = App.useApp();
+  const { message, modal } = App.useApp();
+  const intl = useIntl();
   const actionRef = useRef<ActionType>(null);
   // 后端 in_pool 仅接受 true | false | all（见 pool_admin_repo.list_accounts）
   const [inPool, setInPool] = useState<string>('all');
   const [poolStatus, setPoolStatus] = useState<string | undefined>();
   const [groupId, setGroupId] = useState<number | undefined>();
+  const [provider, setProvider] = useState<string | undefined>();
+  const [selectedRows, setSelectedRows] = useState<PoolAccountItem[]>([]);
 
   const groupsQuery = useQuery({
     queryKey: ['groups'],
@@ -56,6 +61,8 @@ const PoolAdminPage: React.FC = () => {
       })),
     [groupsQuery.data],
   );
+
+  const selectedIds = selectedRows.map((r) => r.id);
 
   const runAction = async (row: PoolAccountItem, action: string) => {
     try {
@@ -74,6 +81,44 @@ const PoolAdminPage: React.FC = () => {
         ),
       );
     }
+  };
+
+  const runBatch = (action: string) => {
+    if (!selectedIds.length) {
+      message.warning('请先勾选账号');
+      return;
+    }
+    const claimedOnlyForce = selectedRows.some(
+      (r) =>
+        String(r.pool_status || '').toLowerCase() === 'claimed' &&
+        action !== 'force_release',
+    );
+    if (claimedOnlyForce) {
+      message.warning(
+        '选中含 claimed 账号：claimed 仅允许 force_release，请改选或筛选后重试',
+      );
+      return;
+    }
+    const label =
+      BATCH_ACTIONS.find((a) => a.value === action)?.label || action;
+    modal.confirm({
+      title: `对选中 ${selectedIds.length} 项执行「${label}」？`,
+      content: '按账号串行调用后端 action，部分失败会汇总提示',
+      onOk: async () => {
+        const result = await batchPoolAction(selectedIds, action);
+        if (result.fail === 0) {
+          message.success(`全部成功（${result.ok}）`);
+        } else {
+          message.warning(
+            `成功 ${result.ok} / 失败 ${result.fail}${
+              result.errors[0] ? `：${result.errors[0]}` : ''
+            }`,
+          );
+        }
+        setSelectedRows([]);
+        actionRef.current?.reload();
+      },
+    });
   };
 
   const columns: ProColumns<PoolAccountItem>[] = [
@@ -130,7 +175,7 @@ const PoolAdminPage: React.FC = () => {
         <Select
           placeholder="选择动作"
           style={{ width: 180 }}
-          options={ACTIONS}
+          options={actionsForPoolRow(row)}
           onChange={(value) => void runAction(row, value)}
         />
       ),
@@ -139,8 +184,14 @@ const PoolAdminPage: React.FC = () => {
 
   return (
     <PageContainer
-      title="邮箱池管理"
-      subTitle="对接 /api/pool-admin/*"
+      title={intl.formatMessage({
+        id: 'outlook.pool.title',
+        defaultMessage: '邮箱池管理',
+      })}
+      subTitle={intl.formatMessage({
+        id: 'outlook.pool.subtitle',
+        defaultMessage: '对接 /api/pool-admin/* · claimed 仅 force_release',
+      })}
       extra={
         <Button
           icon={<ReloadOutlined />}
@@ -157,6 +208,24 @@ const PoolAdminPage: React.FC = () => {
         cardBordered
         options={{ density: true, reload: true, setting: true }}
         form={{ syncToUrl: false }}
+        rowSelection={{
+          selectedRowKeys: selectedIds,
+          onChange: (_keys, rows) => setSelectedRows(rows),
+        }}
+        tableAlertOptionRender={() => (
+          <Space wrap>
+            {BATCH_ACTIONS.map((a) => (
+              <Button
+                key={a.value}
+                size="small"
+                danger={a.value === 'retire' || a.value === 'force_release'}
+                onClick={() => runBatch(a.value)}
+              >
+                {a.label}
+              </Button>
+            ))}
+          </Space>
+        )}
         toolbar={{
           search: false,
           actions: [
@@ -193,6 +262,23 @@ const PoolAdminPage: React.FC = () => {
               }}
             />,
             <Select
+              key="provider"
+              allowClear
+              showSearch
+              placeholder="Provider"
+              style={{ width: 160 }}
+              value={provider}
+              options={[
+                { label: 'outlook', value: 'outlook' },
+                { label: 'imap_generic', value: 'imap_generic' },
+                { label: 'custom', value: 'custom' },
+              ]}
+              onChange={(v) => {
+                setProvider(v);
+                actionRef.current?.reload();
+              }}
+            />,
+            <Select
               key="group"
               allowClear
               placeholder="分组"
@@ -216,6 +302,7 @@ const PoolAdminPage: React.FC = () => {
               in_pool: inPool,
               pool_status: poolStatus,
               group_id: groupId,
+              provider,
             });
             // 后端形状：{ items, total, page, page_size, total_pages }
             const list = res.items || res.accounts || [];

@@ -23,12 +23,14 @@ import {
   type TokenResult,
   type TokenToolConfig,
 } from '@/services/outlook/tokenTool';
+import { useIntl } from '@umijs/max';
 
 const DEFAULT_SCOPE =
   'https://graph.microsoft.com/Mail.Read offline_access openid profile';
 
 const TokenToolPage: React.FC = () => {
   const { message } = App.useApp();
+  const intl = useIntl();
   const [configForm] = Form.useForm();
   const [loading, setLoading] = useState(false);
   const [authorizeUrl, setAuthorizeUrl] = useState('');
@@ -202,7 +204,10 @@ const TokenToolPage: React.FC = () => {
   };
 
   return (
-    <PageContainer title="OAuth Token 工具" subTitle="对接 /api/token-tool/*">
+    <PageContainer title={intl.formatMessage({
+      id: 'outlook.tokenTool.title',
+      defaultMessage: 'OAuth Token 工具',
+    })} subTitle="对接 /api/token-tool/*">
       <Space direction="vertical" size={16} style={{ width: '100%' }}>
         <ProCard title="OAuth 配置" bordered loading={loading && !authorizeUrl}>
           <Form

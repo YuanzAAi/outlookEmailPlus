@@ -1,26 +1,25 @@
 import { outlookRequest } from './request';
 
 export type AuditLogItem = {
-  id?: number;
+  id?: number | string;
+  created_at?: string;
   action?: string;
   resource_type?: string;
-  resource_id?: string;
-  detail?: string;
-  details?: string;
-  operator?: string;
-  ip?: string;
-  user_ip?: string;
-  trace_id?: string;
-  created_at?: string;
-  [key: string]: any;
+  resource_id?: string | number;
+  /** 后端真实字段 */
+  details?: string | Record<string, any> | null;
+  user_ip?: string | null;
+  trace_id?: string | null;
+  /** 兼容别名（若旧响应存在） */
+  detail?: string | null;
+  ip?: string | null;
+  operator?: string | null;
 };
 
 export type AuditLogsResponse = {
-  success: boolean;
+  success?: boolean;
   logs?: AuditLogItem[];
   total?: number;
-  limit?: number;
-  offset?: number;
   error?: any;
 };
 
@@ -32,12 +31,7 @@ export async function fetchAuditLogs(params: {
 } = {}) {
   return outlookRequest<AuditLogsResponse>('/api/audit-logs', {
     method: 'GET',
-    params: {
-      limit: params.limit ?? 50,
-      offset: params.offset ?? 0,
-      action: params.action || undefined,
-      resource_type: params.resource_type || undefined,
-    },
+    params,
     skipErrorHandler: true,
   });
 }

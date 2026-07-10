@@ -38,6 +38,7 @@ import {
   uninstallPlugin,
   type PluginItem,
 } from '@/services/outlook/plugins';
+import { useIntl } from '@umijs/max';
 
 const statusTag = (status?: string) => {
   if (status === 'installed') return <Tag color="success">已安装</Tag>;
@@ -47,6 +48,7 @@ const statusTag = (status?: string) => {
 
 const PluginsPage: React.FC = () => {
   const { message } = App.useApp();
+  const intl = useIntl();
   const queryClient = useQueryClient();
   const actionRef = useRef<ActionType>(null);
   const [customOpen, setCustomOpen] = useState(false);
@@ -88,11 +90,15 @@ const PluginsPage: React.FC = () => {
         setConfigPlugin(null);
         return;
       }
-      const schemaData = schemaRes?.data || {};
-      const configData = configRes?.data || {};
-      const fields = schemaData.config_schema?.fields || schemaData.fields || [];
+      // 后端: data.config_schema.fields / data.config（见 temp_mail_plugin_manager）
+      const fields =
+        schemaRes?.data?.config_schema?.fields ||
+        schemaRes?.data?.fields ||
+        [];
       setConfigFields(fields);
-      configForm.setFieldsValue(configData.config || configData);
+      configForm.setFieldsValue(
+        configRes?.data?.config || configRes?.data || {},
+      );
     } catch (error: any) {
       message.error(
         pickPluginErrorMessage(error?.response?.data, error?.message || '加载配置失败'),
@@ -254,7 +260,10 @@ const PluginsPage: React.FC = () => {
 
   return (
     <PageContainer
-      title="插件管理"
+      title={intl.formatMessage({
+        id: 'outlook.plugins.title',
+        defaultMessage: '插件管理',
+      })}
       subTitle={`对接 /api/plugins · 已安装 ${installedCount}`}
       extra={
         <Space>

@@ -65,6 +65,46 @@ export async function applyPoolAction(accountId: number, action: string) {
   });
 }
 
+/** claimed 账号仅允许 force_release；其余状态用完整动作集 */
+export function actionsForPoolRow(row: PoolAccountItem) {
+  const status = String(row.pool_status || '').toLowerCase();
+  if (status === 'claimed') {
+    return [{ label: '强制释放申领', value: 'force_release' }];
+  }
+  return [
+    { label: '移入池', value: 'move_into_pool' },
+    { label: '移出池', value: 'move_out_of_pool' },
+    { label: '恢复可用', value: 'restore_available' },
+    { label: '冻结', value: 'freeze' },
+    { label: '退役', value: 'retire' },
+    { label: '强制释放申领', value: 'force_release' },
+  ];
+}
+
+export async function batchPoolAction(
+  accountIds: number[],
+  action: string,
+): Promise<{ ok: number; fail: number; errors: string[] }> {
+  let ok = 0;
+  let fail = 0;
+  const errors: string[] = [];
+  for (const id of accountIds) {
+    try {
+      const res = await applyPoolAction(id, action);
+      if (res?.success === false) {
+        fail += 1;
+        errors.push(`#${id}: ${pickPoolError(res)}`);
+      } else {
+        ok += 1;
+      }
+    } catch (e: any) {
+      fail += 1;
+      errors.push(`#${id}: ${e?.message || '失败'}`);
+    }
+  }
+  return { ok, fail, errors };
+}
+
 export function pickPoolError(payload: any, fallback = '请求失败'): string {
   if (!payload) return fallback;
   if (typeof payload.message === 'string' && payload.message) return payload.message;

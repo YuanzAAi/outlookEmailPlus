@@ -24,9 +24,11 @@ import {
   updateGroup,
   type GroupItem,
 } from '@/services/outlook/groups';
+import { useIntl } from '@umijs/max';
 
 const GroupsPage: React.FC = () => {
   const { message } = App.useApp();
+  const intl = useIntl();
   const queryClient = useQueryClient();
   const actionRef = useRef<ActionType>(null);
   const [editing, setEditing] = useState<GroupItem | null>(null);
@@ -101,7 +103,7 @@ const GroupsPage: React.FC = () => {
         <Popconfirm
           key="delete"
           title="确认删除该分组？"
-          description="删除后该组账号会迁移到默认分组；系统分组不可删。"
+          description="删除后该分组下账号会迁移到默认分组；系统分组不可删。"
           onConfirm={async () => {
             try {
               const res = await deleteGroup(row.id);
@@ -130,7 +132,10 @@ const GroupsPage: React.FC = () => {
 
   return (
     <PageContainer
-      title="分组管理"
+      title={intl.formatMessage({
+        id: 'outlook.groups.title',
+        defaultMessage: '分组管理',
+      })}
       subTitle="对接 /api/groups"
       extra={
         <Space>

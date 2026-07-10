@@ -12,9 +12,11 @@ import {
   fetchRefreshLogs,
   type RefreshLogItem,
 } from '@/services/outlook/refreshLogs';
+import { useIntl } from '@umijs/max';
 
 const RefreshLogPage: React.FC = () => {
   const { message } = App.useApp();
+  const intl = useIntl();
   const actionRef = useRef<ActionType>(null);
   const [mode, setMode] = useState<'all' | 'failed'>('all');
 
@@ -61,7 +63,10 @@ const RefreshLogPage: React.FC = () => {
 
   return (
     <PageContainer
-      title="刷新日志"
+      title={intl.formatMessage({
+        id: 'outlook.refreshLog.title',
+        defaultMessage: '刷新日志',
+      })}
       subTitle="对接 /api/accounts/refresh-logs*"
       extra={
         <Space>

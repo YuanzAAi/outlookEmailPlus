@@ -38,6 +38,7 @@ import {
   formatPercent,
   formatTime,
 } from './utils';
+import { useIntl } from '@umijs/max';
 
 type TabKey =
   | 'summary'
@@ -671,10 +672,17 @@ const PoolPane: React.FC<{ data?: OverviewPool; loading: boolean }> = ({
   );
 };
 
+const ACTIVITY_KPI_LABELS: Record<string, string> = {
+  audit_ops_24h: '审计操作 (24h)',
+  notification_total_24h: '通知推送 (24h)',
+  verification_events_24h: '验证码提取 (24h)',
+};
+
 const ActivityPane: React.FC<{
   data?: OverviewActivity;
   loading: boolean;
 }> = ({ data, loading }) => {
+  // 后端契约: kpi + notification_stats + op_type_dist + timeline（兼容 recent/items/by_action）
   const timeline = (data?.timeline || data?.recent || data?.items || []) as Array<
     Record<string, any>
   >;
@@ -685,11 +693,6 @@ const ActivityPane: React.FC<{
     ([channel, stats]) => ({ channel, ...((stats || {}) as Record<string, any>) }),
   );
   const kpiEntries = Object.entries(data?.kpi || {});
-  const kpiLabels: Record<string, string> = {
-    audit_ops_24h: '24h 审计操作',
-    notification_total_24h: '24h 通知推送',
-    verification_events_24h: '24h 验证码事件',
-  };
 
   return (
     <Space direction="vertical" size={16} style={{ width: '100%' }}>
@@ -700,7 +703,7 @@ const ActivityPane: React.FC<{
               <StatisticCard
                 loading={loading}
                 statistic={{
-                  title: kpiLabels[key] || key,
+                  title: ACTIVITY_KPI_LABELS[key] || key,
                   value:
                     typeof value === 'number'
                       ? value
@@ -757,19 +760,20 @@ const ActivityPane: React.FC<{
           </ProCard>
         </Col>
       </Row>
-      <ProCard title="系统活动" bordered loading={loading}>
+      <ProCard title="系统活动时间线" bordered loading={loading}>
         {timeline.length ? (
           <Table
             size="small"
-            pagination={false}
+            pagination={{ pageSize: 20, hideOnSinglePage: true }}
             rowKey={(row, i) => String(row.time || i)}
             dataSource={timeline}
             columns={[
-              { title: '时间', dataIndex: 'time', render: (v) => formatTime(v) },
-              { title: '动作', dataIndex: 'action', ellipsis: true },
+              { title: '时间', dataIndex: 'time', width: 180, render: (v) => formatTime(v) },
+              { title: '动作', dataIndex: 'action', ellipsis: true, render: (v) => v || '--' },
               {
                 title: '状态',
                 dataIndex: 'status',
+                width: 100,
                 render: (v) => {
                   const status = String(v || '').toLowerCase();
                   const color =
@@ -781,10 +785,18 @@ const ActivityPane: React.FC<{
                   return <Tag color={color}>{v || '--'}</Tag>;
                 },
               },
-              { title: '资源', dataIndex: 'resource_type', render: (v) => v || '--' },
+              { title: '资源', dataIndex: 'resource_type', width: 120, render: (v) => v || '--' },
               { title: '操作者', dataIndex: 'operator', render: (v) => v || '--' },
-              { title: '渠道', dataIndex: 'channel', render: (v) => v ? channelLabel(v) : '--' },
-              { title: '验证码', dataIndex: 'code_found', render: (v) => v || '--' },
+              {
+                title: '渠道',
+                dataIndex: 'channel',
+                render: (v) => (v ? channelLabel(v) : '--'),
+              },
+              {
+                title: '验证码',
+                dataIndex: 'code_found',
+                render: (v) => (v != null && v !== '' ? String(v) : '--'),
+              },
               {
                 title: '耗时',
                 dataIndex: 'duration_ms',
@@ -804,6 +816,7 @@ const ActivityPane: React.FC<{
 };
 
 const OverviewPage: React.FC = () => {
+  const intl = useIntl();
   const [activeTab, setActiveTab] = useState<TabKey>('summary');
 
   const summaryQuery = useQuery({
@@ -917,7 +930,10 @@ const OverviewPage: React.FC = () => {
 
   return (
     <PageContainer
-      title="数据概览"
+      title={intl.formatMessage({
+        id: 'outlook.overview.title',
+        defaultMessage: '数据概览',
+      })}
       subTitle="账号、验证码、对外 API、邮箱池与系统活动"
       extra={
         <Space>

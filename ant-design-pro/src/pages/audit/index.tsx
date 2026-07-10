@@ -5,12 +5,72 @@ import {
   type ActionType,
   type ProColumns,
 } from '@ant-design/pro-components';
-import { App, Button } from 'antd';
+import { useIntl } from '@umijs/max';
+import { App, Button, Tag, Typography } from 'antd';
 import React, { useRef } from 'react';
 import { fetchAuditLogs, type AuditLogItem } from '@/services/outlook/audit';
 
+const actionColor = (action?: string) => {
+  const a = String(action || '').toLowerCase();
+  if (
+    a.includes('delete') ||
+    a.includes('remove') ||
+    a.includes('purge') ||
+    a.includes('retire')
+  ) {
+    return 'error';
+  }
+  if (
+    a.includes('create') ||
+    a.includes('add') ||
+    a.includes('import') ||
+    a.includes('claim')
+  ) {
+    return 'success';
+  }
+  if (
+    a.includes('update') ||
+    a.includes('edit') ||
+    a.includes('toggle') ||
+    a.includes('move') ||
+    a.includes('refresh')
+  ) {
+    return 'processing';
+  }
+  if (a.includes('export') || a.includes('login') || a.includes('logout')) {
+    return 'warning';
+  }
+  return 'default';
+};
+
+const formatTime = (raw?: string | null) => {
+  if (!raw) return '--';
+  const d = new Date(raw);
+  if (Number.isNaN(d.getTime())) return String(raw);
+  return d.toLocaleString();
+};
+
+const formatDetails = (raw: unknown): string => {
+  if (raw == null || raw === '') return '--';
+  if (typeof raw === 'object') {
+    try {
+      return JSON.stringify(raw, null, 2);
+    } catch {
+      return String(raw);
+    }
+  }
+  const text = String(raw);
+  try {
+    const parsed = JSON.parse(text);
+    return JSON.stringify(parsed, null, 2);
+  } catch {
+    return text;
+  }
+};
+
 const AuditPage: React.FC = () => {
   const { message } = App.useApp();
+  const intl = useIntl();
   const actionRef = useRef<ActionType>(null);
 
   const columns: ProColumns<AuditLogItem>[] = [
@@ -19,13 +79,16 @@ const AuditPage: React.FC = () => {
       dataIndex: 'created_at',
       width: 180,
       search: false,
-      render: (v) => v || '--',
+      render: (_, row) => formatTime(row.created_at as string | undefined),
     },
     {
       title: '动作',
       dataIndex: 'action',
-      width: 120,
+      width: 140,
       fieldProps: { placeholder: '如 create/delete' },
+      render: (_, row) => (
+        <Tag color={actionColor(row.action)}>{row.action || '--'}</Tag>
+      ),
     },
     {
       title: '资源类型',
@@ -43,16 +106,21 @@ const AuditPage: React.FC = () => {
     {
       title: '详情',
       dataIndex: 'details',
-      ellipsis: true,
       search: false,
-      render: (_, row) => row.details || row.detail || '--',
-    },
-    {
-      title: '操作者',
-      dataIndex: 'operator',
-      width: 120,
-      search: false,
-      render: (v) => v || '--',
+      width: 280,
+      render: (_, row) => {
+        const pretty = formatDetails(row.details ?? row.detail);
+        if (pretty === '--') return '--';
+        return (
+          <Typography.Paragraph
+            ellipsis={{ rows: 2, expandable: true, symbol: '展开' }}
+            style={{ marginBottom: 0, whiteSpace: 'pre-wrap', fontSize: 12 }}
+            copyable={{ text: pretty }}
+          >
+            {pretty}
+          </Typography.Paragraph>
+        );
+      },
     },
     {
       title: 'IP',
@@ -64,16 +132,30 @@ const AuditPage: React.FC = () => {
     {
       title: 'Trace ID',
       dataIndex: 'trace_id',
+      width: 160,
       ellipsis: true,
       search: false,
-      render: (v) => v || '--',
+      render: (v) =>
+        v ? (
+          <Typography.Text copyable style={{ fontSize: 12 }}>
+            {String(v)}
+          </Typography.Text>
+        ) : (
+          '--'
+        ),
     },
   ];
 
   return (
     <PageContainer
-      title="审计日志"
-      subTitle="对接 /api/audit-logs"
+      title={intl.formatMessage({
+        id: 'outlook.audit.title',
+        defaultMessage: '审计日志',
+      })}
+      subTitle={intl.formatMessage({
+        id: 'outlook.audit.subtitle',
+        defaultMessage: '对接 /api/audit-logs · details / user_ip / trace_id',
+      })}
       extra={
         <Button
           icon={<ReloadOutlined />}

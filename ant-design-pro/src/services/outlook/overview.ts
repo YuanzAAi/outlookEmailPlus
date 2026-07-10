@@ -111,7 +111,13 @@ export type OverviewPool = {
 };
 
 export type OverviewActivity = {
-  kpi?: Record<string, number | string | undefined>;
+  kpi?: {
+    audit_ops_24h?: number;
+    notification_total_24h?: number;
+    verification_events_24h?: number;
+    [key: string]: number | string | undefined;
+  };
+  /** 兼容别名 */
   recent?: Array<Record<string, any>>;
   items?: Array<Record<string, any>>;
   by_action?: Array<Record<string, any>>;
@@ -127,8 +133,9 @@ export type OverviewActivity = {
     resource_type?: string;
     operator?: string;
     channel?: string;
-    code_found?: string;
+    code_found?: string | boolean | null;
     duration_ms?: number;
+    [key: string]: any;
   }>;
   [key: string]: any;
 };

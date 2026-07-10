@@ -38,6 +38,7 @@ import {
   type TempEmailItem,
   type TempEmailMessage,
 } from '@/services/outlook/tempEmails';
+import { useIntl } from '@umijs/max';
 
 function formatDate(value?: string | number) {
   if (value === undefined || value === null || value === '') return '--';
@@ -56,6 +57,7 @@ function formatDate(value?: string | number) {
 
 const TempEmailsPage: React.FC = () => {
   const { message } = App.useApp();
+  const intl = useIntl();
   const queryClient = useQueryClient();
   const [form] = Form.useForm();
 
@@ -206,16 +208,18 @@ const TempEmailsPage: React.FC = () => {
     try {
       const res = await extractTempEmailVerification(email);
       if (res?.success) {
-        const code =
+        const text =
+          res.data?.formatted ||
           res.data?.verification_code ||
           res.data?.code ||
-          res.data?.verificationCode;
-        if (code) {
+          res.data?.verificationCode ||
+          res.data?.verification_link;
+        if (text) {
           try {
-            await navigator.clipboard.writeText(String(code));
-            message.success(`验证码已复制: ${code}`);
+            await navigator.clipboard.writeText(String(text));
+            message.success(`已复制: ${text}`);
           } catch {
-            message.success(`验证码: ${code}`);
+            message.success(`验证码: ${text}`);
           }
         } else {
           message.info(res.message || '未提取到验证码');
@@ -265,7 +269,10 @@ const TempEmailsPage: React.FC = () => {
 
   return (
     <PageContainer
-      title="临时邮箱"
+      title={intl.formatMessage({
+        id: 'outlook.tempEmails.title',
+        defaultMessage: '临时邮箱',
+      })}
       subTitle="对接 /api/temp-emails/*"
       extra={
         <Button

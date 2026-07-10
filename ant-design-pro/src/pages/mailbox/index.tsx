@@ -1,29 +1,45 @@
 import {
+  AppstoreOutlined,
+  ColumnWidthOutlined,
+  CopyOutlined,
   DeleteOutlined,
+  KeyOutlined,
   MailOutlined,
   ReloadOutlined,
+  UnorderedListOutlined,
 } from '@ant-design/icons';
 import { PageContainer, ProCard } from '@ant-design/pro-components';
 import { useQuery } from '@tanstack/react-query';
-import { history, useLocation } from '@umijs/max';
+import { history, useIntl, useLocation, useModel } from '@umijs/max';
 import {
   Alert,
   App,
+  Badge,
   Button,
   Checkbox,
   Empty,
+  Input,
+  InputNumber,
   List,
   Popconfirm,
+  Segmented,
   Select,
   Space,
   Spin,
+  Switch,
   Tag,
+  Tooltip,
   Typography,
 } from 'antd';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { fetchAccounts, type AccountItem } from '@/services/outlook/accounts';
+import ResizableWorkbench from '@/components/MailboxLayout/ResizableWorkbench';
+import {
+  fetchAccounts,
+  type AccountItem,
+} from '@/services/outlook/accounts';
 import {
   deleteEmails,
+  extractEmailVerification,
   fetchEmailDetail,
   fetchEmails,
   normalizeMethodParam,
@@ -32,6 +48,32 @@ import {
   type EmailFolder,
   type EmailListItem,
 } from '@/services/outlook/emails';
+import {
+  fetchGroups,
+  isTempMailboxGroup,
+  type GroupItem,
+} from '@/services/outlook/groups';
+import {
+  applyPollSettings,
+  getPollSettings,
+  getPollSnapshot,
+  getPollSnapshots,
+  isPolling,
+  loadPollSettingsFromServer,
+  startPoll,
+  stopPoll,
+  subscribePoll,
+  type PollSnapshot,
+} from '@/services/outlook/pollEngine';
+import {
+  buildEmailSrcDoc,
+  sortEmailsByNewestFirst,
+} from '@/utils/emailHtml';
+import {
+  loadViewMode,
+  saveViewMode,
+  type MailboxViewMode,
+} from '@/utils/mailboxLayout';
 
 const FOLDERS: Array<{ label: string; value: EmailFolder }> = [
   { label: '收件箱', value: 'inbox' },
@@ -41,12 +83,20 @@ const FOLDERS: Array<{ label: string; value: EmailFolder }> = [
 
 const PAGE_SIZE = 20;
 
-function useAccountFromQuery(): string | undefined {
+type ReadFilter = 'all' | 'unread' | 'read';
+
+function useMailboxQuery() {
   const location = useLocation();
   return useMemo(() => {
     const params = new URLSearchParams(location.search || '');
-    const account = params.get('account') || params.get('email') || '';
-    return account.trim() || undefined;
+    return {
+      account:
+        (params.get('account') || params.get('email') || '').trim() ||
+        undefined,
+      folder: (params.get('folder') || 'inbox') as EmailFolder,
+      skip: Math.max(0, Number(params.get('skip') || 0) || 0),
+      group: params.get('group') ? Number(params.get('group')) : undefined,
+    };
   }, [location.search]);
 }
 
@@ -61,16 +111,42 @@ function formatDate(value?: string) {
   }
 }
 
-const MailboxPage: React.FC = () => {
-  const { message } = App.useApp();
-  const queryAccount = useAccountFromQuery();
+function syncMailboxUrl(opts: {
+  account?: string;
+  folder?: string;
+  skip?: number;
+  group?: number;
+}) {
+  const params = new URLSearchParams();
+  if (opts.account) params.set('account', opts.account);
+  if (opts.folder && opts.folder !== 'inbox') params.set('folder', opts.folder);
+  if (opts.skip && opts.skip > 0) params.set('skip', String(opts.skip));
+  if (opts.group) params.set('group', String(opts.group));
+  const qs = params.toString();
+  history.replace(qs ? `/mailbox?${qs}` : '/mailbox');
+}
 
-  const [selectedEmail, setSelectedEmail] = useState<string | undefined>(
-    queryAccount,
+const MailboxPage: React.FC = () => {
+  const { message, modal } = App.useApp();
+  const intl = useIntl();
+  const query = useMailboxQuery();
+  const { initialState } = useModel('@@initialState');
+  const layoutUserId =
+    (initialState as any)?.currentUser?.userid ||
+    (initialState as any)?.currentUser?.name ||
+    'guest';
+
+  const [viewMode, setViewMode] = useState<MailboxViewMode>(() =>
+    loadViewMode(),
   );
-  const [folder, setFolder] = useState<EmailFolder>('inbox');
+  const [layoutResetToken, setLayoutResetToken] = useState(0);
+  const [groupId, setGroupId] = useState<number | undefined>(query.group);
+  const [selectedEmail, setSelectedEmail] = useState<string | undefined>(
+    query.account,
+  );
+  const [folder, setFolder] = useState<EmailFolder>(query.folder || 'inbox');
   const [method, setMethod] = useState<string>('graph');
-  const [skip, setSkip] = useState(0);
+  const [skip, setSkip] = useState(query.skip || 0);
   const [emails, setEmails] = useState<EmailListItem[]>([]);
   const [hasMore, setHasMore] = useState(false);
   const [listLoading, setListLoading] = useState(false);
@@ -80,33 +156,83 @@ const MailboxPage: React.FC = () => {
   const [detail, setDetail] = useState<EmailDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [extracting, setExtracting] = useState(false);
+  const [extractingEmail, setExtractingEmail] = useState<string | null>(null);
+  const [lastVerification, setLastVerification] = useState<string | null>(null);
+  const [trusted, setTrusted] = useState(false);
+  const [readFilter, setReadFilter] = useState<ReadFilter>('all');
+  const [listSearch, setListSearch] = useState('');
+  const [pollSnap, setPollSnap] = useState<PollSnapshot | undefined>();
+  const [allPollSnaps, setAllPollSnaps] = useState<PollSnapshot[]>([]);
+  const [pollInterval, setPollInterval] = useState(10);
+  const [pollMaxCount, setPollMaxCount] = useState(5);
+  const [compactSearch, setCompactSearch] = useState('');
+  const [compactSelected, setCompactSelected] = useState<number[]>([]);
+  const [pullingEmails, setPullingEmails] = useState<Record<string, boolean>>(
+    {},
+  );
 
-  const accountsQuery = useQuery({
-    queryKey: ['mailbox-accounts'],
-    queryFn: () =>
-      fetchAccounts({ page: 1, page_size: 200, sort_by: 'email', sort_order: 'asc' }),
+  const groupsQuery = useQuery({
+    queryKey: ['mailbox-groups'],
+    queryFn: fetchGroups,
   });
 
-  const accountOptions = useMemo(() => {
-    const list = accountsQuery.data?.accounts || [];
-    return list.map((a: AccountItem) => ({
-      label: a.email,
-      value: a.email,
-    }));
-  }, [accountsQuery.data]);
+  const accountsQuery = useQuery({
+    queryKey: ['mailbox-accounts', groupId],
+    queryFn: () =>
+      fetchAccounts({
+        page: 1,
+        page_size: 200,
+        group_id: groupId,
+        sort_by: 'refresh_time',
+        sort_order: 'asc',
+      }),
+  });
+
+  const groups = useMemo(
+    () =>
+      (groupsQuery.data?.groups || []).filter(
+        (g: GroupItem) => !isTempMailboxGroup(g),
+      ),
+    [groupsQuery.data],
+  );
+
+  const accounts = useMemo(
+    () => accountsQuery.data?.accounts || [],
+    [accountsQuery.data],
+  );
+
+  const filteredCompactAccounts = useMemo(() => {
+    const q = compactSearch.trim().toLowerCase();
+    if (!q) return accounts;
+    return accounts.filter((a) => {
+      const hay = `${a.email || ''} ${a.remark || ''} ${a.group_name || ''}`.toLowerCase();
+      return hay.includes(q);
+    });
+  }, [accounts, compactSearch]);
 
   useEffect(() => {
-    if (queryAccount) {
-      setSelectedEmail(queryAccount);
-    }
-  }, [queryAccount]);
+    void loadPollSettingsFromServer().then((s) => {
+      setPollInterval(s.interval);
+      setPollMaxCount(s.maxCount);
+    });
+    return subscribePoll((snaps) => {
+      setAllPollSnaps(snaps);
+      if (selectedEmail) setPollSnap(getPollSnapshot(selectedEmail));
+    });
+  }, [selectedEmail]);
 
-  // 账号列表就绪后，若无选中则默认第一项
+  useEffect(() => {
+    if (query.account) setSelectedEmail(query.account);
+    if (query.folder) setFolder(query.folder);
+    if (query.group) setGroupId(query.group);
+  }, [query.account, query.folder, query.group]);
+
   useEffect(() => {
     if (selectedEmail) return;
-    const first = accountsQuery.data?.accounts?.[0]?.email;
+    const first = accounts[0]?.email;
     if (first) setSelectedEmail(first);
-  }, [accountsQuery.data, selectedEmail]);
+  }, [accounts, selectedEmail]);
 
   const loadEmails = useCallback(
     async (opts?: { append?: boolean; nextSkip?: number }) => {
@@ -124,17 +250,24 @@ const MailboxPage: React.FC = () => {
           top: PAGE_SIZE,
         });
         if (res?.success) {
-          const list = res.emails || [];
-          setEmails((prev) => (append ? [...prev, ...list] : list));
+          const list = sortEmailsByNewestFirst(res.emails || []);
+          setEmails((prev) =>
+            append ? sortEmailsByNewestFirst([...prev, ...list]) : list,
+          );
           setHasMore(!!res.has_more);
           setSkip(nextSkip);
-          if (res.method) {
-            setMethod(normalizeMethodParam(res.method));
-          }
+          syncMailboxUrl({
+            account: selectedEmail,
+            folder,
+            skip: nextSkip,
+            group: groupId,
+          });
+          if (res.method) setMethod(normalizeMethodParam(res.method));
           if (!append) {
             setActiveId(null);
             setDetail(null);
             setSelectedIds([]);
+            setTrusted(false);
           }
         } else {
           if (!append) {
@@ -158,22 +291,39 @@ const MailboxPage: React.FC = () => {
         setListLoading(false);
       }
     },
-    [selectedEmail, folder, method],
+    [selectedEmail, folder, method, groupId],
   );
 
-  // 切换账号/文件夹时重新加载（不跟 method 循环：method 由响应回写）
   useEffect(() => {
-    if (!selectedEmail) return;
+    if (!selectedEmail || viewMode !== 'standard') return;
     void loadEmails({ append: false, nextSkip: 0 });
-    // 仅账号/文件夹变化时拉取；method 由服务端回写，避免循环
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedEmail, folder]);
+  }, [selectedEmail, folder, viewMode]);
+
+  const filteredEmails = useMemo(() => {
+    let list = emails;
+    if (readFilter === 'unread') {
+      list = list.filter((e) => e.is_read === false);
+    } else if (readFilter === 'read') {
+      list = list.filter((e) => e.is_read !== false);
+    }
+    const q = listSearch.trim().toLowerCase();
+    if (q) {
+      list = list.filter((e) => {
+        const hay =
+          `${e.subject || ''} ${e.from || ''} ${e.body_preview || ''}`.toLowerCase();
+        return hay.includes(q);
+      });
+    }
+    return list;
+  }, [emails, readFilter, listSearch]);
 
   const openDetail = async (item: EmailListItem) => {
     if (!selectedEmail || !item?.id) return;
     setActiveId(item.id);
     setDetailLoading(true);
     setDetail(null);
+    setTrusted(false);
     try {
       const res = await fetchEmailDetail(selectedEmail, item.id, {
         method: normalizeMethodParam(method),
@@ -196,7 +346,38 @@ const MailboxPage: React.FC = () => {
 
   const onAccountChange = (email: string) => {
     setSelectedEmail(email);
-    history.replace(`/mailbox?account=${encodeURIComponent(email)}`);
+    setSkip(0);
+    syncMailboxUrl({ account: email, folder, skip: 0, group: groupId });
+  };
+
+  const onGroupChange = (gid?: number) => {
+    setGroupId(gid);
+    setSelectedEmail(undefined);
+    setEmails([]);
+    setDetail(null);
+    syncMailboxUrl({
+      account: undefined,
+      folder,
+      skip: 0,
+      group: gid,
+    });
+  };
+
+  const onFolderChange = (v: EmailFolder) => {
+    setFolder(v);
+    setSkip(0);
+    syncMailboxUrl({
+      account: selectedEmail,
+      folder: v,
+      skip: 0,
+      group: groupId,
+    });
+  };
+
+  const onViewModeChange = (mode: MailboxViewMode | string) => {
+    const next: MailboxViewMode = mode === 'compact' ? 'compact' : 'standard';
+    setViewMode(next);
+    saveViewMode(next);
   };
 
   const onDeleteSelected = async () => {
@@ -218,62 +399,890 @@ const MailboxPage: React.FC = () => {
     }
   };
 
+  const copyText = async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  const extractForEmail = async (email: string) => {
+    setExtracting(true);
+    setExtractingEmail(email);
+    try {
+      const res = await extractEmailVerification(email);
+      if (res?.success && res.data) {
+        const text =
+          res.data.formatted ||
+          res.data.verification_code ||
+          res.data.code ||
+          res.data.verification_link ||
+          '';
+        if (!text) {
+          message.info(res.message || '未提取到验证码或链接');
+          return;
+        }
+        setLastVerification(String(text));
+        const ok = await copyText(String(text));
+        message.success(ok ? `已复制: ${text}` : `验证码: ${text}`);
+        return;
+      }
+      message.error(pickEmailsErrorMessage(res, '未找到验证码或链接'));
+    } catch (error: any) {
+      message.error(
+        pickEmailsErrorMessage(
+          error?.response?.data,
+          error?.message || '提取验证码失败',
+        ),
+      );
+    } finally {
+      setExtracting(false);
+      setExtractingEmail(null);
+    }
+  };
+
+  const onExtractVerification = async () => {
+    if (!selectedEmail) {
+      message.error('请先选择账号');
+      return;
+    }
+    await extractForEmail(selectedEmail);
+  };
+
+  const onToggleTrust = (checked: boolean) => {
+    if (checked) {
+      modal.confirm({
+        title: '启用信任模式？',
+        content:
+          '信任模式将直接显示邮件原始 HTML（仍保留 iframe 沙箱），可能包含不安全内容。确定继续？',
+        okText: '启用',
+        cancelText: '取消',
+        onOk: () => setTrusted(true),
+      });
+      return;
+    }
+    setTrusted(false);
+  };
+
+  const onTogglePoll = async (email?: string) => {
+    const target = email || selectedEmail;
+    if (!target) return;
+    if (isPolling(target)) {
+      stopPoll(target, '已停止监听');
+      message.info('已停止监听');
+      if (target === selectedEmail) setPollSnap(undefined);
+      return;
+    }
+    applyPollSettings({ interval: pollInterval, maxCount: pollMaxCount });
+    await startPoll(target, {
+      force: true,
+      interval: pollInterval,
+      maxCount: pollMaxCount,
+    });
+    message.success('已开始监听新邮件');
+    if (target === selectedEmail) setPollSnap(getPollSnapshot(target));
+  };
+
+  const pullAccountSummary = async (account: AccountItem) => {
+    const email = account.email;
+    if (!email) return;
+    setPullingEmails((m) => ({ ...m, [email]: true }));
+    try {
+      const results = await Promise.allSettled([
+        fetchEmails(email, {
+          method: 'graph',
+          folder: 'inbox',
+          skip: 0,
+          top: 10,
+        }),
+        fetchEmails(email, {
+          method: 'graph',
+          folder: 'junkemail',
+          skip: 0,
+          top: 10,
+        }),
+      ]);
+      const ok = results.some(
+        (r) => r.status === 'fulfilled' && r.value?.success,
+      );
+      if (ok) {
+        message.success(`已拉取 ${email}`);
+        // 若当前选中该账号，刷新列表
+        if (selectedEmail === email && viewMode === 'standard') {
+          await loadEmails({ append: false, nextSkip: 0 });
+        }
+      } else {
+        message.error(`拉取失败：${email}`);
+      }
+    } catch (error: any) {
+      message.error(error?.message || '拉取失败');
+    } finally {
+      setPullingEmails((m) => {
+        const next = { ...m };
+        delete next[email];
+        return next;
+      });
+    }
+  };
+
   const bodyHtml = useMemo(() => {
     if (!detail?.body) return '';
-    if (String(detail.body_type || '').toLowerCase() === 'text') {
-      const escaped = String(detail.body)
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;');
-      return `<pre style="white-space:pre-wrap;font-family:inherit;margin:0">${escaped}</pre>`;
-    }
-    return detail.body;
-  }, [detail]);
+    return buildEmailSrcDoc({
+      body: detail.body,
+      bodyType: detail.body_type,
+      inlineResources: detail.inline_resources,
+      trusted,
+    });
+  }, [detail, trusted]);
+
+  const polling = !!(selectedEmail && isPolling(selectedEmail));
+  const pollSnapMap = useMemo(() => {
+    const m = new Map<string, PollSnapshot>();
+    allPollSnaps.forEach((s) => m.set(s.email, s));
+    // 保证订阅外也能读到最新
+    getPollSnapshots().forEach((s) => m.set(s.email, s));
+    return m;
+  }, [allPollSnaps]);
+
+  const applyPollAdvanced = () => {
+    applyPollSettings({ interval: pollInterval, maxCount: pollMaxCount });
+    message.success(
+      `已应用监听参数：间隔 ${pollInterval}s / 次数 ${pollMaxCount || '不限'}（运行中需重新开始监听）`,
+    );
+  };
+
+  // ── 左栏：分组 ──
+  const groupsPane = (
+    <div style={{ padding: 8 }}>
+      <List
+        size="small"
+        loading={groupsQuery.isLoading}
+        dataSource={[
+          {
+            id: 0,
+            name: '全部分组',
+            account_count: undefined,
+          } as GroupItem,
+          ...groups,
+        ]}
+        locale={{ emptyText: '暂无分组' }}
+        renderItem={(g) => {
+          const active =
+            (g.id === 0 && groupId == null) ||
+            (g.id !== 0 && g.id === groupId);
+          return (
+            <List.Item
+              style={{
+                cursor: 'pointer',
+                padding: '8px 10px',
+                borderRadius: 6,
+                background: active ? 'rgba(184, 92, 56, 0.08)' : undefined,
+                borderLeft: active
+                  ? '3px solid #B85C38'
+                  : '3px solid transparent',
+              }}
+              onClick={() => onGroupChange(g.id === 0 ? undefined : g.id)}
+            >
+              <Space direction="vertical" size={0} style={{ width: '100%' }}>
+                <Space size={6}>
+                  {g.id !== 0 ? (
+                    <span
+                      style={{
+                        width: 8,
+                        height: 8,
+                        borderRadius: '50%',
+                        background: g.color || '#999',
+                        display: 'inline-block',
+                      }}
+                    />
+                  ) : null}
+                  <Typography.Text strong={active} ellipsis>
+                    {g.name}
+                  </Typography.Text>
+                </Space>
+                {g.id !== 0 ? (
+                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                    {g.account_count != null
+                      ? `${g.account_count} 个账号`
+                      : g.description || ''}
+                  </Typography.Text>
+                ) : null}
+              </Space>
+            </List.Item>
+          );
+        }}
+      />
+    </div>
+  );
+
+  // ── 中栏：账号 ──
+  const accountsPane = (
+    <div style={{ padding: 8 }}>
+      <Input.Search
+        size="small"
+        allowClear
+        placeholder="筛选账号"
+        style={{ marginBottom: 8 }}
+        onSearch={setCompactSearch}
+        onChange={(e) => {
+          if (!e.target.value) setCompactSearch('');
+        }}
+      />
+      <List
+        size="small"
+        loading={accountsQuery.isLoading}
+        dataSource={filteredCompactAccounts}
+        locale={{ emptyText: '当前分组暂无账号' }}
+        renderItem={(a: AccountItem) => {
+          const active = a.email === selectedEmail;
+          const snap = pollSnapMap.get(a.email);
+          const isPoll = isPolling(a.email);
+          return (
+            <List.Item
+              style={{
+                cursor: 'pointer',
+                padding: '8px 10px',
+                borderRadius: 6,
+                background: active ? 'rgba(184, 92, 56, 0.08)' : undefined,
+                borderLeft: active
+                  ? '3px solid #B85C38'
+                  : '3px solid transparent',
+              }}
+              onClick={() => onAccountChange(a.email)}
+            >
+              <List.Item.Meta
+                title={
+                  <Space size={4}>
+                    <Typography.Text
+                      strong={active}
+                      ellipsis
+                      style={{ maxWidth: 160 }}
+                    >
+                      {a.email}
+                    </Typography.Text>
+                    {isPoll ? (
+                      <Badge status="processing" title="监听中" />
+                    ) : null}
+                  </Space>
+                }
+                description={
+                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                    {a.status || '--'}
+                    {a.provider || a.account_type
+                      ? ` · ${(a.provider || a.account_type || '').toUpperCase()}`
+                      : ''}
+                    {snap?.verification ? ` · 码:${snap.verification}` : ''}
+                  </Typography.Text>
+                }
+              />
+            </List.Item>
+          );
+        }}
+      />
+    </div>
+  );
+
+  // ── 右栏：邮件列表 + 详情 ──
+  const emailWorkbench = (
+    <div
+      style={{
+        display: 'grid',
+        gridTemplateColumns: 'minmax(260px, 360px) 1fr',
+        gap: 0,
+        height: '100%',
+        minHeight: 0,
+      }}
+    >
+      <div
+        style={{
+          borderRight: '1px solid rgba(5,5,5,0.06)',
+          minHeight: 0,
+          overflow: 'auto',
+          display: 'flex',
+          flexDirection: 'column',
+        }}
+      >
+        <div
+          style={{
+            padding: '8px 10px',
+            borderBottom: '1px solid rgba(5,5,5,0.06)',
+            display: 'flex',
+            gap: 8,
+            flexWrap: 'wrap',
+            alignItems: 'center',
+          }}
+        >
+          <MailOutlined />
+          <Typography.Text strong>邮件列表</Typography.Text>
+          {method ? <Tag>{method}</Tag> : null}
+          {polling ? <Badge status="processing" text="监听中" /> : null}
+          <Select
+            size="small"
+            style={{ width: 100 }}
+            value={readFilter}
+            options={[
+              { label: '全部', value: 'all' },
+              { label: '未读', value: 'unread' },
+              { label: '已读', value: 'read' },
+            ]}
+            onChange={setReadFilter}
+          />
+          <Input.Search
+            size="small"
+            allowClear
+            placeholder="箱内搜索"
+            style={{ width: 120 }}
+            onSearch={setListSearch}
+            onChange={(e) => {
+              if (!e.target.value) setListSearch('');
+            }}
+          />
+        </div>
+        <div style={{ flex: 1, overflow: 'auto' }}>
+          {!selectedEmail ? (
+            <Empty style={{ margin: 48 }} description="请先选择账号" />
+          ) : (
+            <Spin spinning={listLoading}>
+              {filteredEmails.length === 0 && !listLoading ? (
+                <Empty
+                  style={{ margin: 48 }}
+                  description={listError ? '加载失败' : '没有匹配邮件'}
+                />
+              ) : (
+                <List
+                  dataSource={filteredEmails}
+                  rowKey={(item) => item.id}
+                  renderItem={(item) => {
+                    const active = item.id === activeId;
+                    const unread = item.is_read === false;
+                    return (
+                      <List.Item
+                        style={{
+                          padding: '10px 12px',
+                          cursor: 'pointer',
+                          background: active
+                            ? 'rgba(184, 92, 56, 0.08)'
+                            : undefined,
+                          borderLeft: active
+                            ? '3px solid #B85C38'
+                            : '3px solid transparent',
+                        }}
+                        onClick={() => void openDetail(item)}
+                        actions={[
+                          <Checkbox
+                            key="cb"
+                            checked={selectedIds.includes(item.id)}
+                            onClick={(e) => e.stopPropagation()}
+                            onChange={(e) => {
+                              setSelectedIds((prev) =>
+                                e.target.checked
+                                  ? [...prev, item.id]
+                                  : prev.filter((id) => id !== item.id),
+                              );
+                            }}
+                          />,
+                        ]}
+                      >
+                        <List.Item.Meta
+                          title={
+                            <Typography.Text strong={unread} ellipsis>
+                              {item.subject || '无主题'}
+                            </Typography.Text>
+                          }
+                          description={
+                            <Space
+                              direction="vertical"
+                              size={0}
+                              style={{ width: '100%' }}
+                            >
+                              <Typography.Text type="secondary" ellipsis>
+                                {item.from || '未知发件人'}
+                              </Typography.Text>
+                              <Typography.Text
+                                type="secondary"
+                                style={{ fontSize: 12 }}
+                              >
+                                {formatDate(item.date)}
+                              </Typography.Text>
+                            </Space>
+                          }
+                        />
+                      </List.Item>
+                    );
+                  }}
+                />
+              )}
+              {hasMore ? (
+                <div style={{ padding: 12, textAlign: 'center' }}>
+                  <Button
+                    loading={listLoading}
+                    onClick={() =>
+                      void loadEmails({
+                        append: true,
+                        nextSkip: skip + PAGE_SIZE,
+                      })
+                    }
+                  >
+                    加载更多
+                  </Button>
+                </div>
+              ) : null}
+            </Spin>
+          )}
+        </div>
+      </div>
+
+      <div style={{ minHeight: 0, overflow: 'auto', padding: 12 }}>
+        <Spin spinning={detailLoading}>
+          {!detail ? (
+            <Empty
+              image={Empty.PRESENTED_IMAGE_SIMPLE}
+              description="选择一封邮件查看详情"
+              style={{ marginTop: 80 }}
+            />
+          ) : (
+            <Space direction="vertical" size={12} style={{ width: '100%' }}>
+              <Typography.Title level={5} style={{ margin: 0 }}>
+                {detail.subject || '无主题'}
+              </Typography.Title>
+              <Space wrap>
+                <Typography.Text type="secondary">信任原始 HTML</Typography.Text>
+                <Switch checked={trusted} onChange={onToggleTrust} />
+                <Button
+                  size="small"
+                  icon={<KeyOutlined />}
+                  loading={extracting}
+                  onClick={() => void onExtractVerification()}
+                >
+                  提取并复制验证码
+                </Button>
+                {lastVerification ? (
+                  <Button
+                    size="small"
+                    icon={<CopyOutlined />}
+                    onClick={async () => {
+                      const ok = await copyText(lastVerification);
+                      message.success(
+                        ok ? `已复制: ${lastVerification}` : lastVerification,
+                      );
+                    }}
+                  >
+                    再次复制
+                  </Button>
+                ) : null}
+              </Space>
+              {lastVerification ? (
+                <Alert
+                  type="success"
+                  showIcon
+                  message="最近提取结果"
+                  description={
+                    <Typography.Paragraph
+                      copyable
+                      style={{ marginBottom: 0 }}
+                    >
+                      {lastVerification}
+                    </Typography.Paragraph>
+                  }
+                />
+              ) : null}
+              <div>
+                <Typography.Text type="secondary">发件人：</Typography.Text>
+                <Typography.Text>{detail.from || '--'}</Typography.Text>
+              </div>
+              {detail.to ? (
+                <div>
+                  <Typography.Text type="secondary">收件人：</Typography.Text>
+                  <Typography.Text>{detail.to}</Typography.Text>
+                </div>
+              ) : null}
+              <div>
+                <Typography.Text type="secondary">时间：</Typography.Text>
+                <Typography.Text>{formatDate(detail.date)}</Typography.Text>
+              </div>
+              <div
+                style={{
+                  borderTop: '1px solid rgba(0,0,0,0.06)',
+                  paddingTop: 12,
+                }}
+              >
+                <iframe
+                  title="email-body"
+                  sandbox={
+                    trusted
+                      ? 'allow-same-origin allow-popups allow-popups-to-escape-sandbox'
+                      : 'allow-same-origin'
+                  }
+                  srcDoc={bodyHtml}
+                  style={{
+                    width: '100%',
+                    minHeight: 360,
+                    border: 'none',
+                    background: '#fff',
+                  }}
+                />
+              </div>
+            </Space>
+          )}
+        </Spin>
+      </div>
+    </div>
+  );
+
+  // ── Compact 视图 ──
+  const compactView = (
+    <Space direction="vertical" size={12} style={{ width: '100%' }}>
+      <ProCard size="small" bordered>
+        <Space wrap style={{ width: '100%' }} align="center">
+          <Typography.Text type="secondary">分组</Typography.Text>
+          <Space wrap>
+            <Button
+              size="small"
+              type={groupId == null ? 'primary' : 'default'}
+              onClick={() => onGroupChange(undefined)}
+            >
+              全部
+            </Button>
+            {groups.map((g) => (
+              <Button
+                key={g.id}
+                size="small"
+                type={groupId === g.id ? 'primary' : 'default'}
+                onClick={() => onGroupChange(g.id)}
+              >
+                {g.name}
+                {g.account_count != null ? ` (${g.account_count})` : ''}
+              </Button>
+            ))}
+          </Space>
+          <Input.Search
+            allowClear
+            placeholder="搜索账号"
+            style={{ width: 220, marginLeft: 'auto' }}
+            onSearch={setCompactSearch}
+            onChange={(e) => {
+              if (!e.target.value) setCompactSearch('');
+            }}
+          />
+        </Space>
+      </ProCard>
+
+      <ProCard
+        bordered
+        title={
+          <Space>
+            <span>简洁账号列表</span>
+            <Typography.Text type="secondary">
+              {filteredCompactAccounts.length} 个账号
+              {compactSelected.length
+                ? ` · 已选 ${compactSelected.length}`
+                : ''}
+            </Typography.Text>
+          </Space>
+        }
+        extra={
+          <Space>
+            <Button
+              size="small"
+              disabled={!compactSelected.length}
+              onClick={() => {
+                compactSelected.forEach((id) => {
+                  const acc = accounts.find((a) => a.id === id);
+                  if (acc?.email) void onTogglePoll(acc.email);
+                });
+              }}
+            >
+              批量切换监听
+            </Button>
+            <Button size="small" onClick={() => setCompactSelected([])}>
+              清除选择
+            </Button>
+          </Space>
+        }
+        bodyStyle={{ padding: 0 }}
+      >
+        <Spin spinning={accountsQuery.isLoading}>
+          {filteredCompactAccounts.length === 0 ? (
+            <Empty style={{ margin: 48 }} description="当前分组暂无账号" />
+          ) : (
+            <List
+              dataSource={filteredCompactAccounts}
+              rowKey={(a) => a.id}
+              renderItem={(account) => {
+                const snap = pollSnapMap.get(account.email);
+                const isPoll = isPolling(account.email);
+                const checked = compactSelected.includes(account.id);
+                const pulling = !!pullingEmails[account.email];
+                return (
+                  <List.Item
+                    style={{
+                      padding: '12px 16px',
+                      background: checked
+                        ? 'rgba(184, 92, 56, 0.04)'
+                        : undefined,
+                    }}
+                    actions={[
+                      <Button
+                        key="code"
+                        size="small"
+                        icon={<KeyOutlined />}
+                        loading={
+                          extracting && extractingEmail === account.email
+                        }
+                        onClick={() => void extractForEmail(account.email)}
+                      >
+                        {snap?.verification || '验证码'}
+                      </Button>,
+                      <Button
+                        key="pull"
+                        size="small"
+                        loading={pulling}
+                        onClick={() => void pullAccountSummary(account)}
+                      >
+                        拉取
+                      </Button>,
+                      <Button
+                        key="poll"
+                        size="small"
+                        type={isPoll ? 'primary' : 'default'}
+                        danger={isPoll}
+                        onClick={() => void onTogglePoll(account.email)}
+                      >
+                        {isPoll
+                          ? `停止 ${snap?.remaining != null ? snap.remaining : ''}`.trim()
+                          : '监听'}
+                      </Button>,
+                      <Button
+                        key="open"
+                        size="small"
+                        type="link"
+                        onClick={() => {
+                          onAccountChange(account.email);
+                          onViewModeChange('standard');
+                        }}
+                      >
+                        打开
+                      </Button>,
+                    ]}
+                  >
+                    <Space align="start">
+                      <Checkbox
+                        checked={checked}
+                        onChange={(e) => {
+                          setCompactSelected((prev) =>
+                            e.target.checked
+                              ? [...prev, account.id]
+                              : prev.filter((id) => id !== account.id),
+                          );
+                        }}
+                      />
+                      <List.Item.Meta
+                        title={
+                          <Space>
+                            <Typography.Text
+                              copyable={{ text: account.email }}
+                              strong
+                            >
+                              {account.email}
+                            </Typography.Text>
+                            {isPoll ? (
+                              <Badge status="processing" text="监听中" />
+                            ) : null}
+                            <Tag>
+                              {(
+                                account.provider ||
+                                account.account_type ||
+                                'outlook'
+                              ).toUpperCase()}
+                            </Tag>
+                            <Tag
+                              color={
+                                String(account.status || '').toLowerCase() ===
+                                'active'
+                                  ? 'success'
+                                  : 'default'
+                              }
+                            >
+                              {account.status || '--'}
+                            </Tag>
+                          </Space>
+                        }
+                        description={
+                          <Space direction="vertical" size={0}>
+                            <Typography.Text type="secondary">
+                              分组：{account.group_name || '--'}
+                              {account.remark ? ` · ${account.remark}` : ''}
+                            </Typography.Text>
+                            {snap?.lastMessage ? (
+                              <Typography.Text
+                                type={
+                                  snap.status === 'found'
+                                    ? 'success'
+                                    : 'secondary'
+                                }
+                                style={{ fontSize: 12 }}
+                              >
+                                {snap.lastMessage}
+                                {snap.verification
+                                  ? ` · ${snap.verification}`
+                                  : ''}
+                              </Typography.Text>
+                            ) : (
+                              <Typography.Text
+                                type="secondary"
+                                style={{ fontSize: 12 }}
+                              >
+                                最近刷新：{account.last_refresh_at || '--'}
+                              </Typography.Text>
+                            )}
+                          </Space>
+                        }
+                      />
+                    </Space>
+                  </List.Item>
+                );
+              }}
+            />
+          )}
+        </Spin>
+      </ProCard>
+    </Space>
+  );
 
   return (
     <PageContainer
-      title="邮箱"
-      subTitle="对接 /api/emails/* · /api/email/*"
+      title={intl.formatMessage({
+        id: 'outlook.mailbox.title',
+        defaultMessage: '邮箱',
+      })}
+      subTitle={intl.formatMessage({
+        id: 'outlook.mailbox.subtitle',
+        defaultMessage: '三栏工作台 / 简洁模式 / 可拖拽布局',
+      })}
       extra={
         <Space wrap>
-          <Select
-            showSearch
-            placeholder="选择账号"
-            style={{ minWidth: 260 }}
-            options={accountOptions}
-            loading={accountsQuery.isLoading}
-            value={selectedEmail}
-            onChange={onAccountChange}
-            optionFilterProp="label"
+          <Segmented
+            value={viewMode}
+            onChange={onViewModeChange}
+            options={[
+              {
+                label: (
+                  <Space size={4}>
+                    <ColumnWidthOutlined />
+                    标准三栏
+                  </Space>
+                ),
+                value: 'standard',
+              },
+              {
+                label: (
+                  <Space size={4}>
+                    <AppstoreOutlined />
+                    简洁
+                  </Space>
+                ),
+                value: 'compact',
+              },
+            ]}
           />
+          {viewMode === 'standard' ? (
+            <Tooltip title="恢复默认三栏宽度与折叠状态">
+              <Button
+                icon={<UnorderedListOutlined />}
+                onClick={() => setLayoutResetToken((n) => n + 1)}
+              >
+                重置布局
+              </Button>
+            </Tooltip>
+          ) : null}
           <Select
             style={{ width: 140 }}
             value={folder}
             options={FOLDERS}
-            onChange={(v) => setFolder(v)}
+            onChange={onFolderChange}
           />
           <Button
             icon={<ReloadOutlined />}
-            loading={listLoading}
-            onClick={() => void loadEmails({ append: false, nextSkip: 0 })}
-            disabled={!selectedEmail}
+            loading={listLoading || accountsQuery.isFetching}
+            onClick={() => {
+              void accountsQuery.refetch();
+              if (viewMode === 'standard') {
+                void loadEmails({ append: false, nextSkip: 0 });
+              }
+            }}
           >
             刷新
           </Button>
-          {selectedIds.length > 0 ? (
-            <Popconfirm
-              title={`确认永久删除选中的 ${selectedIds.length} 封邮件？`}
-              onConfirm={() => void onDeleteSelected()}
-            >
-              <Button danger icon={<DeleteOutlined />}>
-                删除选中
+          {viewMode === 'standard' ? (
+            <>
+              <Button
+                type={polling ? 'default' : 'primary'}
+                onClick={() => void onTogglePoll()}
+                disabled={!selectedEmail}
+              >
+                {polling
+                  ? `停止监听${
+                      pollSnap?.remaining != null
+                        ? ` (${pollSnap.remaining})`
+                        : ''
+                    }`
+                  : '开始监听'}
               </Button>
-            </Popconfirm>
+              <Button
+                type="primary"
+                icon={<KeyOutlined />}
+                loading={extracting}
+                onClick={() => void onExtractVerification()}
+                disabled={!selectedEmail}
+              >
+                复制验证码
+              </Button>
+              {selectedIds.length > 0 ? (
+                <Popconfirm
+                  title={`确认永久删除选中的 ${selectedIds.length} 封邮件？`}
+                  onConfirm={() => void onDeleteSelected()}
+                >
+                  <Button danger icon={<DeleteOutlined />}>
+                    删除选中
+                  </Button>
+                </Popconfirm>
+              ) : null}
+            </>
           ) : null}
         </Space>
       }
     >
-      {listError ? (
+      <ProCard size="small" bordered style={{ marginBottom: 12 }}>
+        <Space wrap align="center">
+          <Typography.Text strong>Compact Poll 高级</Typography.Text>
+          <Typography.Text type="secondary">间隔(秒)</Typography.Text>
+          <InputNumber
+            min={1}
+            max={3600}
+            value={pollInterval}
+            onChange={(v) => setPollInterval(Number(v) || 10)}
+          />
+          <Typography.Text type="secondary">最大次数(0=不限)</Typography.Text>
+          <InputNumber
+            min={0}
+            max={999}
+            value={pollMaxCount}
+            onChange={(v) => setPollMaxCount(Number(v) || 0)}
+          />
+          <Button size="small" type="primary" onClick={applyPollAdvanced}>
+            应用到引擎
+          </Button>
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            当前缓存：{getPollSettings().interval}s /{' '}
+            {getPollSettings().maxCount || '∞'} · 活跃监听{' '}
+            {allPollSnaps.filter((s) => s.status === 'polling').length}
+          </Typography.Text>
+        </Space>
+      </ProCard>
+
+      {listError && viewMode === 'standard' ? (
         <Alert
           type="error"
           showIcon
@@ -304,171 +1313,32 @@ const MailboxPage: React.FC = () => {
         />
       ) : null}
 
-      <div
-        style={{
-          display: 'grid',
-          gridTemplateColumns: 'minmax(320px, 420px) 1fr',
-          gap: 16,
-          minHeight: 520,
-        }}
-      >
-        <ProCard
-          title={
-            <Space>
-              <MailOutlined />
-              <span>邮件列表</span>
-              {method ? <Tag>{method}</Tag> : null}
-              <Typography.Text type="secondary">
-                ({emails.length}
-                {hasMore ? '+' : ''})
-              </Typography.Text>
-            </Space>
+      {pollSnap?.lastMessage && viewMode === 'standard' ? (
+        <Alert
+          type={pollSnap.status === 'found' ? 'success' : 'info'}
+          showIcon
+          closable
+          style={{ marginBottom: 16 }}
+          message={pollSnap.lastMessage}
+          description={
+            pollSnap.verification ? (
+              <Typography.Text copyable>{pollSnap.verification}</Typography.Text>
+            ) : null
           }
-          bordered
-          bodyStyle={{ padding: 0, maxHeight: 640, overflow: 'auto' }}
-        >
-          {!selectedEmail ? (
-            <Empty style={{ margin: 48 }} description="请先选择账号" />
-          ) : (
-            <Spin spinning={listLoading}>
-              {emails.length === 0 && !listLoading ? (
-                <Empty
-                  style={{ margin: 48 }}
-                  description={listError ? '加载失败' : '收件箱为空'}
-                />
-              ) : (
-                <List
-                  dataSource={emails}
-                  rowKey={(item) => item.id}
-                  renderItem={(item) => {
-                    const active = item.id === activeId;
-                    const unread = item.is_read === false;
-                    return (
-                      <List.Item
-                        style={{
-                          padding: '12px 16px',
-                          cursor: 'pointer',
-                          background: active ? 'rgba(184, 92, 56, 0.08)' : undefined,
-                          borderLeft: active
-                            ? '3px solid #B85C38'
-                            : '3px solid transparent',
-                        }}
-                        onClick={() => void openDetail(item)}
-                        actions={[
-                          <Checkbox
-                            key="cb"
-                            checked={selectedIds.includes(item.id)}
-                            onClick={(e) => e.stopPropagation()}
-                            onChange={(e) => {
-                              setSelectedIds((prev) =>
-                                e.target.checked
-                                  ? [...prev, item.id]
-                                  : prev.filter((id) => id !== item.id),
-                              );
-                            }}
-                          />,
-                        ]}
-                      >
-                        <List.Item.Meta
-                          title={
-                            <Typography.Text strong={unread} ellipsis>
-                              {item.subject || '无主题'}
-                            </Typography.Text>
-                          }
-                          description={
-                            <Space direction="vertical" size={0} style={{ width: '100%' }}>
-                              <Typography.Text type="secondary" ellipsis>
-                                {item.from || '未知发件人'}
-                              </Typography.Text>
-                              <Typography.Text type="secondary" ellipsis style={{ fontSize: 12 }}>
-                                {item.body_preview || ''}
-                              </Typography.Text>
-                              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                                {formatDate(item.date)}
-                              </Typography.Text>
-                            </Space>
-                          }
-                        />
-                      </List.Item>
-                    );
-                  }}
-                />
-              )}
-              {hasMore ? (
-                <div style={{ padding: 12, textAlign: 'center' }}>
-                  <Button
-                    loading={listLoading}
-                    onClick={() =>
-                      void loadEmails({
-                        append: true,
-                        nextSkip: skip + PAGE_SIZE,
-                      })
-                    }
-                  >
-                    加载更多
-                  </Button>
-                </div>
-              ) : null}
-            </Spin>
-          )}
-        </ProCard>
+        />
+      ) : null}
 
-        <ProCard
-          title={detail?.subject || '邮件详情'}
-          bordered
-          bodyStyle={{ minHeight: 520 }}
-        >
-          <Spin spinning={detailLoading}>
-            {!detail ? (
-              <Empty
-                image={Empty.PRESENTED_IMAGE_SIMPLE}
-                description="选择一封邮件查看详情"
-              />
-            ) : (
-              <Space direction="vertical" size={12} style={{ width: '100%' }}>
-                <div>
-                  <Typography.Text type="secondary">发件人：</Typography.Text>
-                  <Typography.Text>{detail.from || '--'}</Typography.Text>
-                </div>
-                {detail.to ? (
-                  <div>
-                    <Typography.Text type="secondary">收件人：</Typography.Text>
-                    <Typography.Text>{detail.to}</Typography.Text>
-                  </div>
-                ) : null}
-                {detail.cc ? (
-                  <div>
-                    <Typography.Text type="secondary">抄送：</Typography.Text>
-                    <Typography.Text>{detail.cc}</Typography.Text>
-                  </div>
-                ) : null}
-                <div>
-                  <Typography.Text type="secondary">时间：</Typography.Text>
-                  <Typography.Text>{formatDate(detail.date)}</Typography.Text>
-                </div>
-                <div
-                  style={{
-                    borderTop: '1px solid rgba(0,0,0,0.06)',
-                    paddingTop: 12,
-                  }}
-                >
-                  <iframe
-                    title="email-body"
-                    sandbox=""
-                    srcDoc={bodyHtml}
-                    style={{
-                      width: '100%',
-                      minHeight: 360,
-                      border: 'none',
-                      background: '#fff',
-                    }}
-                  />
-                </div>
-              </Space>
-            )}
-          </Spin>
-        </ProCard>
-      </div>
+      {viewMode === 'compact' ? (
+        compactView
+      ) : (
+        <ResizableWorkbench
+          userId={String(layoutUserId)}
+          resetToken={layoutResetToken}
+          groups={groupsPane}
+          accounts={accountsPane}
+          emails={emailWorkbench}
+        />
+      )}
     </PageContainer>
   );
 };

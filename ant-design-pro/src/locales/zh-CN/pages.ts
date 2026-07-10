@@ -78,4 +78,22 @@ export default {
   'pages.searchTable.tenThousand': '万',
   'pages.searchTable.batchDeletion': '批量删除',
   'pages.searchTable.batchApproval': '批量审批',
+
+  // OutlookEmail 业务页
+  'outlook.accounts.title': '账号管理',
+  'outlook.accounts.subtitle': '对接 /api/accounts · 导入 / 编辑 / 批量 / 导出',
+  'outlook.mailbox.title': '邮箱',
+  'outlook.mailbox.subtitle': '三栏工作台 / 简洁模式 / 可拖拽布局',
+  'outlook.pool.title': '邮箱池管理',
+  'outlook.pool.subtitle': '对接 /api/pool-admin/* · claimed 仅 force_release',
+  'outlook.settings.title': '系统设置',
+  'outlook.settings.subtitle': '对接 /api/settings · 多 Key / 白名单 / CF / 部署',
+  'outlook.audit.title': '审计日志',
+  'outlook.audit.subtitle': '对接 /api/audit-logs · details / user_ip / trace_id',
+  'outlook.groups.title': '分组管理',
+  'outlook.overview.title': '概览',
+  'outlook.plugins.title': '插件管理',
+  'outlook.tempEmails.title': '临时邮箱',
+  'outlook.refreshLog.title': '刷新日志',
+  'outlook.tokenTool.title': 'Token 工具',
 };

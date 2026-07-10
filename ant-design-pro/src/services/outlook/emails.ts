@@ -23,6 +23,7 @@ export type EmailDetail = {
   date?: string;
   body?: string;
   body_type?: 'html' | 'text' | string;
+  inline_resources?: Record<string, string>;
 };
 
 export type EmailsListResponse = {
@@ -95,6 +96,39 @@ export async function deleteEmails(email: string, ids: string[]) {
       skipErrorHandler: true,
     },
   );
+}
+
+export type VerificationExtractData = {
+  verification_code?: string;
+  verification_link?: string;
+  formatted?: string;
+  code?: string;
+  [key: string]: any;
+};
+
+export async function extractEmailVerification(
+  email: string,
+  params: {
+    code_length?: string;
+    code_regex?: string;
+    code_source?: 'subject' | 'content' | 'html' | 'all';
+  } = {},
+) {
+  return outlookRequest<{
+    success: boolean;
+    data?: VerificationExtractData;
+    message?: string;
+    account_summary?: Record<string, any>;
+    error?: any;
+  }>(`/api/emails/${encodeURIComponent(email)}/extract-verification`, {
+    method: 'GET',
+    params: {
+      code_length: params.code_length,
+      code_regex: params.code_regex,
+      code_source: params.code_source || 'all',
+    },
+    skipErrorHandler: true,
+  });
 }
 
 /** 将后端 method 展示名映射为请求参数 */

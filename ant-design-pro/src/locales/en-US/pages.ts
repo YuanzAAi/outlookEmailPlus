@@ -83,4 +83,27 @@ export default {
   'pages.searchTable.tenThousand': '0000',
   'pages.searchTable.batchDeletion': 'batch deletion',
   'pages.searchTable.batchApproval': 'batch approval',
+
+  // OutlookEmail business pages
+  'outlook.accounts.title': 'Accounts',
+  'outlook.accounts.subtitle':
+    '/api/accounts · import / edit / batch / export',
+  'outlook.mailbox.title': 'Mailbox',
+  'outlook.mailbox.subtitle':
+    '3-column workbench / compact / resizable layout',
+  'outlook.pool.title': 'Pool Admin',
+  'outlook.pool.subtitle':
+    '/api/pool-admin/* · claimed allows force_release only',
+  'outlook.settings.title': 'Settings',
+  'outlook.settings.subtitle':
+    '/api/settings · multi-key / whitelist / CF / deploy',
+  'outlook.audit.title': 'Audit Logs',
+  'outlook.audit.subtitle':
+    '/api/audit-logs · details / user_ip / trace_id',
+  'outlook.groups.title': 'Groups',
+  'outlook.overview.title': 'Overview',
+  'outlook.plugins.title': 'Plugins',
+  'outlook.tempEmails.title': 'Temp Emails',
+  'outlook.refreshLog.title': 'Refresh Logs',
+  'outlook.tokenTool.title': 'Token Tool',
 };

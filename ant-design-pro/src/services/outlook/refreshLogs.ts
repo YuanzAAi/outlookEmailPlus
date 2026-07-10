@@ -1,39 +1,37 @@
 import { outlookRequest } from './request';
 
 export type RefreshLogItem = {
-  id?: number;
-  account_id?: number;
-  email?: string;
-  account_email?: string;
-  status?: string;
-  message?: string;
-  error_message?: string;
-  error?: string;
+  id?: number | string;
   created_at?: string;
+  /** 后端真实字段 */
+  account_email?: string;
+  email?: string;
+  status?: string;
+  error_message?: string | null;
+  message?: string | null;
+  error?: string | null;
   [key: string]: any;
 };
 
+export type RefreshLogsResponse = {
+  success?: boolean;
+  logs?: RefreshLogItem[];
+  total?: number;
+  error?: any;
+};
+
 export async function fetchRefreshLogs(params: { limit?: number } = {}) {
-  return outlookRequest<{ success?: boolean; logs?: RefreshLogItem[]; error?: any }>(
-    '/api/accounts/refresh-logs',
-    {
-      method: 'GET',
-      params: { limit: params.limit ?? 200 },
-      skipErrorHandler: true,
-    },
-  );
+  return outlookRequest<RefreshLogsResponse>('/api/refresh-logs', {
+    method: 'GET',
+    params,
+    skipErrorHandler: true,
+  });
 }
 
-export async function fetchFailedRefreshLogs() {
-  return outlookRequest<{ success?: boolean; logs?: RefreshLogItem[]; error?: any }>(
-    '/api/accounts/refresh-logs/failed',
-    { method: 'GET', skipErrorHandler: true },
-  );
-}
-
-export async function fetchRefreshStats() {
-  return outlookRequest<{ success?: boolean; [key: string]: any }>(
-    '/api/accounts/refresh-stats',
-    { method: 'GET', skipErrorHandler: true },
-  );
+export async function fetchFailedRefreshLogs(params: { limit?: number } = {}) {
+  return outlookRequest<RefreshLogsResponse>('/api/refresh-logs/failed', {
+    method: 'GET',
+    params,
+    skipErrorHandler: true,
+  });
 }

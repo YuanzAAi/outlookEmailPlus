@@ -61,6 +61,8 @@ npm start
 - [x] P4 临时邮箱与插件（`/temp-emails` `/plugins`）
 - [x] P5 设置 / 审计 / 邮箱池 / Token 工具 / 刷新日志
 - [x] 审查修复：pool-admin 契约、token-tool 代理、HTTP 错误体、设置敏感字段
+- [x] PR #109 审查 P0 契约对齐（审计 / 刷新日志 / 插件 schema / Cron / activity / 分组文案）
+- [x] PR #109 审查 P1：账号批量/导出、池批量+provider、设置多 Key/白名单/CF/部署、邮箱验证码与监听、审计增强
 
 ## 生产构建与联调
 
@@ -87,17 +89,30 @@ npm run preview        # 本地预览 dist，默认 :8000
 | 项 | 状态 | 说明 |
 |---|---|---|
 | 业务主页面 SPA | 已迁移 | overview / mailbox / accounts / groups / temp-emails / pool-admin / plugins / settings / audit / token-tool / refresh-log |
-| 设置敏感字段 | 已支持 | 脱敏展示 + 仅在新值时提交；多 Key 编辑器仍可后续增强 |
-| 外部 API 多 Key 表格 | 未迁移 | 旧页有完整 multi-key 编辑；SPA 目前只支持单 Key 更新 |
-| 布局拖拽 / compact poll 高级项 | 未迁移 | 旧 `layout-manager` 能力非 MVP |
+| 设置敏感字段 | 已支持 | 脱敏展示 + 仅在新值时提交 |
+| 契约对齐修复（PR 审查 P0） | 已修 | 审计 `details/user_ip/trace_id`、刷新日志 `account_email/error_message`、插件 `config_schema.fields`、Cron `cron_expression`、概览 activity `timeline`、分组删除文案 |
+| 账号导入 / 编辑 | 已补 | `/accounts` 支持 provider 导入（含 auto/custom）与编辑模态 |
+| 账号批量 / 通知 / Token 刷新 / 导出 | 已补 | rowSelection 批量状态/删除/移组/通知；单行 Telegram 开关；导出二次验证 + `X-Export-Token` |
+| 邮箱验证码提取 | 已补 | `/mailbox` 对接 `/api/emails/{email}/extract-verification` 一键复制 |
+| 邮件 HTML 信任模式 / CID | 已补 | 基础消毒 + 可选信任模式 + `inline_resources` CID 重写（`utils/emailHtml.ts`） |
+| 自动轮询引擎 | 最小可用 | `services/outlook/pollEngine.ts` + 邮箱页「开始/停止监听」；设置页 interval/count 持久化 |
+| 外部 API 多 Key 表格 | 已补 | 设置页表格编辑 `external_api_keys`（name/api_key/allowed_emails/pool_access/enabled） |
+| IP 白名单 / 危险端点开关 | 已补 | `external_api_ip_whitelist` + disable raw/wait/pool_* |
+| CF 域名同步 / 部署信息 | 已补 | `POST /api/settings/cf-worker-sync-domains`；`deployment-info` + `trigger-update` |
+| 池管理批量 / provider / claimed 裁剪 | 已补 | rowSelection 批量动作；provider 筛选；claimed 行仅 `force_release` |
+| 审计增强 | 已补 | 时间本地化、details JSON 美化、动作色标、Trace 可复制 |
+| 业务页 i18n | 部分 | `zh-CN`/`en-US` 已加 `outlook.*` 标题键；主页面 title 使用 formatMessage，表单文案仍有中文 default |
+| 三栏 mailbox 工作台 / compact 视图 | 已补 | `/mailbox` 标准三栏（分组/账号/邮件+详情）+ 简洁列表；`ol_mailbox_view_mode` 持久化 |
+| 布局拖拽 / compact poll 高级项 | 已补 | `ResizableWorkbench` 拖拽改宽/折叠/重置；`outlook_layout_state_*` 持久化；页顶 interval/maxCount 应用到 pollEngine |
 | 旧 `templates/` + `static/js` | 保留 | 建议验收 SPA 后再移除默认入口 |
 | 浏览器扩展 | 不变 | 继续走 `/api/external/*`，不依赖管理端 SPA |
 
 建议下线顺序：
 
-1. 网关默认切到 SPA `dist/`，旧前端保留路径或仅本机访问
-2. 跑一轮真实账号冒烟（登录 → 概览 → 账号 → 邮件 → 池 → 设置敏感项）
-3. 删除/归档 `templates/` 业务页与 `static/js/features/*`（保留扩展与健康检查）
+1. 验收 P0+P1：审计有数据、能加号/编辑/批量/导出、能复制验证码与监听、插件配置可读、Cron 可校验、设置多 Key/白名单/CF/部署可用、池批量与 claimed 裁剪正确
+2. 网关默认切到 SPA `dist/`，旧前端保留路径或仅本机访问
+3. 跑一轮真实账号冒烟（登录 → 概览活动 Tab → 账号导入/批量 → 邮件验证码/监听 → 池 → 设置敏感项/多 Key）
+4. 三栏工作台 / compact / 布局拖拽已落地后，删除或归档 `templates/` 业务页与 `static/js/features/*`（保留扩展与健康检查）
 
 ## 开发代理
 
@@ -112,8 +127,9 @@ npm run preview        # 本地预览 dist，默认 :8000
 ## 邮箱池契约要点
 
 - `GET /api/pool-admin/accounts` 响应：`{ items, total, page, page_size, total_pages }`
-- 查询参数 `in_pool`：`true` | `false` | `all`（不要用 yes/no）
+- 查询参数 `in_pool`：`true` | `false` | `all`（不要用 yes/no）；可选 `provider`
 - 动作名：`move_into_pool` / `move_out_of_pool` / `restore_available` / `freeze` / `retire` / `force_release`
+- **claimed 状态仅允许 `force_release`**（前端 `actionsForPoolRow` + 批量校验）
 
 ## 注意
 

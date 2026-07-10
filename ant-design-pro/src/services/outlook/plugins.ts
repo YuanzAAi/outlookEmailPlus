@@ -69,17 +69,33 @@ export async function uninstallPlugin(name: string, cleanConfig = false) {
 }
 
 export async function fetchPluginConfigSchema(name: string) {
-  return outlookRequest<{ success: boolean; data?: PluginConfigSchema; error?: any }>(
-    `/api/plugins/${encodeURIComponent(name)}/config/schema`,
-    { method: 'GET', skipErrorHandler: true },
-  );
+  return outlookRequest<{
+    success: boolean;
+    data?: {
+      plugin_name?: string;
+      config_schema?: PluginConfigSchema;
+      fields?: PluginConfigSchema['fields'];
+    };
+    error?: any;
+  }>(`/api/plugins/${encodeURIComponent(name)}/config/schema`, {
+    method: 'GET',
+    skipErrorHandler: true,
+  });
 }
 
 export async function fetchPluginConfig(name: string) {
-  return outlookRequest<{ success: boolean; data?: Record<string, any>; error?: any }>(
-    `/api/plugins/${encodeURIComponent(name)}/config`,
-    { method: 'GET', skipErrorHandler: true },
-  );
+  return outlookRequest<{
+    success: boolean;
+    data?: {
+      plugin_name?: string;
+      config?: Record<string, any>;
+      [key: string]: any;
+    };
+    error?: any;
+  }>(`/api/plugins/${encodeURIComponent(name)}/config`, {
+    method: 'GET',
+    skipErrorHandler: true,
+  });
 }
 
 export async function savePluginConfig(name: string, config: Record<string, any>) {
