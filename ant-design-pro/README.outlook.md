@@ -60,6 +60,44 @@ npm start
 - [x] P3 邮件阅读（`/mailbox` → `/api/emails/*` `/api/email/*`）
 - [x] P4 临时邮箱与插件（`/temp-emails` `/plugins`）
 - [x] P5 设置 / 审计 / 邮箱池 / Token 工具 / 刷新日志
+- [x] 审查修复：pool-admin 契约、token-tool 代理、HTTP 错误体、设置敏感字段
+
+## 生产构建与联调
+
+```bash
+cd ant-design-pro
+npm install
+npm run build          # 产出 dist/
+npm run preview        # 本地预览 dist，默认 :8000
+```
+
+联调方式（二选一）：
+
+1. **开发双进程**（推荐迁移期）：Flask `:5000` + `npm start` `:8000`，依赖 `config/proxy.ts`
+2. **静态资源挂载**：将 `dist/` 交给 Nginx/Caddy，`/api` `/login` `/logout` `/img` `/healthz` 反代到 Flask；SPA fallback 到 `index.html`
+
+注意：
+
+- 生产环境 **Umi proxy 不生效**，必须在网关层做同源反代，否则 cookie/CSRF 跨域会失败
+- Flask 仍可独立服务旧 `templates/` 前端；新旧前端可并行，直到 SPA 验收完成
+- 契约回归：`python -m unittest tests.test_auth_spa_adapters tests.test_overview_api_contract tests.test_accounts_groups_api_contract tests.test_emails_api_contract tests.test_temp_emails_plugins_api_contract tests.test_p5_api_contract -v`
+
+## 残余差距 / 下线旧前端策略
+
+| 项 | 状态 | 说明 |
+|---|---|---|
+| 业务主页面 SPA | 已迁移 | overview / mailbox / accounts / groups / temp-emails / pool-admin / plugins / settings / audit / token-tool / refresh-log |
+| 设置敏感字段 | 已支持 | 脱敏展示 + 仅在新值时提交；多 Key 编辑器仍可后续增强 |
+| 外部 API 多 Key 表格 | 未迁移 | 旧页有完整 multi-key 编辑；SPA 目前只支持单 Key 更新 |
+| 布局拖拽 / compact poll 高级项 | 未迁移 | 旧 `layout-manager` 能力非 MVP |
+| 旧 `templates/` + `static/js` | 保留 | 建议验收 SPA 后再移除默认入口 |
+| 浏览器扩展 | 不变 | 继续走 `/api/external/*`，不依赖管理端 SPA |
+
+建议下线顺序：
+
+1. 网关默认切到 SPA `dist/`，旧前端保留路径或仅本机访问
+2. 跑一轮真实账号冒烟（登录 → 概览 → 账号 → 邮件 → 池 → 设置敏感项）
+3. 删除/归档 `templates/` 业务页与 `static/js/features/*`（保留扩展与健康检查）
 
 ## 开发代理
 
