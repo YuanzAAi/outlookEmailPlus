@@ -58,7 +58,7 @@ npm start
 - [x] P1 概览 Dashboard（`/overview` → `/api/overview/*`）
 - [x] P2 账号与分组（`/accounts` `/groups`）
 - [x] P3 邮件阅读（`/mailbox` → `/api/emails/*` `/api/email/*`）
-- [ ] P4 临时邮箱与插件
+- [x] P4 临时邮箱与插件（`/temp-emails` `/plugins`）
 - [ ] P5 设置 / 审计 / 邮箱池 / Token 工具
 
 ## 注意
