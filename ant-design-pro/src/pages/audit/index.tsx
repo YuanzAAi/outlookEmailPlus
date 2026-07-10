@@ -85,7 +85,7 @@ const AuditPage: React.FC = () => {
       title: '动作',
       dataIndex: 'action',
       width: 140,
-      fieldProps: { placeholder: '如 create/delete' },
+      fieldProps: { placeholder: '搜索动作' },
       render: (_, row) => (
         <Tag color={actionColor(row.action)}>{row.action || '--'}</Tag>
       ),
@@ -94,7 +94,7 @@ const AuditPage: React.FC = () => {
       title: '资源类型',
       dataIndex: 'resource_type',
       width: 140,
-      fieldProps: { placeholder: '如 account/email' },
+      fieldProps: { placeholder: '搜索资源类型' },
     },
     {
       title: '资源 ID',
@@ -135,10 +135,10 @@ const AuditPage: React.FC = () => {
       width: 160,
       ellipsis: true,
       search: false,
-      render: (v) =>
-        v ? (
+      render: (_, row) =>
+        row.trace_id ? (
           <Typography.Text copyable style={{ fontSize: 12 }}>
-            {String(v)}
+            {String(row.trace_id)}
           </Typography.Text>
         ) : (
           '--'
@@ -154,7 +154,7 @@ const AuditPage: React.FC = () => {
       })}
       subTitle={intl.formatMessage({
         id: 'outlook.audit.subtitle',
-        defaultMessage: '对接 /api/audit-logs · details / user_ip / trace_id',
+        defaultMessage: '查看系统操作记录与追踪信息',
       })}
       extra={
         <Button

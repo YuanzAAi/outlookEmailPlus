@@ -114,7 +114,7 @@ export default defineConfig({
    * @name layout 插件
    * @doc https://umijs.org/docs/max/layout-menu
    */
-  title: 'Ant Design Pro',
+  title: 'Outlook 邮件管理',
   layout: {
     locale: true,
     ...defaultSettings,
@@ -133,11 +133,11 @@ export default defineConfig({
    * @doc https://umijs.org/docs/max/i18n
    */
   locale: {
-    // default zh-CN
+    // 中文产品默认中文侧栏与 ProTable 文案
     default: 'zh-CN',
     antd: true,
-    // default true, when it is true, will use `navigator.language` overwrite default
-    baseNavigator: true,
+    // 不跟随浏览器语言，避免英文 Query/Reset 等脚手架文案
+    baseNavigator: false,
   },
   /**
    * @name antd 插件

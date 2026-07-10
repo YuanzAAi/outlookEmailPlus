@@ -8,7 +8,7 @@ export default {
   'pages.login.success': 'সফল লগইন!',
   'pages.login.username.placeholder': 'ব্যবহারকারীর নাম: admin or user',
   'pages.login.username.required': 'আপনার ব্যবহারকারীর নাম ইনপুট করুন!',
-  'pages.login.password.placeholder': 'পাসওয়ার্ড: ant.design',
+  'pages.login.password.placeholder': 'লগইন পাসওয়ার্ড লিখুন',
   'pages.login.password.required': 'আপনার পাসওয়ার্ড ইনপুট করুন!',
   'pages.login.phoneLogin.tab': 'ফোন লগইন',
   'pages.login.phoneLogin.errorMessage': 'যাচাইকরণ কোড ত্রুটি',

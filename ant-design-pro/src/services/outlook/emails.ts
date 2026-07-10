@@ -139,17 +139,59 @@ export function normalizeMethodParam(method?: string): EmailMethod {
   return m || 'graph';
 }
 
+/** 将常见后端错误码/英文文案映射为可读中文 */
+function humanizeEmailError(raw: string): string {
+  const text = String(raw || '').trim();
+  if (!text) return '';
+  const lower = text.toLowerCase();
+  if (
+    lower.includes('token') &&
+    (lower.includes('expir') || lower.includes('invalid') || lower.includes('refresh'))
+  ) {
+    return '授权已过期或令牌无效，请重新授权后再试';
+  }
+  if (
+    lower.includes('unauthorized') ||
+    lower.includes('401') ||
+    lower.includes('auth')
+  ) {
+    return '授权失败，请检查账号授权或重新登录';
+  }
+  if (
+    lower.includes('get_token') ||
+    lower.includes('fetch token') ||
+    lower.includes('obtain token') ||
+    lower.includes('access_token')
+  ) {
+    return '获取访问令牌失败，请检查账号配置或重新授权';
+  }
+  if (lower.includes('proxy') || lower.includes('tunnel')) {
+    return '代理连接失败，请检查代理设置';
+  }
+  if (lower.includes('timeout') || lower.includes('timed out')) {
+    return '请求超时，请稍后重试';
+  }
+  if (lower.includes('network') || lower.includes('econnrefused')) {
+    return '网络连接失败，请检查网络后重试';
+  }
+  // 已是中文则直接返回
+  if (/[\u4e00-\u9fff]/.test(text)) return text;
+  return text;
+}
+
 export function pickEmailsErrorMessage(payload: any, fallback = '获取邮件失败'): string {
   if (!payload) return fallback;
-  if (typeof payload.error === 'string' && payload.error) return payload.error;
-  if (payload.error && typeof payload.error === 'object') {
-    return (
+  let raw = '';
+  if (typeof payload.error === 'string' && payload.error) raw = payload.error;
+  else if (payload.error && typeof payload.error === 'object') {
+    raw =
       payload.error.message ||
+      payload.error.message_zh ||
       payload.error.message_en ||
       payload.error.code ||
-      fallback
-    );
+      '';
+  } else if (typeof payload.message === 'string' && payload.message) {
+    raw = payload.message;
   }
-  if (typeof payload.message === 'string' && payload.message) return payload.message;
-  return fallback;
+  return humanizeEmailError(raw) || fallback;
 }

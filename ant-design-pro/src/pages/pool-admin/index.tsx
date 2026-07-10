@@ -18,6 +18,12 @@ import {
   pickPoolError,
   type PoolAccountItem,
 } from '@/services/outlook/poolAdmin';
+import {
+  POOL_STATUS_FILTER_OPTIONS,
+  PROVIDER_FILTER_OPTIONS,
+  poolStatusLabel,
+  providerLabel,
+} from '@/utils/statusLabels';
 
 const statusColor = (status?: string) => {
   const s = String(status || '').toLowerCase();
@@ -95,7 +101,7 @@ const PoolAdminPage: React.FC = () => {
     );
     if (claimedOnlyForce) {
       message.warning(
-        '选中含 claimed 账号：claimed 仅允许 force_release，请改选或筛选后重试',
+        '选中项含「已申领」账号：已申领状态仅允许「强制释放申领」，请改选或筛选后重试',
       );
       return;
     }
@@ -103,7 +109,7 @@ const PoolAdminPage: React.FC = () => {
       BATCH_ACTIONS.find((a) => a.value === action)?.label || action;
     modal.confirm({
       title: `对选中 ${selectedIds.length} 项执行「${label}」？`,
-      content: '按账号串行调用后端 action，部分失败会汇总提示',
+      content: '部分账号可能失败，结果会汇总提示',
       onOk: async () => {
         const result = await batchPoolAction(selectedIds, action);
         if (result.fail === 0) {
@@ -135,7 +141,9 @@ const PoolAdminPage: React.FC = () => {
       width: 120,
       search: false,
       render: (_, row) => (
-        <Tag color={statusColor(row.pool_status)}>{row.pool_status || '--'}</Tag>
+        <Tag color={statusColor(row.pool_status)}>
+          {poolStatusLabel(row.pool_status)}
+        </Tag>
       ),
     },
     {
@@ -154,11 +162,11 @@ const PoolAdminPage: React.FC = () => {
       render: (v) => v || '--',
     },
     {
-      title: 'Provider',
+      title: '来源',
       dataIndex: 'provider',
       width: 120,
       search: false,
-      render: (v) => v || '--',
+      render: (_, row) => providerLabel(row.provider),
     },
     {
       title: '申领者',
@@ -190,7 +198,7 @@ const PoolAdminPage: React.FC = () => {
       })}
       subTitle={intl.formatMessage({
         id: 'outlook.pool.subtitle',
-        defaultMessage: '对接 /api/pool-admin/* · claimed 仅 force_release',
+        defaultMessage: '管理邮箱池状态与申领',
       })}
       extra={
         <Button
@@ -249,13 +257,7 @@ const PoolAdminPage: React.FC = () => {
               placeholder="池状态"
               style={{ width: 140 }}
               value={poolStatus}
-              options={[
-                { label: 'available', value: 'available' },
-                { label: 'claimed', value: 'claimed' },
-                { label: 'frozen', value: 'frozen' },
-                { label: 'cooldown', value: 'cooldown' },
-                { label: 'retired', value: 'retired' },
-              ]}
+              options={POOL_STATUS_FILTER_OPTIONS}
               onChange={(v) => {
                 setPoolStatus(v);
                 actionRef.current?.reload();
@@ -265,14 +267,10 @@ const PoolAdminPage: React.FC = () => {
               key="provider"
               allowClear
               showSearch
-              placeholder="Provider"
+              placeholder="来源"
               style={{ width: 160 }}
               value={provider}
-              options={[
-                { label: 'outlook', value: 'outlook' },
-                { label: 'imap_generic', value: 'imap_generic' },
-                { label: 'custom', value: 'custom' },
-              ]}
+              options={PROVIDER_FILTER_OPTIONS}
               onChange={(v) => {
                 setProvider(v);
                 actionRef.current?.reload();

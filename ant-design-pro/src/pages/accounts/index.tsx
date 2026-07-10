@@ -59,6 +59,11 @@ import {
   isTempMailboxGroup,
   type GroupItem,
 } from '@/services/outlook/groups';
+import {
+  ACCOUNT_STATUS_OPTIONS,
+  accountStatusLabel,
+  refreshStatusLabel,
+} from '@/utils/statusLabels';
 
 const statusColor = (status?: string) => {
   const s = String(status || '').toLowerCase();
@@ -193,7 +198,7 @@ const AccountsPage: React.FC = () => {
           style={{ cursor: 'pointer' }}
           onClick={() => void onToggleStatus(row)}
         >
-          {row.status || '--'}
+          {accountStatusLabel(row.status)}
         </Tag>
       ),
     },
@@ -234,7 +239,7 @@ const AccountsPage: React.FC = () => {
           <Typography.Text>{row.last_refresh_at || '--'}</Typography.Text>
           {row.last_refresh_status ? (
             <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-              {row.last_refresh_status}
+              {refreshStatusLabel(row.last_refresh_status)}
             </Typography.Text>
           ) : null}
         </Space>
@@ -299,7 +304,7 @@ const AccountsPage: React.FC = () => {
         message.error(pickAccountErrorMessage(res, '状态更新失败'));
         return;
       }
-      message.success(res.message || `已设为 ${next}`);
+      message.success(res.message || `已设为${accountStatusLabel(next)}`);
       actionRef.current?.reload();
     } catch (error: any) {
       message.error(error?.message || '状态更新失败');
@@ -383,7 +388,7 @@ const AccountsPage: React.FC = () => {
       })}
       subTitle={intl.formatMessage({
         id: 'outlook.accounts.subtitle',
-        defaultMessage: '对接 /api/accounts · 导入 / 编辑 / 批量 / 导出',
+        defaultMessage: '管理已接入的邮箱账号',
       })}
       extra={
         <Space wrap>
@@ -431,7 +436,7 @@ const AccountsPage: React.FC = () => {
             <Button
               size="small"
               onClick={() =>
-                void runBatch('批量设为 active？', async () => {
+                void runBatch('批量设为正常？', async () => {
                   const res = await batchUpdateAccountStatus(
                     selectedIds,
                     'active',
@@ -450,7 +455,7 @@ const AccountsPage: React.FC = () => {
             <Button
               size="small"
               onClick={() =>
-                void runBatch('批量设为 inactive？', async () => {
+                void runBatch('批量设为停用？', async () => {
                   const res = await batchUpdateAccountStatus(
                     selectedIds,
                     'inactive',
@@ -832,14 +837,7 @@ const AccountsPage: React.FC = () => {
             <Select options={groupOptions} loading={groupsQuery.isLoading} />
           </Form.Item>
           <Form.Item name="status" label="状态">
-            <Select
-              options={[
-                { label: 'active', value: 'active' },
-                { label: 'inactive', value: 'inactive' },
-                { label: 'expired', value: 'expired' },
-                { label: 'error', value: 'error' },
-              ]}
-            />
+            <Select options={ACCOUNT_STATUS_OPTIONS} />
           </Form.Item>
           <Form.Item name="remark" label="备注">
             <Input.TextArea rows={2} maxLength={200} showCount />

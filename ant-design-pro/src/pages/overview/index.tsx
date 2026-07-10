@@ -235,7 +235,7 @@ const SummaryPane: React.FC<{ data?: OverviewSummary; loading: boolean }> = ({
           </ProCard>
         </Col>
         <Col xs={24} md={12}>
-          <ProCard title="今日快捷数字" bordered loading={loading}>
+          <ProCard title="今日概览" bordered loading={loading}>
             <Space direction="vertical" style={{ width: '100%' }}>
               <div>
                 今日收件：
@@ -934,7 +934,10 @@ const OverviewPage: React.FC = () => {
         id: 'outlook.overview.title',
         defaultMessage: '数据概览',
       })}
-      subTitle="账号、验证码、对外 API、邮箱池与系统活动"
+      subTitle={intl.formatMessage({
+        id: 'outlook.overview.subtitle',
+        defaultMessage: '查看账号、验证码与邮箱池运行情况',
+      })}
       extra={
         <Space>
           <Typography.Text type="secondary">

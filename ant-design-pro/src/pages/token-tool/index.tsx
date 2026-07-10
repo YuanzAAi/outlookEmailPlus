@@ -204,10 +204,16 @@ const TokenToolPage: React.FC = () => {
   };
 
   return (
-    <PageContainer title={intl.formatMessage({
-      id: 'outlook.tokenTool.title',
-      defaultMessage: 'OAuth Token 工具',
-    })} subTitle="对接 /api/token-tool/*">
+    <PageContainer
+      title={intl.formatMessage({
+        id: 'outlook.tokenTool.title',
+        defaultMessage: 'OAuth Token 工具',
+      })}
+      subTitle={intl.formatMessage({
+        id: 'outlook.tokenTool.subtitle',
+        defaultMessage: '获取与刷新邮箱授权令牌',
+      })}
+    >
       <Space direction="vertical" size={16} style={{ width: '100%' }}>
         <ProCard title="OAuth 配置" bordered loading={loading && !authorizeUrl}>
           <Form

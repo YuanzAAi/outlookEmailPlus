@@ -8,7 +8,7 @@ export default {
   'pages.login.success': 'Login successful!',
   'pages.login.username.placeholder': 'Username: admin or user',
   'pages.login.username.required': 'Please input your username!',
-  'pages.login.password.placeholder': 'Password: ant.design',
+  'pages.login.password.placeholder': 'Enter login password',
   'pages.login.password.required': 'Please input your password!',
   'pages.login.phoneLogin.tab': 'Phone Login',
   'pages.login.phoneLogin.errorMessage': 'Verification Code Error',
@@ -86,24 +86,27 @@ export default {
 
   // OutlookEmail business pages
   'outlook.accounts.title': 'Accounts',
-  'outlook.accounts.subtitle':
-    '/api/accounts · import / edit / batch / export',
+  'outlook.accounts.subtitle': 'Manage connected mailbox accounts',
   'outlook.mailbox.title': 'Mailbox',
-  'outlook.mailbox.subtitle':
-    '3-column workbench / compact / resizable layout',
+  'outlook.mailbox.subtitle': 'Read and manage mail for the selected account',
   'outlook.pool.title': 'Pool Admin',
-  'outlook.pool.subtitle':
-    '/api/pool-admin/* · claimed allows force_release only',
+  'outlook.pool.subtitle': 'Manage pool status and claims',
   'outlook.settings.title': 'Settings',
   'outlook.settings.subtitle':
-    '/api/settings · multi-key / whitelist / CF / deploy',
+    'Configure access keys, whitelist, and deployment',
   'outlook.audit.title': 'Audit Logs',
-  'outlook.audit.subtitle':
-    '/api/audit-logs · details / user_ip / trace_id',
+  'outlook.audit.subtitle': 'View system activity and trace information',
   'outlook.groups.title': 'Groups',
+  'outlook.groups.subtitle': 'Manage account groups and color labels',
   'outlook.overview.title': 'Overview',
+  'outlook.overview.subtitle':
+    'Account, verification, and mailbox pool at a glance',
   'outlook.plugins.title': 'Plugins',
+  'outlook.plugins.subtitle': 'Install and manage plugins',
   'outlook.tempEmails.title': 'Temp Emails',
+  'outlook.tempEmails.subtitle': 'Manage temporary email addresses',
   'outlook.refreshLog.title': 'Refresh Logs',
+  'outlook.refreshLog.subtitle': 'View account token refresh history',
   'outlook.tokenTool.title': 'Token Tool',
+  'outlook.tokenTool.subtitle': 'Obtain and refresh mailbox auth tokens',
 };

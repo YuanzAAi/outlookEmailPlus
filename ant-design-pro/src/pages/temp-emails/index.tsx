@@ -273,7 +273,10 @@ const TempEmailsPage: React.FC = () => {
         id: 'outlook.tempEmails.title',
         defaultMessage: '临时邮箱',
       })}
-      subTitle="对接 /api/temp-emails/*"
+      subTitle={intl.formatMessage({
+        id: 'outlook.tempEmails.subtitle',
+        defaultMessage: '管理临时邮箱地址',
+      })}
       extra={
         <Button
           icon={<ReloadOutlined />}

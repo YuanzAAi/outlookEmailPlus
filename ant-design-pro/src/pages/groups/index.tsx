@@ -14,7 +14,7 @@ import {
   type ProColumns,
 } from '@ant-design/pro-components';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { App, Button, Popconfirm, Space, Tag } from 'antd';
+import { App, Button, Popconfirm, Space, Tag, Typography } from 'antd';
 import React, { useRef, useState } from 'react';
 import {
   createGroup,
@@ -85,7 +85,26 @@ const GroupsPage: React.FC = () => {
       dataIndex: 'color',
       width: 120,
       search: false,
-      render: (v) => v || '--',
+      render: (_, row) =>
+        row.color ? (
+          <Space size={8}>
+            <span
+              style={{
+                width: 16,
+                height: 16,
+                borderRadius: 4,
+                background: row.color,
+                display: 'inline-block',
+                border: '1px solid rgba(0,0,0,0.12)',
+              }}
+            />
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              {row.color}
+            </Typography.Text>
+          </Space>
+        ) : (
+          '--'
+        ),
     },
     {
       title: '操作',
@@ -136,7 +155,10 @@ const GroupsPage: React.FC = () => {
         id: 'outlook.groups.title',
         defaultMessage: '分组管理',
       })}
-      subTitle="对接 /api/groups"
+      subTitle={intl.formatMessage({
+        id: 'outlook.groups.subtitle',
+        defaultMessage: '管理账号分组与颜色标识',
+      })}
       extra={
         <Space>
           <Button

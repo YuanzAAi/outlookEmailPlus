@@ -17,6 +17,7 @@ import {
   Badge,
   Button,
   Checkbox,
+  Collapse,
   Empty,
   Input,
   InputNumber,
@@ -1159,7 +1160,7 @@ const MailboxPage: React.FC = () => {
       })}
       subTitle={intl.formatMessage({
         id: 'outlook.mailbox.subtitle',
-        defaultMessage: '三栏工作台 / 简洁模式 / 可拖拽布局',
+        defaultMessage: '阅读与管理选中账号的邮件',
       })}
       extra={
         <Space wrap>
@@ -1289,18 +1290,39 @@ const MailboxPage: React.FC = () => {
           style={{ marginBottom: 16 }}
           message={listError}
           description={
-            listErrorDetails ? (
-              <Typography.Paragraph
-                type="secondary"
-                style={{ marginBottom: 0, whiteSpace: 'pre-wrap' }}
-              >
-                {typeof listErrorDetails === 'string'
-                  ? listErrorDetails
-                  : JSON.stringify(listErrorDetails, null, 2)}
-              </Typography.Paragraph>
-            ) : (
-              '请检查账号 Token / 代理设置，或前往 Token 工具重新授权。'
-            )
+            <Space direction="vertical" size={8} style={{ width: '100%' }}>
+              <Typography.Text type="secondary">
+                请检查账号授权或代理设置，也可前往 Token 工具重新授权。
+              </Typography.Text>
+              {listErrorDetails ? (
+                <Collapse
+                  ghost
+                  size="small"
+                  items={[
+                    {
+                      key: 'tech',
+                      label: '技术详情',
+                      children: (
+                        <Typography.Paragraph
+                          type="secondary"
+                          copyable
+                          style={{
+                            marginBottom: 0,
+                            whiteSpace: 'pre-wrap',
+                            fontSize: 12,
+                            fontFamily: 'monospace',
+                          }}
+                        >
+                          {typeof listErrorDetails === 'string'
+                            ? listErrorDetails
+                            : JSON.stringify(listErrorDetails, null, 2)}
+                        </Typography.Paragraph>
+                      ),
+                    },
+                  ]}
+                />
+              ) : null}
+            </Space>
           }
           action={
             <Button

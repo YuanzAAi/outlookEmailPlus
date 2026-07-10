@@ -8,7 +8,7 @@ export default {
   'pages.login.success': 'ログイン成功!',
   'pages.login.username.placeholder': 'ユーザー名：adminまたはuser',
   'pages.login.username.required': 'ユーザー名を入力してください！',
-  'pages.login.password.placeholder': 'パスワード：ant.design',
+  'pages.login.password.placeholder': 'ログインパスワードを入力',
   'pages.login.password.required': 'パスワードを入力してください！',
   'pages.login.phoneLogin.tab': '電話ログイン',
   'pages.login.phoneLogin.errorMessage': '検証コードエラー',

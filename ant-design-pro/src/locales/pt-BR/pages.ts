@@ -8,7 +8,7 @@ export default {
   'pages.login.success': 'Login efetuado com sucesso!',
   'pages.login.username.placeholder': 'Usuário: admin or user',
   'pages.login.username.required': 'Por favor insira seu usuário!',
-  'pages.login.password.placeholder': 'Senha: ant.design',
+  'pages.login.password.placeholder': 'Digite a senha de login',
   'pages.login.password.required': 'Por favor insira sua senha!',
   'pages.login.phoneLogin.tab': 'Login com Telefone',
   'pages.login.phoneLogin.errorMessage': 'Erro de Código de Verificação',

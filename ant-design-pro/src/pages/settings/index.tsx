@@ -305,7 +305,7 @@ const SettingsPage: React.FC = () => {
     const method = form.getFieldValue('update_method') || 'watchtower';
     modal.confirm({
       title: '确认触发系统更新？',
-      content: `将使用 method=${method} 调用 /api/system/trigger-update`,
+      content: `将使用「${method}」方式触发系统更新`,
       onOk: async () => {
         setUpdateLoading(true);
         try {
@@ -358,7 +358,7 @@ const SettingsPage: React.FC = () => {
       })}
       subTitle={intl.formatMessage({
         id: 'outlook.settings.subtitle',
-        defaultMessage: '对接 /api/settings · 多 Key / 白名单 / CF / 部署',
+        defaultMessage: '配置访问密钥、白名单与部署选项',
       })}
       extra={
         <Space>
@@ -983,7 +983,7 @@ const SettingsPage: React.FC = () => {
                     </Space>
                   ) : (
                     <Typography.Text type="secondary">
-                      点击「刷新部署信息」拉取 /api/system/deployment-info
+                      点击「刷新部署信息」获取当前部署状态
                     </Typography.Text>
                   )}
                 </ProCard>

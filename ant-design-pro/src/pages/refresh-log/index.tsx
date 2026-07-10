@@ -12,6 +12,7 @@ import {
   fetchRefreshLogs,
   type RefreshLogItem,
 } from '@/services/outlook/refreshLogs';
+import { refreshStatusLabel } from '@/utils/statusLabels';
 import { useIntl } from '@umijs/max';
 
 const RefreshLogPage: React.FC = () => {
@@ -49,7 +50,7 @@ const RefreshLogPage: React.FC = () => {
             : s.includes('fail') || s.includes('error')
               ? 'error'
               : 'default';
-        return <Tag color={color}>{row.status || '--'}</Tag>;
+        return <Tag color={color}>{refreshStatusLabel(row.status)}</Tag>;
       },
     },
     {
@@ -67,7 +68,10 @@ const RefreshLogPage: React.FC = () => {
         id: 'outlook.refreshLog.title',
         defaultMessage: '刷新日志',
       })}
-      subTitle="对接 /api/accounts/refresh-logs*"
+      subTitle={intl.formatMessage({
+        id: 'outlook.refreshLog.subtitle',
+        defaultMessage: '查看账号令牌刷新记录',
+      })}
       extra={
         <Space>
           <Segmented

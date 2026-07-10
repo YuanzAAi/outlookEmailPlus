@@ -158,6 +158,14 @@ const Login: React.FC = () => {
           logo={<img alt="logo" src="/img/ico.png" />}
           title="Outlook 邮件管理"
           subTitle="安全登录以管理您的邮箱账号"
+          submitter={{
+            searchConfig: {
+              submitText: intl.formatMessage({
+                id: 'pages.login.submit',
+                defaultMessage: '登录',
+              }),
+            },
+          }}
           onFinish={async (values) => {
             await handleSubmit(values as { password?: string });
           }}

@@ -264,9 +264,15 @@ const PluginsPage: React.FC = () => {
         id: 'outlook.plugins.title',
         defaultMessage: '插件管理',
       })}
-      subTitle={`对接 /api/plugins · 已安装 ${installedCount}`}
+      subTitle={intl.formatMessage({
+        id: 'outlook.plugins.subtitle',
+        defaultMessage: '安装与管理扩展插件',
+      })}
       extra={
         <Space>
+          <Typography.Text type="secondary">
+            已安装 {installedCount}
+          </Typography.Text>
           <Button
             icon={<ReloadOutlined />}
             loading={pluginsQuery.isFetching}
