@@ -61,8 +61,25 @@ npm start
 - [x] P4 临时邮箱与插件（`/temp-emails` `/plugins`）
 - [x] P5 设置 / 审计 / 邮箱池 / Token 工具 / 刷新日志
 
+## 开发代理
+
+`config/proxy.ts` 将以下路径代理到 Flask（默认 `http://127.0.0.1:5000`）：
+
+- `/api/`、`/login`、`/logout`、`/img/`
+- `/token-tool/callback`（仅 OAuth 回调；SPA 页面 `/token-tool` 由 Umi 路由处理）
+- `/healthz`
+
+业务 Token 工具 API 走 `/api/token-tool/*`，不依赖页面路径代理。
+
+## 邮箱池契约要点
+
+- `GET /api/pool-admin/accounts` 响应：`{ items, total, page, page_size, total_pages }`
+- 查询参数 `in_pool`：`true` | `false` | `all`（不要用 yes/no）
+- 动作名：`move_into_pool` / `move_out_of_pool` / `restore_available` / `freeze` / `retire` / `force_release`
+
 ## 注意
 
 - 不要手改 `src/services/ant-design-pro/`（openapi 生成目录）；业务 API 写在 `src/services/outlook/`
 - Node >= 22
 - `npm run simple` 不可逆，本项目不要执行
+- 审查修复（P5 后）：pool-admin 契约对齐、token-tool 代理收敛、HTTP 错误体规范化

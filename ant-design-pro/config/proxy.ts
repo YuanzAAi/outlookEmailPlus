@@ -32,7 +32,13 @@ const flaskProxy = {
     target: FLASK_TARGET,
     changeOrigin: true,
   },
-  '/token-tool': {
+  // 仅代理 OAuth 回调；SPA 页面 /token-tool 由 Umi 自己处理
+  // 业务 API 已由 /api/ 覆盖（含 /api/token-tool/*）
+  '/token-tool/callback': {
+    target: FLASK_TARGET,
+    changeOrigin: true,
+  },
+  '/healthz': {
     target: FLASK_TARGET,
     changeOrigin: true,
   },

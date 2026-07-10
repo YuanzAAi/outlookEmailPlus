@@ -16,15 +16,20 @@ export type PoolAccountItem = {
 
 export type PoolAccountsResponse = {
   success?: boolean;
-  accounts?: PoolAccountItem[];
+  /** 后端真实字段 */
   items?: PoolAccountItem[];
+  total?: number;
+  page?: number;
+  page_size?: number;
+  total_pages?: number;
+  /** 兼容别名 */
+  accounts?: PoolAccountItem[];
   pagination?: {
     page?: number;
     page_size?: number;
     total_count?: number;
     total?: number;
   };
-  total?: number;
   error?: any;
   message?: string;
 };

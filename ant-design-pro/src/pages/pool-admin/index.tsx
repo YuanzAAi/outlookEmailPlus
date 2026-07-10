@@ -16,14 +16,14 @@ import {
   type PoolAccountItem,
 } from '@/services/outlook/poolAdmin';
 
+// 与 outlook_web/services/pool_admin.ACTION_RULES + force_release 对齐
 const ACTIONS = [
-  { label: '加入池', value: 'add_to_pool' },
-  { label: '移出池', value: 'remove_from_pool' },
+  { label: '移入池', value: 'move_into_pool' },
+  { label: '移出池', value: 'move_out_of_pool' },
+  { label: '恢复可用', value: 'restore_available' },
   { label: '冻结', value: 'freeze' },
-  { label: '解冻', value: 'unfreeze' },
-  { label: '释放申领', value: 'release_claim' },
-  { label: '完成申领', value: 'complete_claim' },
-  { label: '冷却恢复', value: 'recover_cooldown' },
+  { label: '退役', value: 'retire' },
+  { label: '强制释放申领', value: 'force_release' },
 ];
 
 const statusColor = (status?: string) => {
@@ -38,6 +38,7 @@ const statusColor = (status?: string) => {
 const PoolAdminPage: React.FC = () => {
   const { message } = App.useApp();
   const actionRef = useRef<ActionType>(null);
+  // 后端 in_pool 仅接受 true | false | all（见 pool_admin_repo.list_accounts）
   const [inPool, setInPool] = useState<string>('all');
   const [poolStatus, setPoolStatus] = useState<string | undefined>();
   const [groupId, setGroupId] = useState<number | undefined>();
@@ -67,7 +68,10 @@ const PoolAdminPage: React.FC = () => {
       actionRef.current?.reload();
     } catch (error: any) {
       message.error(
-        pickPoolError(error?.response?.data, error?.message || '操作失败'),
+        pickPoolError(
+          error?.data || error?.info || error?.response?.data,
+          error?.message || '操作失败',
+        ),
       );
     }
   };
@@ -91,10 +95,11 @@ const PoolAdminPage: React.FC = () => {
     },
     {
       title: '在池',
-      dataIndex: 'in_pool',
+      dataIndex: 'pool_status',
       width: 80,
       search: false,
-      render: (_, row) => (row.in_pool ? '是' : '否'),
+      // 后端无 in_pool 字段：pool_status 非空即在池内
+      render: (_, row) => (row.pool_status ? '是' : '否'),
     },
     {
       title: '分组',
@@ -161,8 +166,8 @@ const PoolAdminPage: React.FC = () => {
               value={inPool}
               options={[
                 { label: '全部', value: 'all' },
-                { label: '在池内', value: 'yes' },
-                { label: '不在池', value: 'no' },
+                { label: '在池内', value: 'true' },
+                { label: '不在池', value: 'false' },
               ]}
               onChange={(v) => {
                 setInPool(v);
@@ -212,11 +217,12 @@ const PoolAdminPage: React.FC = () => {
               pool_status: poolStatus,
               group_id: groupId,
             });
-            const list = res.accounts || res.items || [];
+            // 后端形状：{ items, total, page, page_size, total_pages }
+            const list = res.items || res.accounts || [];
             const total =
+              res.total ??
               res.pagination?.total_count ??
               res.pagination?.total ??
-              res.total ??
               list.length;
             return {
               data: list,

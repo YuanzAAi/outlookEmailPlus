@@ -53,31 +53,67 @@ class TestP5ApiContract(unittest.TestCase):
         self.assertTrue("logs" in data or "items" in data or isinstance(data.get("data"), list))
 
     def test_pool_admin_list_shape(self):
+        """对齐仓库真实契约：items/total/page/page_size/total_pages，无顶层 success。"""
         self._login()
         with patch(
             "outlook_web.controllers.pool_admin.pool_admin_svc.list_accounts",
             return_value={
-                "success": True,
-                "accounts": [
+                "items": [
                     {
                         "id": 1,
                         "email": "pool@example.com",
                         "pool_status": "available",
-                        "in_pool": 1,
+                        "provider": "outlook",
                     }
                 ],
-                "pagination": {"page": 1, "page_size": 50, "total_count": 1},
+                "total": 1,
+                "page": 1,
+                "page_size": 50,
+                "total_pages": 1,
             },
         ):
             resp = self.client.get(
                 "/api/pool-admin/accounts",
-                query_string={"page": 1, "page_size": 50, "in_pool": "all"},
+                query_string={
+                    "page": 1,
+                    "page_size": 50,
+                    "in_pool": "true",
+                },
             )
         self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
         data = resp.get_json() or {}
-        accounts = data.get("accounts") or data.get("items") or []
-        self.assertTrue(accounts)
-        self.assertIn("email", accounts[0])
+        self.assertIn("items", data)
+        self.assertIn("total", data)
+        self.assertIsInstance(data["items"], list)
+        self.assertTrue(data["items"])
+        self.assertIn("email", data["items"][0])
+        self.assertEqual(data["total"], 1)
+
+    def test_pool_admin_in_pool_filter_values(self):
+        """对抗：in_pool 仅接受 true|false|all（yes/no 会被当成 all）。"""
+        self._login()
+        captured = {}
+
+        def _fake_list(**kwargs):
+            captured.update(kwargs)
+            return {
+                "items": [],
+                "total": 0,
+                "page": 1,
+                "page_size": 50,
+                "total_pages": 1,
+            }
+
+        with patch(
+            "outlook_web.controllers.pool_admin.pool_admin_svc.list_accounts",
+            side_effect=_fake_list,
+        ):
+            resp = self.client.get(
+                "/api/pool-admin/accounts",
+                query_string={"in_pool": "false", "page": 1, "page_size": 20},
+            )
+        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
+        self.assertEqual(captured.get("in_pool"), "false")
 
     def test_pool_action_requires_action(self):
         self._login()

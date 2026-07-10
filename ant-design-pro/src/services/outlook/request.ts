@@ -69,6 +69,18 @@ export async function outlookRequest<T = any>(
       }
       return umiRequest<T>(url, { ...finalOptions, headers });
     }
+
+    // 业务页常用 skipErrorHandler：把 HTTP 错误体规范化后抛出，
+    // 保证 catch 侧总能读到 payload（含 502 details）。
+    if (data && typeof data === 'object') {
+      const normalized: any = new Error(msg || error?.message || '请求失败');
+      normalized.name = error?.name || 'RequestError';
+      normalized.response = error?.response;
+      normalized.data = data;
+      normalized.info = data;
+      normalized.status = status;
+      throw normalized;
+    }
     throw error;
   }
 }
