@@ -55,7 +55,7 @@ npm start
 ## 迁移进度
 
 - [x] P0 基础设施（proxy / CSRF / login / 路由骨架）
-- [ ] P1 概览 Dashboard
+- [x] P1 概览 Dashboard（`/overview` → `/api/overview/*`）
 - [ ] P2 账号与分组
 - [ ] P3 邮件阅读
 - [ ] P4 临时邮箱与插件
