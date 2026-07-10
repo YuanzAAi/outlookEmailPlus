@@ -88,9 +88,11 @@ const PluginsPage: React.FC = () => {
         setConfigPlugin(null);
         return;
       }
-      const fields = schemaRes?.data?.fields || [];
+      const schemaData = schemaRes?.data || {};
+      const configData = configRes?.data || {};
+      const fields = schemaData.config_schema?.fields || schemaData.fields || [];
       setConfigFields(fields);
-      configForm.setFieldsValue(configRes?.data || {});
+      configForm.setFieldsValue(configData.config || configData);
     } catch (error: any) {
       message.error(
         pickPluginErrorMessage(error?.response?.data, error?.message || '加载配置失败'),

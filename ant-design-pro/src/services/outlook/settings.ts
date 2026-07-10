@@ -51,7 +51,7 @@ export async function testVerificationAi(body: Record<string, any> = {}) {
 export async function validateCron(cron: string) {
   return outlookRequest<{ success: boolean; message?: string; error?: any }>(
     '/api/settings/validate-cron',
-    { method: 'POST', data: { cron }, skipErrorHandler: true },
+    { method: 'POST', data: { cron_expression: cron }, skipErrorHandler: true },
   );
 }
 

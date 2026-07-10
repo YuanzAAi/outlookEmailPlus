@@ -101,7 +101,7 @@ const GroupsPage: React.FC = () => {
         <Popconfirm
           key="delete"
           title="确认删除该分组？"
-          description="仅空分组可删除；系统分组不可删。"
+          description="删除后该组账号会迁移到默认分组；系统分组不可删。"
           onConfirm={async () => {
             try {
               const res = await deleteGroup(row.id);

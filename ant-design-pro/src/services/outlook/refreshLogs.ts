@@ -4,8 +4,10 @@ export type RefreshLogItem = {
   id?: number;
   account_id?: number;
   email?: string;
+  account_email?: string;
   status?: string;
   message?: string;
+  error_message?: string;
   error?: string;
   created_at?: string;
   [key: string]: any;

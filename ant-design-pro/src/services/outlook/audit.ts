@@ -6,8 +6,11 @@ export type AuditLogItem = {
   resource_type?: string;
   resource_id?: string;
   detail?: string;
+  details?: string;
   operator?: string;
   ip?: string;
+  user_ip?: string;
+  trace_id?: string;
   created_at?: string;
   [key: string]: any;
 };

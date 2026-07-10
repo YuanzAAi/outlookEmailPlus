@@ -42,10 +42,10 @@ const AuditPage: React.FC = () => {
     },
     {
       title: '详情',
-      dataIndex: 'detail',
+      dataIndex: 'details',
       ellipsis: true,
       search: false,
-      render: (v) => v || '--',
+      render: (_, row) => row.details || row.detail || '--',
     },
     {
       title: '操作者',
@@ -56,8 +56,15 @@ const AuditPage: React.FC = () => {
     },
     {
       title: 'IP',
-      dataIndex: 'ip',
+      dataIndex: 'user_ip',
       width: 140,
+      search: false,
+      render: (_, row) => row.user_ip || row.ip || '--',
+    },
+    {
+      title: 'Trace ID',
+      dataIndex: 'trace_id',
+      ellipsis: true,
       search: false,
       render: (v) => v || '--',
     },

@@ -113,7 +113,23 @@ export type OverviewPool = {
 export type OverviewActivity = {
   kpi?: Record<string, number | string | undefined>;
   recent?: Array<Record<string, any>>;
+  items?: Array<Record<string, any>>;
   by_action?: Array<Record<string, any>>;
+  notification_stats?: Record<
+    string,
+    { count?: number; success_count?: number; success_rate?: number }
+  >;
+  op_type_dist?: Array<{ action_group?: string; count?: number }>;
+  timeline?: Array<{
+    time?: string;
+    action?: string;
+    status?: string;
+    resource_type?: string;
+    operator?: string;
+    channel?: string;
+    code_found?: string;
+    duration_ms?: number;
+  }>;
   [key: string]: any;
 };
 

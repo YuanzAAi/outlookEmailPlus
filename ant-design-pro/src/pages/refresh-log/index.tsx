@@ -28,10 +28,11 @@ const RefreshLogPage: React.FC = () => {
     },
     {
       title: '邮箱',
-      dataIndex: 'email',
+      dataIndex: 'account_email',
       ellipsis: true,
       copyable: true,
       search: false,
+      render: (_, row) => row.account_email || row.email || '--',
     },
     {
       title: '状态',
@@ -51,10 +52,10 @@ const RefreshLogPage: React.FC = () => {
     },
     {
       title: '消息',
-      dataIndex: 'message',
+      dataIndex: 'error_message',
       ellipsis: true,
       search: false,
-      render: (_, row) => row.message || row.error || '--',
+      render: (_, row) => row.error_message || row.message || row.error || '--',
     },
   ];
 
@@ -86,7 +87,9 @@ const RefreshLogPage: React.FC = () => {
     >
       <ProTable<RefreshLogItem>
         rowKey={(row) =>
-          String(row.id ?? `${row.created_at}-${row.email}-${row.status}`)
+          String(
+            row.id ?? `${row.created_at}-${row.account_email || row.email}-${row.status}`,
+          )
         }
         actionRef={actionRef}
         columns={columns}
