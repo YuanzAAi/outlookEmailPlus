@@ -103,9 +103,65 @@ def login() -> Any:
 
 
 def logout() -> Any:
-    """退出登录"""
+    """退出登录。
+
+    兼容旧版页面跳转与新前端 SPA：
+    - 默认 GET /logout → 重定向到登录页
+    - Accept: application/json 或 /api/* 路径 → JSON
+    """
     session.pop("logged_in", None)
+    wants_json = (
+        request.is_json
+        or request.path.startswith("/api/")
+        or "application/json" in (request.headers.get("Accept") or "")
+        or request.headers.get("X-Requested-With") == "XMLHttpRequest"
+    )
+    if wants_json:
+        return jsonify({"success": True, "message": "已退出登录"})
     return redirect(url_for("pages.login"))
+
+
+def api_current_user() -> Any:
+    """当前登录用户（供 Ant Design Pro / SPA 使用）。
+
+    未登录返回 401 + need_login，已登录返回统一 data 结构。
+    本系统是单密码管理端，无多用户模型，固定返回管理员身份。
+    """
+    is_logged_in = bool(session.get("logged_in") or session.get("user_id"))
+    if not is_logged_in:
+        trace_id_value = None
+        try:
+            trace_id_value = getattr(g, "trace_id", None)
+        except Exception:
+            trace_id_value = None
+        error_payload = build_error_payload(
+            code="AUTH_REQUIRED",
+            message="请先登录",
+            err_type="AuthError",
+            status=401,
+            details="need_login",
+            trace_id=trace_id_value,
+        )
+        return jsonify({"success": False, "error": error_payload, "need_login": True}), 401
+
+    return jsonify(
+        {
+            "success": True,
+            "data": {
+                "name": "管理员",
+                "userid": "admin",
+                "access": "admin",
+                "avatar": "/img/ico.png",
+                "title": "Outlook 邮件管理",
+            },
+        }
+    )
+
+
+def api_logout() -> Any:
+    """SPA 退出登录（JSON）。"""
+    session.pop("logged_in", None)
+    return jsonify({"success": True, "message": "已退出登录"})
 
 
 def image_asset(filename: str) -> Any:

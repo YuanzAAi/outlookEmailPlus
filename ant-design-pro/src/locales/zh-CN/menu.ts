@@ -1,0 +1,16 @@
+export default {
+  'menu.login': '登录',
+  'menu.overview': '概览',
+  'menu.mailbox': '邮箱',
+  'menu.accounts': '账号管理',
+  'menu.groups': '分组管理',
+  'menu.tempEmails': '临时邮箱',
+  'menu.poolAdmin': '邮箱池',
+  'menu.plugins': '插件',
+  'menu.refreshLog': '刷新日志',
+  'menu.settings': '系统设置',
+  'menu.audit': '审计日志',
+  'menu.tokenTool': 'Token 工具',
+  'menu.exception.404': '404',
+  'menu.account.logout': '退出登录',
+};
