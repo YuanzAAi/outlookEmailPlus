@@ -6,3 +6,8 @@ export * from './accounts';
 export * from './emails';
 export * from './tempEmails';
 export * from './plugins';
+export * from './settings';
+export * from './audit';
+export * from './poolAdmin';
+export * from './tokenTool';
+export * from './refreshLogs';
