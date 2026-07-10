@@ -57,7 +57,7 @@ npm start
 - [x] P0 基础设施（proxy / CSRF / login / 路由骨架）
 - [x] P1 概览 Dashboard（`/overview` → `/api/overview/*`）
 - [x] P2 账号与分组（`/accounts` `/groups`）
-- [ ] P3 邮件阅读
+- [x] P3 邮件阅读（`/mailbox` → `/api/emails/*` `/api/email/*`）
 - [ ] P4 临时邮箱与插件
 - [ ] P5 设置 / 审计 / 邮箱池 / Token 工具
 
