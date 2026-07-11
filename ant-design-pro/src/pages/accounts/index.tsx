@@ -53,6 +53,7 @@ import {
   updateAccount,
   verifyExportPassword,
   type AccountItem,
+  type RefreshSelectedEvent,
 } from '@/services/outlook/accounts';
 import {
   fetchGroups,
@@ -508,13 +509,67 @@ const AccountsPage: React.FC = () => {
               icon={<SyncOutlined />}
               onClick={() =>
                 void runBatch('刷新选中账号 Token？', async () => {
-                  const res = await refreshSelectedAccounts(selectedIds);
-                  if (res?.success === false) {
-                    throw new Error(
-                      pickAccountErrorMessage(res, 'Token 刷新失败'),
-                    );
+                  const loadingKey = 'refresh-selected-token';
+                  message.loading({
+                    content: '正在刷新 Token…',
+                    key: loadingKey,
+                    duration: 0,
+                  });
+                  try {
+                    const res = await refreshSelectedAccounts(selectedIds, {
+                      onEvent: (event: RefreshSelectedEvent) => {
+                        if (event.type === 'start') {
+                          message.loading({
+                            content: `正在刷新 Token… 0 / ${event.total}`,
+                            key: loadingKey,
+                            duration: 0,
+                          });
+                        } else if (event.type === 'progress') {
+                          const done =
+                            event.result === 'processing'
+                              ? Math.max(0, (event.current || 1) - 1)
+                              : event.current;
+                          message.loading({
+                            content: `正在刷新 Token… ${done} / ${event.total}`,
+                            key: loadingKey,
+                            duration: 0,
+                          });
+                        } else if (event.type === 'delay') {
+                          message.loading({
+                            content: `限流等待约 ${Math.ceil(event.seconds)} 秒…`,
+                            key: loadingKey,
+                            duration: 0,
+                          });
+                        }
+                      },
+                    });
+                    if (res.failed_count > 0) {
+                      const detail =
+                        res.failed_list
+                          ?.slice(0, 5)
+                          .map(
+                            (f) =>
+                              `${f.email || f.id || '?'}: ${f.error || '失败'}`,
+                          )
+                          .join('；') || '';
+                      message.warning({
+                        content: detail
+                          ? `${res.message}（${detail}${
+                              res.failed_list.length > 5 ? '…' : ''
+                            }）`
+                          : res.message,
+                        key: loadingKey,
+                      });
+                    } else {
+                      message.success({
+                        content: res.message || 'Token 刷新完成',
+                        key: loadingKey,
+                      });
+                    }
+                  } catch (error) {
+                    message.destroy(loadingKey);
+                    throw error;
                   }
-                  message.success(res.message || '已提交刷新');
                 })
               }
             >
@@ -731,18 +786,18 @@ const AccountsPage: React.FC = () => {
               name="imap_host"
               label={
                 importProvider === 'auto'
-                  ? 'Fallback IMAP Host（可选）'
-                  : 'IMAP Host'
+                  ? '备用 IMAP 主机（可选）'
+                  : 'IMAP 主机'
               }
               placeholder={
                 importProvider === 'custom'
-                  ? '必填，或在文本每行内嵌 host/port'
+                  ? '必填，或在文本每行内嵌主机/端口'
                   : '可选'
               }
             />
             <ProFormDigit
               name="imap_port"
-              label="IMAP Port"
+              label="IMAP 端口"
               min={1}
               max={65535}
               fieldProps={{ precision: 0 }}

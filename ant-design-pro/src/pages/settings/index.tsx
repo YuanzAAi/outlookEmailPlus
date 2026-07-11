@@ -816,15 +816,18 @@ const SettingsPage: React.FC = () => {
                   >
                     <Switch />
                   </Form.Item>
-                  <Form.Item name="temp_mail_provider" label="临时邮箱 Provider">
-                    <Input />
+                  <Form.Item name="temp_mail_provider" label="临时邮箱服务商">
+                    <Input placeholder="如 gptmail / custom" />
                   </Form.Item>
-                  <Form.Item name="temp_mail_api_base_url" label="临时邮箱 API Base">
-                    <Input />
+                  <Form.Item
+                    name="temp_mail_api_base_url"
+                    label="临时邮箱接口地址"
+                  >
+                    <Input placeholder="https://..." />
                   </Form.Item>
                   <Form.Item
                     name="temp_mail_api_key"
-                    label="临时邮箱 API Key"
+                    label="临时邮箱接口密钥"
                     extra={
                       sMeta.temp_mail_api_key_set
                         ? `已设置：${sMeta.temp_mail_api_key_masked || ''}`
@@ -833,15 +836,18 @@ const SettingsPage: React.FC = () => {
                   >
                     <Input.Password
                       visibilityToggle
-                      placeholder="输入新 Key 以更新"
+                      placeholder="输入新密钥以更新"
                     />
                   </Form.Item>
-                  <Form.Item name="cf_worker_base_url" label="CF Worker Base">
-                    <Input />
+                  <Form.Item
+                    name="cf_worker_base_url"
+                    label="Cloudflare Worker 地址"
+                  >
+                    <Input placeholder="https://..." />
                   </Form.Item>
                   <Form.Item
                     name="cf_worker_admin_key"
-                    label="CF Worker Admin Key"
+                    label="Cloudflare Worker 管理密钥"
                     extra={
                       sMeta.cf_worker_admin_key_set
                         ? `已设置：${sMeta.cf_worker_admin_key_masked || ''}`
@@ -850,7 +856,7 @@ const SettingsPage: React.FC = () => {
                   >
                     <Input.Password
                       visibilityToggle
-                      placeholder="输入新 Key 以更新"
+                      placeholder="输入新管理密钥以更新"
                     />
                   </Form.Item>
                   <Space>
@@ -859,7 +865,7 @@ const SettingsPage: React.FC = () => {
                       loading={cfSyncLoading}
                       onClick={() => void onSyncCfDomains()}
                     >
-                      同步 CF Worker 域名
+                      同步 Cloudflare Worker 域名
                     </Button>
                     {Array.isArray(sMeta.cf_worker_domains) &&
                     sMeta.cf_worker_domains.length ? (

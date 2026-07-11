@@ -304,10 +304,10 @@ const TempEmailsPage: React.FC = () => {
       >
         <Form form={form} layout="inline" style={{ rowGap: 12 }}>
           {providerOptions.length > 0 ? (
-            <Form.Item name="provider_name" label="Provider">
+            <Form.Item name="provider_name" label="服务商">
               <Select
                 allowClear
-                placeholder="默认 Provider"
+                placeholder="默认服务商"
                 style={{ width: 180 }}
                 options={providerOptions}
                 onChange={(v) => setProviderName(v || undefined)}

@@ -1,3 +1,4 @@
+import { ensureCsrfToken, clearCsrfToken } from './auth';
 import { outlookRequest } from './request';
 
 export type AccountItem = {
@@ -232,16 +233,319 @@ export async function toggleAccountTelegram(
   });
 }
 
-export async function refreshSelectedAccounts(accountIds: number[]) {
-  return outlookRequest<{
-    success: boolean;
-    message?: string;
-    error?: any;
-  }>('/api/accounts/refresh/selected', {
+/** SSE 事件：与后端 refresh_service.stream_refresh_selected_accounts 对齐 */
+export type RefreshSelectedEvent =
+  | {
+      type: 'start';
+      total: number;
+      skipped_count?: number;
+      delay_seconds?: number;
+      run_id?: number;
+      trace_id?: string;
+      refresh_type?: string;
+    }
+  | {
+      type: 'progress';
+      current: number;
+      total: number;
+      email?: string;
+      account_id?: number;
+      result?: 'processing' | 'success' | 'failed' | string;
+      error_message?: string | null;
+      last_refresh_at?: string | null;
+      success_count?: number;
+      failed_count?: number;
+    }
+  | {
+      type: 'delay';
+      seconds: number;
+    }
+  | {
+      type: 'complete';
+      total: number;
+      success_count: number;
+      failed_count: number;
+      failed_list?: Array<{ id?: number; email?: string; error?: string }>;
+      invalid_token_failed_count?: number;
+      invalid_token_failed_list?: Array<Record<string, any>>;
+      run_id?: number;
+    }
+  | {
+      type: 'error';
+      error?: {
+        code?: string;
+        message?: string;
+        message_en?: string;
+        details?: any;
+        trace_id?: string;
+      };
+    };
+
+export type RefreshSelectedResult = {
+  success: boolean;
+  message: string;
+  total: number;
+  success_count: number;
+  failed_count: number;
+  skipped_count: number;
+  failed_list: Array<{ id?: number; email?: string; error?: string }>;
+  error?: RefreshSelectedEvent extends { type: 'error' }
+    ? Extract<RefreshSelectedEvent, { type: 'error' }>['error']
+    : any;
+};
+
+export type RefreshSelectedOptions = {
+  signal?: AbortSignal;
+  onEvent?: (event: RefreshSelectedEvent) => void;
+};
+
+/** 从 SSE 文本块中解析完整 `data:` 行（供单测与流式读取复用） */
+export function parseSseDataLines(
+  chunk: string,
+  carry = '',
+): { events: RefreshSelectedEvent[]; rest: string } {
+  const buffer = `${carry}${chunk}`;
+  const lines = buffer.split('\n');
+  const rest = lines.pop() ?? '';
+  const events: RefreshSelectedEvent[] = [];
+  for (const line of lines) {
+    const trimmed = line.trimEnd();
+    if (!trimmed.startsWith('data:')) continue;
+    const payload = trimmed.slice(5).trimStart();
+    if (!payload || payload === '[DONE]') continue;
+    try {
+      events.push(JSON.parse(payload) as RefreshSelectedEvent);
+    } catch {
+      /* 忽略半截/脏行 */
+    }
+  }
+  return { events, rest };
+}
+
+function summarizeRefreshComplete(
+  event: Extract<RefreshSelectedEvent, { type: 'complete' }>,
+  skippedCount: number,
+): RefreshSelectedResult {
+  const failedList = event.failed_list || [];
+  const skippedHint =
+    skippedCount > 0 ? `，跳过 ${skippedCount} 个不可刷新账号` : '';
+  if ((event.failed_count || 0) === 0) {
+    return {
+      success: true,
+      message: `Token 刷新完成：成功 ${event.success_count} 个${skippedHint}`,
+      total: event.total,
+      success_count: event.success_count,
+      failed_count: event.failed_count,
+      skipped_count: skippedCount,
+      failed_list: failedList,
+    };
+  }
+  return {
+    success: true,
+    message: `Token 刷新完成：成功 ${event.success_count} 个，失败 ${event.failed_count} 个${skippedHint}`,
+    total: event.total,
+    success_count: event.success_count,
+    failed_count: event.failed_count,
+    skipped_count: skippedCount,
+    failed_list: failedList,
+  };
+}
+
+async function postRefreshSelectedFetch(
+  accountIds: number[],
+  csrfToken: string | null,
+  signal?: AbortSignal,
+): Promise<Response> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    Accept: 'text/event-stream',
+  };
+  if (csrfToken) {
+    headers['X-CSRFToken'] = csrfToken;
+  }
+  return fetch('/api/accounts/refresh/selected', {
     method: 'POST',
-    data: { account_ids: accountIds },
-    skipErrorHandler: true,
+    credentials: 'include',
+    headers,
+    body: JSON.stringify({ account_ids: accountIds }),
+    signal,
   });
+}
+
+/**
+ * 批量刷新选中账号 Token。
+ * 后端返回 text/event-stream（start/progress/delay/complete/error），
+ * 必须用 fetch 流式解析，不能走 umi/axios JSON 请求。
+ */
+export async function refreshSelectedAccounts(
+  accountIds: number[],
+  options: RefreshSelectedOptions = {},
+): Promise<RefreshSelectedResult> {
+  if (!accountIds.length) {
+    throw new Error('请先勾选账号');
+  }
+
+  const OVERALL_TIMEOUT_MS = 120_000;
+  const HEARTBEAT_TIMEOUT_MS = 30_000;
+  const controller = new AbortController();
+  const externalSignal = options.signal;
+  const onExternalAbort = () => controller.abort();
+  if (externalSignal) {
+    if (externalSignal.aborted) {
+      controller.abort();
+    } else {
+      externalSignal.addEventListener('abort', onExternalAbort, { once: true });
+    }
+  }
+
+  let overallTimer: ReturnType<typeof setTimeout> | null = null;
+  let heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
+  let timedOut = false;
+
+  const clearTimers = () => {
+    if (overallTimer) clearTimeout(overallTimer);
+    if (heartbeatTimer) clearTimeout(heartbeatTimer);
+    overallTimer = null;
+    heartbeatTimer = null;
+  };
+
+  const armHeartbeat = () => {
+    if (heartbeatTimer) clearTimeout(heartbeatTimer);
+    heartbeatTimer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, HEARTBEAT_TIMEOUT_MS);
+  };
+
+  overallTimer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, OVERALL_TIMEOUT_MS);
+
+  try {
+    let csrf = await ensureCsrfToken();
+    let response = await postRefreshSelectedFetch(
+      accountIds,
+      csrf,
+      controller.signal,
+    );
+
+    // CSRF 失败时刷新 token 重试一次（与 outlookRequest 行为对齐）
+    if (response.status === 400) {
+      const peek = await response.clone().text();
+      if (/csrf|CSRF/i.test(peek)) {
+        clearCsrfToken();
+        csrf = await ensureCsrfToken(true);
+        response = await postRefreshSelectedFetch(
+          accountIds,
+          csrf,
+          controller.signal,
+        );
+      } else {
+        let payload: any = null;
+        try {
+          payload = JSON.parse(peek);
+        } catch {
+          /* ignore */
+        }
+        throw new Error(pickAccountErrorMessage(payload, 'Token 刷新失败'));
+      }
+    }
+
+    if (!response.ok) {
+      let payload: any = null;
+      try {
+        const text = await response.text();
+        payload = JSON.parse(text);
+      } catch {
+        /* ignore */
+      }
+      throw new Error(pickAccountErrorMessage(payload, '刷新请求失败'));
+    }
+
+    if (!response.body) {
+      throw new Error('刷新响应缺少流式正文');
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let carry = '';
+    let skippedCount = 0;
+    let sawTerminal = false;
+    let completeResult: RefreshSelectedResult | null = null;
+
+    armHeartbeat();
+
+    while (!sawTerminal) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      armHeartbeat();
+      const decoded = decoder.decode(value, { stream: true });
+      const { events, rest } = parseSseDataLines(decoded, carry);
+      carry = rest;
+
+      for (const event of events) {
+        options.onEvent?.(event);
+        if (event.type === 'start') {
+          skippedCount = event.skipped_count || 0;
+        } else if (event.type === 'complete') {
+          completeResult = summarizeRefreshComplete(event, skippedCount);
+          sawTerminal = true;
+          break;
+        } else if (event.type === 'error') {
+          const msg = pickAccountErrorMessage(
+            { error: event.error },
+            '刷新执行失败',
+          );
+          const err: any = new Error(msg);
+          err.refreshError = event.error;
+          throw err;
+        }
+      }
+    }
+
+    // 冲刷 decoder 尾部
+    if (!sawTerminal && carry.trim()) {
+      const { events } = parseSseDataLines(`${carry}\n`, '');
+      for (const event of events) {
+        options.onEvent?.(event);
+        if (event.type === 'start') {
+          skippedCount = event.skipped_count || 0;
+        } else if (event.type === 'complete') {
+          completeResult = summarizeRefreshComplete(event, skippedCount);
+          sawTerminal = true;
+        } else if (event.type === 'error') {
+          const msg = pickAccountErrorMessage(
+            { error: event.error },
+            '刷新执行失败',
+          );
+          const err: any = new Error(msg);
+          err.refreshError = event.error;
+          throw err;
+        }
+      }
+    }
+
+    if (!completeResult) {
+      throw new Error('刷新流已结束，但未收到完成事件');
+    }
+    return completeResult;
+  } catch (error: any) {
+    if (error?.name === 'AbortError') {
+      throw new Error(
+        timedOut
+          ? '刷新请求超时，请检查网络或代理配置后重试'
+          : '刷新请求已取消',
+      );
+    }
+    throw error;
+  } finally {
+    clearTimers();
+    if (externalSignal) {
+      externalSignal.removeEventListener('abort', onExternalAbort);
+    }
+  }
 }
 
 export async function verifyExportPassword(password: string) {
@@ -255,6 +559,74 @@ export async function verifyExportPassword(password: string) {
     data: { password },
     skipErrorHandler: true,
   });
+}
+
+/** 兼容 axios / fetch Response：判断是否 2xx */
+export function isHttpOk(response: any): boolean {
+  if (!response || typeof response !== 'object') return false;
+  if (typeof response.ok === 'boolean') return response.ok;
+  const status = Number(response.status);
+  if (Number.isFinite(status) && status > 0) {
+    return status >= 200 && status < 300;
+  }
+  // 无 status/ok 时：仅当看起来像 axios/fetch 响应壳且带 data/headers 时保守放行
+  if ('headers' in response || 'data' in response || 'body' in response) {
+    return true;
+  }
+  return false;
+}
+
+/** 兼容 axios headers 对象与 fetch Headers.get() */
+export function getResponseHeader(
+  response: any,
+  name: string,
+): string | undefined {
+  if (!response?.headers) return undefined;
+  const headers = response.headers;
+  if (typeof headers.get === 'function') {
+    const viaGet =
+      headers.get(name) ||
+      headers.get(name.toLowerCase()) ||
+      headers.get(name.toUpperCase());
+    if (viaGet) return String(viaGet);
+  }
+  const lower = name.toLowerCase();
+  const direct =
+    headers[name] ??
+    headers[lower] ??
+    headers[name.toUpperCase()] ??
+    headers['Content-Disposition'] ??
+    headers['content-disposition'];
+  if (Array.isArray(direct)) return direct[0] ? String(direct[0]) : undefined;
+  if (direct != null) return String(direct);
+  // axios 偶发 common 桶
+  const common = headers.common;
+  if (common && typeof common === 'object') {
+    const fromCommon = common[name] ?? common[lower];
+    if (fromCommon != null) return String(fromCommon);
+  }
+  return undefined;
+}
+
+/** 从 Content-Disposition 解析文件名 */
+export function parseContentDispositionFilename(
+  header?: string | null,
+  fallback = `accounts_export_${Date.now()}.txt`,
+): string {
+  if (!header) return fallback;
+  const star = header.match(/filename\*\s*=\s*UTF-8''([^;\n]+)/i);
+  if (star?.[1]) {
+    try {
+      return decodeURIComponent(star[1].replace(/["']/g, '').trim());
+    } catch {
+      return star[1].replace(/["']/g, '').trim();
+    }
+  }
+  const plain = header.match(/filename\s*=\s*("?)([^";\n]+)\1/i);
+  if (plain?.[2]) {
+    return plain[2].trim();
+  }
+  return fallback;
 }
 
 /** 导出选中分组（blob）；需先 verifyExportPassword 拿 token */
@@ -271,32 +643,58 @@ export async function exportSelectedGroups(
     responseType: 'blob',
   } as any);
 
-  // umi request getResponse: true → { data, response }
-  const response: Response | undefined = res?.response;
-  const data = res?.data ?? res;
-  if (response && !response.ok) {
-    // blob 错误体尝试解析
+  // umi getResponse: true → { data, response }；也可能直接是 axios response / 裸 blob
+  const hasWrappedResponse =
+    res &&
+    typeof res === 'object' &&
+    'response' in res &&
+    res.response != null;
+  const response: any = hasWrappedResponse
+    ? res.response
+    : res &&
+        typeof res === 'object' &&
+        (typeof res.ok === 'boolean' ||
+          typeof res.status === 'number' ||
+          res.headers)
+      ? res
+      : null;
+  const data = hasWrappedResponse
+    ? res.data
+    : res instanceof Blob
+      ? res
+      : (res?.data ?? res);
+
+  if (response && !isHttpOk(response)) {
     let payload: any = null;
     try {
-      const text = await (data as Blob).text();
-      payload = JSON.parse(text);
+      if (data instanceof Blob) {
+        const text = await data.text();
+        payload = JSON.parse(text);
+      } else if (typeof data === 'string') {
+        payload = JSON.parse(data);
+      } else if (data && typeof data === 'object') {
+        payload = data;
+      }
     } catch {
       /* ignore */
     }
     throw new Error(pickAccountErrorMessage(payload, '导出失败'));
   }
-  const blob: Blob =
-    data instanceof Blob ? data : new Blob([data], { type: 'text/plain' });
-  let filename = `accounts_export_${Date.now()}.txt`;
-  const cd = response?.headers?.get?.('Content-Disposition') || '';
-  const match = cd.match(/filename\*?=(?:UTF-8'')?([^;\n]+)/i);
-  if (match) {
-    try {
-      filename = decodeURIComponent(match[1].replace(/"/g, ''));
-    } catch {
-      filename = match[1].replace(/"/g, '');
+
+  if (!(data instanceof Blob) && (data == null || typeof data === 'object' && !(data instanceof ArrayBuffer))) {
+    // 非 blob 且像错误 JSON
+    if (data && typeof data === 'object' && data.success === false) {
+      throw new Error(pickAccountErrorMessage(data, '导出失败'));
     }
   }
+
+  const blob: Blob =
+    data instanceof Blob
+      ? data
+      : new Blob([data], { type: 'text/plain;charset=utf-8' });
+
+  const cd = getResponseHeader(response, 'Content-Disposition');
+  const filename = parseContentDispositionFilename(cd);
   return { blob, filename };
 }
 
