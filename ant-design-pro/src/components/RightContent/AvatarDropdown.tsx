@@ -1,8 +1,4 @@
-import {
-  LogoutOutlined,
-  SettingOutlined,
-  SkinOutlined,
-} from '@ant-design/icons';
+import { LogoutOutlined, SkinOutlined } from '@ant-design/icons';
 import { history, useModel } from '@umijs/max';
 import type { MenuProps } from 'antd';
 import { Spin } from 'antd';
@@ -15,11 +11,6 @@ type GlobalHeaderRightProps = {
 };
 
 const menuItems: MenuProps['items'] = [
-  {
-    key: 'settings',
-    icon: <SettingOutlined />,
-    label: '系统设置',
-  },
   {
     key: 'theme',
     icon: <SkinOutlined />,
@@ -73,11 +64,6 @@ export const AvatarDropdown: React.FC<GlobalHeaderRightProps> = ({
       setInitialState((s) => ({ ...s, settingDrawerOpen: true }));
       return;
     }
-    if (key === 'settings') {
-      history.push('/settings');
-      return;
-    }
-    history.push(`/${key}`);
   };
 
   if (!initialState) {

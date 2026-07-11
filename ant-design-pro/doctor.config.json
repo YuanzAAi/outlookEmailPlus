@@ -7,7 +7,6 @@
       "scripts/**",
       "types/**",
       ".worktrees/**",
-      "cloudflare-worker/**",
       "src/.umi*/**",
       "src/services/**",
       "src/service-worker.js",
@@ -31,13 +30,6 @@
       {
         "files": ["package.json"],
         "rules": ["deslop/unused-dev-dependency"]
-      },
-      {
-        "files": [
-          "src/pages/form/advanced-form/index.tsx",
-          "src/pages/table-list/index.tsx"
-        ],
-        "rules": ["react-doctor/no-giant-component"]
       }
     ]
   },

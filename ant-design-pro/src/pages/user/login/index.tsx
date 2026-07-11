@@ -13,14 +13,14 @@ import Settings from '../../../../config/defaultSettings';
  * Only allow same-origin relative paths starting with '/'.
  */
 const getSafeRedirectUrl = (redirect: string | null): string => {
-  if (!redirect?.startsWith('/')) return '/overview';
-  if (redirect.startsWith('//')) return '/overview';
+  if (!redirect?.startsWith('/')) return '/accounts';
+  if (redirect.startsWith('//')) return '/accounts';
   try {
     const parsed = new URL(redirect, window.location.origin);
-    if (parsed.origin !== window.location.origin) return '/overview';
+    if (parsed.origin !== window.location.origin) return '/accounts';
     return `${parsed.pathname}${parsed.search}${parsed.hash}`;
   } catch {
-    return '/overview';
+    return '/accounts';
   }
 };
 

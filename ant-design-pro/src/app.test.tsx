@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const mockReplace = vi.fn();
 const mockHistory = {
   location: {
-    pathname: '/overview',
+    pathname: '/accounts',
     search: '',
     hash: '',
   },
@@ -26,12 +26,10 @@ vi.mock('@/services/outlook/auth', () => ({
 
 vi.mock('@/components', () => ({
   AvatarDropdown: () => null,
-  DocLink: () => null,
   ErrorBoundary: ({ children }: any) => children,
   Footer: () => null,
   LangDropdown: () => null,
   OfflineBanner: () => null,
-  VersionDropdown: () => null,
 }));
 
 vi.mock('@ant-design/pro-components', () => ({
@@ -55,7 +53,7 @@ describe('app getInitialState', () => {
     vi.clearAllMocks();
     mockEnsureCsrfToken.mockResolvedValue(null);
     mockHistory.location = {
-      pathname: '/overview',
+      pathname: '/accounts',
       search: '',
       hash: '',
     };
