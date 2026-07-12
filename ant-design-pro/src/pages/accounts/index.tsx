@@ -671,7 +671,7 @@ const AccountsPage: React.FC = () => {
           imap_port: 993,
         }}
         onValuesChange={(changed) => {
-          if (Object.prototype.hasOwnProperty.call(changed, 'provider')) {
+          if (Object.hasOwn(changed, 'provider')) {
             setImportProvider(String(changed.provider || 'outlook'));
           }
         }}

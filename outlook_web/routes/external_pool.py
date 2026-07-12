@@ -21,6 +21,11 @@ def create_blueprint(csrf_exempt: Optional[Callable] = None) -> Blueprint:
             ["POST"],
         ),
         (
+            "/api/external/pool/claim-domain",
+            external_pool_controller.api_external_pool_claim_domain,
+            ["POST"],
+        ),
+        (
             "/api/external/pool/claim-release",
             external_pool_controller.api_external_pool_claim_release,
             ["POST"],

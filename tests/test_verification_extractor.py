@@ -413,6 +413,51 @@ class TestVerificationExtractor(unittest.TestCase):
         text = extract_email_text(email)
         self.assertIn("555666", text)
 
+    # ==================== 大小写保持测试（回归） ====================
+
+    def test_smart_extract_preserves_lowercase(self):
+        """
+        测试用例：智能识别 - 保持小写验证码原样
+
+        测试目的：验证智能识别不再私自转换大小写（含数字的小写字母验证码）
+        """
+        content = "Your verification code is ab12cd. Please verify."
+        result = smart_extract_verification_code(content)
+        self.assertEqual(result, "ab12cd")
+
+    def test_smart_extract_preserves_mixed_case(self):
+        """
+        测试用例：智能识别 - 保持大小写混合验证码原样
+        """
+        content = "您的验证码是 Ab12Cd，请尽快使用。"
+        result = smart_extract_verification_code(content)
+        self.assertEqual(result, "Ab12Cd")
+
+    def test_fallback_extract_preserves_lowercase(self):
+        """
+        测试用例：保底提取 - 保持小写验证码原样
+        """
+        content = "Please use ab12cd to complete your registration."
+        result = fallback_extract_verification_code(content)
+        self.assertEqual(result, "ab12cd")
+
+    def test_fallback_extract_preserves_mixed_case(self):
+        """
+        测试用例：保底提取 - 保持大小写混合验证码原样
+        """
+        content = "Please use Ab12Cd to complete your registration."
+        result = fallback_extract_verification_code(content)
+        self.assertEqual(result, "Ab12Cd")
+
+    def test_extract_verification_info_preserves_case(self):
+        """
+        测试用例：完整流程 - verification_code 与 formatted 均保持原大小写
+        """
+        email = {"body": "Your verification code is ab12cd."}
+        result = extract_verification_info_from_text(email["body"])
+        self.assertEqual(result["verification_code"], "ab12cd")
+        self.assertEqual(result["formatted"], "ab12cd")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -154,7 +154,7 @@ def smart_extract_verification_code(email_content: str) -> Optional[str]:
                 # 过滤掉纯字母的匹配（验证码通常包含数字）
                 for match in matches:
                     if any(c.isdigit() for c in match):
-                        return match.upper()
+                        return match
 
     return None
 
@@ -183,8 +183,6 @@ def fallback_extract_verification_code(email_content: str) -> Optional[str]:
     # 过滤规则
     filtered = []
     for match in matches:
-        match_upper = match.upper()
-
         # 必须包含至少一个数字
         if not any(c.isdigit() for c in match):
             continue
@@ -209,7 +207,7 @@ def fallback_extract_verification_code(email_content: str) -> Optional[str]:
             if 2020 <= num <= 2030:
                 continue
 
-        filtered.append(match_upper)
+        filtered.append(match)
 
     return filtered[0] if filtered else None
 
@@ -460,7 +458,7 @@ def _smart_extract_code_by_keywords(email_content: str, code_re: re.Pattern) -> 
         for m in code_re.finditer(context):
             value = m.group(0)
             if value and any(c.isdigit() for c in value):
-                return value.upper()
+                return value
 
     return None
 
@@ -492,7 +490,7 @@ def _fallback_extract_code(email_content: str, code_re: re.Pattern) -> Optional[
             if 2020 <= num <= 2030:
                 continue
 
-        candidates.append(value.upper())
+        candidates.append(value)
 
     return candidates[0] if candidates else None
 
@@ -1055,7 +1053,7 @@ def enhance_verification_with_ai_fallback(
 
     updated = False
     if ai_code:
-        result["verification_code"] = ai_code.upper()
+        result["verification_code"] = ai_code
         result["code_confidence"] = "high" if ai_confidence == "high" else "low"
         updated = True
     if ai_link:

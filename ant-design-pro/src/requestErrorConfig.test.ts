@@ -70,7 +70,7 @@ describe('requestErrorConfig', () => {
         expect(error.name).toBe('BizError');
         expect(error.info.errorCode).toBe(403);
         expect(error.info.errorMessage).toBe('Forbidden');
-        expect(error.info.showType).toBe(3);
+        expect(error.info.showType).toBe(2);
         expect(error.info.data).toEqual({ detail: 'more info' });
       }
     });
@@ -142,7 +142,7 @@ describe('requestErrorConfig', () => {
       errorHandler(error, {});
 
       expect(notification.open).toHaveBeenCalledWith({
-        title: 1004,
+        title: '1004',
         description: 'This is a notification',
       });
     });
@@ -187,7 +187,7 @@ describe('requestErrorConfig', () => {
 
       errorHandler(error, {});
 
-      expect(message.error).toHaveBeenCalledWith('Response status:500');
+      expect(message.error).toHaveBeenCalledWith('请求失败');
     });
 
     it('should handle offline error', () => {

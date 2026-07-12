@@ -408,13 +408,22 @@ def extract_verification_for_outlook(
             reverse=True,
         )[0]
 
+        latest_id = str(latest.get("id") or "")
         if channel.startswith("imap_"):
             detail = channel_result.get("detail")
+            detail_id = str((detail or {}).get("id") or "")
+            if latest_id and detail_id and detail_id != latest_id:
+                detail = fetch_email_detail_for_channel(
+                    account=account,
+                    channel=channel,
+                    message_id=latest_id,
+                    proxy_url=proxy_url,
+                )
         else:
             detail = fetch_email_detail_for_channel(
                 account=account,
                 channel=channel,
-                message_id=latest.get("id", ""),
+                message_id=latest_id,
                 proxy_url=proxy_url,
             )
 

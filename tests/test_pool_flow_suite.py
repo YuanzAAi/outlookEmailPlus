@@ -295,6 +295,39 @@ class PoolFlowSuiteTests(unittest.TestCase):
         self.assertIn("claimed_at", data["data"])
         self.assertIsNotNone(data["data"]["claimed_at"])
 
+    def test_claim_domain_requires_email_domain(self):
+        resp = self.client.post(
+            "/api/external/pool/claim-domain",
+            headers=self._auth_headers(),
+            json={"caller_id": "domain_bot", "task_id": "domain_required"},
+        )
+        self.assertEqual(resp.status_code, 400)
+        data = json.loads(resp.data)
+        self.assertFalse(data["success"])
+        self.assertEqual(data["code"], "EMAIL_DOMAIN_REQUIRED")
+
+    def test_claim_domain_filters_to_requested_domain(self):
+        requested_domain = f"requested_{uuid.uuid4().hex[:8]}.test"
+        other_domain = f"other_{uuid.uuid4().hex[:8]}.test"
+        requested = self._make_pool_account(email_domain=requested_domain)
+        other = self._make_pool_account(email_domain=other_domain)
+
+        resp = self.client.post(
+            "/api/external/pool/claim-domain",
+            headers=self._auth_headers(),
+            json={
+                "caller_id": "domain_bot",
+                "task_id": "domain_claim",
+                "email_domain": requested_domain.upper(),
+            },
+        )
+        self.assertEqual(resp.status_code, 200)
+        data = json.loads(resp.data)
+        self.assertTrue(data["success"])
+        self.assertEqual(data["data"]["account_id"], requested["id"])
+        self.assertEqual(data["data"]["email_domain"], requested_domain)
+        self.assertNotEqual(data["data"]["account_id"], other["id"])
+
     def test_claim_with_project_key_prevents_same_project_reuse_without_manual_status_reset(self):
         """同 caller_id + project_key 下，新语义应原生阻止再次领取，无需手工改状态。"""
         # 使用唯一的 email_domain 隔离测试数据

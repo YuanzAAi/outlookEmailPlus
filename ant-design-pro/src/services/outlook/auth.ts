@@ -40,6 +40,11 @@ export type OutlookApiResult<T = unknown> = {
 let csrfTokenCache: string | null = null;
 let csrfRefreshPromise: Promise<string | null> | null = null;
 
+type CsrfTokenPayload = {
+  csrf_token?: string | null;
+  csrf_disabled?: boolean;
+};
+
 /** 获取 / 刷新 CSRF Token（与旧前端 main.js 行为对齐） */
 export async function ensureCsrfToken(force = false): Promise<string | null> {
   if (!force && csrfTokenCache) {
@@ -51,14 +56,14 @@ export async function ensureCsrfToken(force = false): Promise<string | null> {
 
   csrfRefreshPromise = (async () => {
     try {
-      const data = await request<{
-        csrf_token?: string | null;
-        csrf_disabled?: boolean;
-      }>('/api/csrf-token', {
+      const response = (await request<CsrfTokenPayload>('/api/csrf-token', {
         method: 'GET',
         skipErrorHandler: true,
         credentials: 'include',
-      } as any);
+      } as any)) as unknown as CsrfTokenPayload | { data?: CsrfTokenPayload };
+      const data =
+        ((response as { data?: CsrfTokenPayload }).data ??
+          response) as CsrfTokenPayload;
 
       if (data?.csrf_disabled) {
         csrfTokenCache = null;

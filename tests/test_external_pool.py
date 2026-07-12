@@ -280,6 +280,7 @@ class ExternalPoolApiTests(unittest.TestCase):
             set(wrapped_handlers),
             {
                 "api_external_pool_claim_random",
+                "api_external_pool_claim_domain",
                 "api_external_pool_claim_release",
                 "api_external_pool_claim_complete",
                 "api_external_pool_stats",
