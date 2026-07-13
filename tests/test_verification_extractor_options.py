@@ -540,6 +540,28 @@ class VerificationExtractorConfidenceTests(unittest.TestCase):
         gated = extractor.apply_confidence_gate(extracted, enforce_mutual_exclusion=False)
         self.assertEqual(gated.get("verification_code"), "84A-KMN")
 
+    def test_extract_xai_all_letter_hyphenated_code_njf_kuu(self):
+        """ZER-57 真实收信样本：全字母验证码 NJF-KUU。"""
+        func = self._require_new_api()
+        email = {
+            "subject": "xAI confirmation",
+            "body": (
+                "Thank you for creating an xAI account. "
+                "Please use the code below to validate your email address.\n\n"
+                "NJF-KUU\n\n"
+                "if you did not create a new account, please ignore this email.\n"
+                "SpaceXAI Team\n"
+                "© 2026 X.AI LLC\n"
+                "For questions contact support@x.ai"
+            ),
+            "body_html": "",
+        }
+        result = func(email)
+        self.assertEqual(result.get("verification_code"), "NJF-KUU")
+        self.assertEqual(result.get("code_confidence"), "high")
+        gated = extractor.apply_confidence_gate(result, enforce_mutual_exclusion=False)
+        self.assertEqual(gated.get("verification_code"), "NJF-KUU")
+
 
 if __name__ == "__main__":
     unittest.main()

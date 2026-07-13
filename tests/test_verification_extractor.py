@@ -453,6 +453,20 @@ class TestVerificationExtractor(unittest.TestCase):
         result = fallback_extract_verification_code(content)
         self.assertEqual(result, "84A-KMN")
 
+    def test_fallback_extract_xai_all_letter_hyphenated_code(self):
+        """x.ai 真实邮件可能为全字母连字符验证码（如 NJF-KUU）。"""
+        content = (
+            "Thank you for creating an xAI account. "
+            "Please use the code below to validate your email address.\n\n"
+            "NJF-KUU\n\n"
+            "if you did not create a new account, please ignore this email.\n"
+            "SpaceXAI Team\n"
+            "© 2026 X.AI LLC\n"
+            "For questions contact support@x.ai"
+        )
+        result = fallback_extract_verification_code(content)
+        self.assertEqual(result, "NJF-KUU")
+
     def test_extract_verification_info_xai_email_without_ai(self):
         """ZER-57 回归：未开启 AI 时也应从 x.ai 邮件提取验证码。"""
         email = {

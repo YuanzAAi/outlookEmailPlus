@@ -139,7 +139,12 @@ class HTMLTextExtractor(HTMLParser):
 
 
 def _is_valid_hyphenated_code(code: str) -> bool:
-    """校验带连字符验证码：两段字母数字、总长 4-10、至少含一位数字。"""
+    """校验带连字符验证码：两段字母数字、总长 4-10。
+
+  x.ai 常见两种形态：
+  - 含数字：84A-KMN
+  - 全大写字母：NJF-KUU（无数字，但两段均 >=3 且总长 >=6）
+    """
     if not code or "-" not in code:
         return False
 
@@ -152,7 +157,10 @@ def _is_valid_hyphenated_code(code: str) -> bool:
     alnum = "".join(parts)
     if not (4 <= len(alnum) <= 10):
         return False
-    return any(c.isdigit() for c in alnum)
+    if any(c.isdigit() for c in alnum):
+        return True
+    # x.ai 全字母验证码（如 NJF-KUU）
+    return len(alnum) >= 6 and all(len(part) >= 3 for part in parts) and alnum.isalpha()
 
 
 def _has_code_context(email_content: str) -> bool:
