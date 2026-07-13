@@ -562,6 +562,27 @@ class VerificationExtractorConfidenceTests(unittest.TestCase):
         gated = extractor.apply_confidence_gate(result, enforce_mutual_exclusion=False)
         self.assertEqual(gated.get("verification_code"), "NJF-KUU")
 
+    def test_extract_xai_html_with_css_color_false_positive(self):
+        """x.ai HTML 邮件含 #333333 样式色值时，不应误提取为验证码。"""
+        func = self._require_new_api()
+        email = {
+            "subject": "NJF-KUU xAI confirmation code",
+            "body": "",
+            "body_html": (
+                "<html><head><style>.title { color: #333333; }</style></head><body>"
+                "<p>Thank you for creating an xAI account. "
+                "Please use the code below to validate your email address.</p>"
+                "<p>NJF-KUU</p>"
+                "<p>For questions contact support@x.ai</p>"
+                "</body></html>"
+            ),
+        }
+        result = func(email, code_source="all")
+        self.assertEqual(result.get("verification_code"), "NJF-KUU")
+        self.assertEqual(result.get("code_confidence"), "high")
+        gated = extractor.apply_confidence_gate(result, enforce_mutual_exclusion=False)
+        self.assertEqual(gated.get("verification_code"), "NJF-KUU")
+
 
 if __name__ == "__main__":
     unittest.main()

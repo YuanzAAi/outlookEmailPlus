@@ -647,10 +647,19 @@ def extract_verification_info_with_options(
         source_text = content
         match_source = "content"
     elif source == "html":
-        source_text = html_content
+        if html_content:
+            parser = HTMLTextExtractor()
+            try:
+                parser.feed(html_content)
+                source_text = html.unescape(parser.get_text() or "").strip()
+            except Exception:
+                source_text = html_content
+        else:
+            source_text = ""
         match_source = "html"
     else:
-        source_text = f"{subject} {content} {html_content}".strip()
+        # all：content 已含 HTML 转纯文本；勿再拼接原始 HTML，避免 CSS 色值（如 #333333）误判
+        source_text = f"{subject} {content}".strip()
         match_source = "all"
 
     code_re = _build_code_regex(code_regex=code_regex, code_length=code_length)
