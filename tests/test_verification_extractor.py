@@ -418,8 +418,7 @@ class TestVerificationExtractor(unittest.TestCase):
     def test_smart_extract_xai_hyphenated_code(self):
         """x.ai 邮件：关键词附近应识别 84A-KMN。"""
         content = (
-            "Thank you for creating an xAI account. "
-            "Please use the code below to validate your email address.\n\n84A-KMN"
+            "Thank you for creating an xAI account. " "Please use the code below to validate your email address.\n\n84A-KMN"
         )
         result = smart_extract_verification_code(content)
         self.assertEqual(result, "84A-KMN")
