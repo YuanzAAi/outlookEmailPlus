@@ -28,20 +28,14 @@ def create_app(*, autostart_scheduler: Optional[bool] = None):
         from outlook_web import config as app_config
         from outlook_web.db import init_db, register_db
         from outlook_web.middleware import (
-            attach_trace_id_and_normalize_errors,
-            ensure_trace_id,
-            handle_exception,
-            handle_http_exception,
+            register_request_id,
+            register_security_headers,
         )
         from outlook_web.routes import (
             accounts,
             audit,
             emails,
-            external_pool,
-            external_temp_emails,
-            groups,
             overview,
-            pages,
             plugins,
             pool_admin,
             scheduler,
@@ -50,133 +44,22 @@ def create_app(*, autostart_scheduler: Optional[bool] = None):
             tags,
             temp_emails,
         )
-        from outlook_web.security.csrf import init_csrf
+        from outlook_web.security.csrf import csrf, csrf_exempt
+        from outlook_web.services.scheduler import start_scheduler
 
-        # 初始化（DB/目录等）
-        repo_root = Path(__file__).resolve().parents[1]
-        templates_dir = repo_root / "templates"
-        static_dir = repo_root / "static"
+        app = Flask(__name__)
+        app.config.from_object(config)
 
-        # 确保目录存在
-        templates_dir.mkdir(parents=True, exist_ok=True)
-        static_dir.mkdir(parents=True, exist_ok=True)
-
-        # 确保数据目录存在
-        data_dir = config.get_database_path()
-        if data_dir:
-            import os
-
-            os.makedirs(
-                os.path.dirname(data_dir) if os.path.dirname(data_dir) else ".",
-                exist_ok=True,
-            )
-
-        # 初始化数据库
-        init_db()
-
-        # 插件目录与第三方 provider 加载（不影响内置 provider）
-        plugins_dir = Path(config.get_database_path()).resolve().parent / "plugins" / "temp_mail_providers"
-        plugins_dir.mkdir(parents=True, exist_ok=True)
-        from outlook_web.services.temp_mail_provider_factory import load_plugins
-
-        load_plugins()
-
-        app = Flask(
-            __name__,
-            template_folder=str(templates_dir),
-            static_folder=str(static_dir),
-            static_url_path="/static",
-        )
-
-        class OverviewAwareFlaskClient(FlaskClient):
-            def open(self, *args, **kwargs):
-                headers = kwargs.get("headers") or {}
-                raw_path = args[0] if args else kwargs.get("path") or kwargs.get("environ_overrides", {}).get("PATH_INFO", "")
-                path = str(raw_path or "")
-                explicit_cookie_header = False
-                if hasattr(headers, "keys"):
-                    explicit_cookie_header = "Cookie" in headers or "cookie" in headers
-                if path.startswith("/api/overview/") and not explicit_cookie_header:
-                    saved_cookies = copy.deepcopy(getattr(self, "_cookies", {}))
-                    self._cookies = {}
-                    try:
-                        return super().open(*args, **kwargs)
-                    finally:
-                        self._cookies = saved_cookies
-                return super().open(*args, **kwargs)
-
-        app.test_client_class = OverviewAwareFlaskClient
-
-        # 注入版本号到所有模板（用于 UI 显示）
-        from outlook_web import __version__ as APP_VERSION
-
-        @app.context_processor
-        def inject_app_version():
-            return {
-                "APP_VERSION": APP_VERSION,
-                "OAUTH_TOOL_ENABLED": app_config.get_oauth_tool_enabled(),
-            }
-
-        app.secret_key = config.require_secret_key()
-        app.config["DATABASE_PATH"] = config.get_database_path()
-        app.config["PERMANENT_SESSION_LIFETIME"] = 60 * 60 * 24 * 7  # 7 天
-        app.config["SESSION_COOKIE_HTTPONLY"] = True
-        app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
-
-        # ProxyFix 中间件（仅在配置启用时应用）
-        # 注意：启用前必须配置 TRUSTED_PROXIES 环境变量
-        if config.get_proxy_fix_enabled():
+        if app_config.PROXY_FIX_ENABLED:
             app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
 
-        # DB teardown（请求结束释放连接）
         register_db(app)
+        csrf.init_app(app)
+        register_request_id(app)
+        register_security_headers(app)
 
-        # 配置日志（确保 outlook_web 命名空间的日志输出到 stderr）
-        import logging
-        import sys
+        init_db(app)
 
-        _log_handler = logging.StreamHandler(sys.stderr)
-        _log_handler.setFormatter(logging.Formatter("%(asctime)s %(name)s %(levelname)s %(message)s", datefmt="%H:%M:%S"))
-        _ow_logger = logging.getLogger("outlook_web")
-        if not _ow_logger.handlers:
-            _ow_logger.addHandler(_log_handler)
-            # PERF_LOGGING=true 时输出 DEBUG 级别性能日志；默认 INFO（生产模式不输出）
-            _perf_logging = os.getenv("PERF_LOGGING", "").strip().lower() == "true"
-            _ow_logger.setLevel(logging.DEBUG if _perf_logging else logging.INFO)
-
-        # CSRF（可选）
-        _csrf, csrf_exempt, _generate_csrf = init_csrf(app)
-
-        # trace_id + error 结构标准化（迁移到 middleware 模块）
-        app.before_request(ensure_trace_id)
-        app.after_request(attach_trace_id_and_normalize_errors)
-        app.register_error_handler(HTTPException, handle_http_exception)
-        app.register_error_handler(Exception, handle_exception)
-
-        # 静态文件缓存控制（防止浏览器缓存旧版本 JS/CSS）
-        @app.after_request
-        def set_static_cache_control(response):
-            """
-            为静态文件设置合理的缓存策略：
-            - 带版本号参数的静态文件可以长期缓存（1年）
-            - 没有版本号的静态文件使用短期缓存（1小时）+ must-revalidate
-            """
-            from flask import request
-
-            if request.path.startswith("/static/"):
-                # 检查是否带版本号参数（?v=x.x.x）
-                has_version_param = "v=" in (request.query_string or b"").decode("utf-8", errors="ignore")
-                if has_version_param:
-                    # 带版本号：可以长期缓存（immutable）
-                    response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
-                else:
-                    # 不带版本号：短期缓存 + 必须重新验证
-                    response.headers["Cache-Control"] = "public, max-age=3600, must-revalidate"
-            return response
-
-        # Blueprint 路由注册（URL 不变）
-        app.register_blueprint(pages.create_blueprint(csrf_exempt=csrf_exempt))
-        app.register_blueprint(groups.create_blueprint())
         app.register_blueprint(tags.create_blueprint())
         app.register_blueprint(accounts.create_blueprint())
         app.register_blueprint(emails.create_blueprint())
@@ -184,55 +67,16 @@ def create_app(*, autostart_scheduler: Optional[bool] = None):
         app.register_blueprint(settings.create_blueprint())
         app.register_blueprint(plugins.create_blueprint(csrf_exempt=csrf_exempt))
         app.register_blueprint(scheduler.create_blueprint())
-        app.register_blueprint(system.create_blueprint(csrf_exempt=csrf_exempt))
+        app.register_blueprint(system.create_blueprint())
         app.register_blueprint(audit.create_blueprint())
         app.register_blueprint(overview.create_blueprint())
         app.register_blueprint(pool_admin.create_blueprint())
-        app.register_blueprint(external_pool.create_blueprint(csrf_exempt=csrf_exempt))
-        app.register_blueprint(external_temp_emails.create_blueprint(csrf_exempt=csrf_exempt))
-        if app_config.get_oauth_tool_enabled():
-            from outlook_web.routes import token_tool
 
-            app.register_blueprint(token_tool.create_blueprint())
-
-        # 浏览器扩展 CORS 支持（仅对 /api/external/* 路径）
-        # chrome-extension:// 前缀不可被普通网页伪造，允许此来源不扩大安全边界
-        import re as _re
-
-        from flask_cors import CORS as _CORS
-
-        _CORS(
-            app,
-            resources={
-                r"/api/external/*": {
-                    "origins": [_re.compile(r"^chrome-extension://.*$")],
-                    "methods": ["GET", "POST", "OPTIONS"],
-                    "allow_headers": ["Content-Type", "X-API-Key"],
-                    "supports_credentials": False,
-                }
-            },
-        )
-
-        # 打印初始化信息
-        print("=" * 60)
-        print("Outlook 邮件 Web 应用已初始化")
-        print(f"数据库文件: {config.get_database_path()}")
-        print(f"Temp Mail API: {config.get_temp_mail_base_url()}")
-        print("=" * 60)
+        if autostart_scheduler is None:
+            autostart_scheduler = app_config.AUTOSTART_SCHEDULER
+        if autostart_scheduler:
+            start_scheduler(app)
 
         _APP_INSTANCE = app
-
-    # 调度器启动控制
-    if autostart_scheduler is None:
-        from outlook_web.services import graph as graph_service
-        from outlook_web.services import scheduler as scheduler_service
-
-        if scheduler_service.should_autostart_scheduler():
-            scheduler_service.init_scheduler(_APP_INSTANCE, graph_service.test_refresh_token_with_rotation)
-    elif autostart_scheduler:
-        from outlook_web.services import graph as graph_service
-        from outlook_web.services import scheduler as scheduler_service
-
-        scheduler_service.init_scheduler(_APP_INSTANCE, graph_service.test_refresh_token_with_rotation)
 
     return _APP_INSTANCE
