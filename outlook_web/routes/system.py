@@ -1,27 +1,16 @@
 from __future__ import annotations
 
-from collections.abc import Callable
-from typing import Optional
-
 from flask import Blueprint
 
 from outlook_web.controllers import system as system_controller
 from outlook_web.security.auth import login_required
 
 
-def create_blueprint(csrf_exempt: Optional[Callable] = None) -> Blueprint:
+def create_blueprint() -> Blueprint:
     """创建 system Blueprint"""
     bp = Blueprint("system", __name__)
-    demo_handler = system_controller.api_demo_rule_extract_verification
-    if csrf_exempt:
-        demo_handler = csrf_exempt(demo_handler)
 
     bp.add_url_rule("/healthz", view_func=system_controller.healthz, methods=["GET"])
-    bp.add_url_rule(
-        "/api/demo/rule-extract-verification",
-        view_func=demo_handler,
-        methods=["POST"],
-    )
     bp.add_url_rule(
         "/api/bootstrap",
         view_func=system_controller.api_bootstrap,
