@@ -511,6 +511,35 @@ class VerificationExtractorConfidenceTests(unittest.TestCase):
             "'verify your purchase' 不应触发链接验证语境提权",
         )
 
+    def test_extract_xai_hyphenated_code_without_ai(self):
+        """ZER-57：默认规则路径应识别 x.ai 带连字符验证码，且置信度为 high。"""
+        func = self._require_new_api()
+        email = {
+            "subject": "Validate your email",
+            "body": (
+                "Thank you for creating an xAI account. "
+                "Please use the code below to validate your email address.\n\n"
+                "84A-KMN\n\n"
+                "© 2026 X.AI LLC"
+            ),
+            "body_html": "",
+        }
+        result = func(email)
+        self.assertEqual(result.get("verification_code"), "84A-KMN")
+        self.assertEqual(result.get("code_confidence"), "high")
+
+    def test_apply_confidence_gate_keeps_xai_hyphenated_code(self):
+        """门控后 x.ai 带连字符验证码仍应保留。"""
+        func = self._require_new_api()
+        email = {
+            "subject": "Validate your email",
+            "body": "Please use the code below to validate your email address.\n\n84A-KMN",
+            "body_html": "",
+        }
+        extracted = func(email)
+        gated = extractor.apply_confidence_gate(extracted, enforce_mutual_exclusion=False)
+        self.assertEqual(gated.get("verification_code"), "84A-KMN")
+
 
 if __name__ == "__main__":
     unittest.main()

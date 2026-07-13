@@ -44,6 +44,24 @@ VERIFICATION_KEYWORDS = [
 # 验证码模式（4-8位数字或字母，必须包含至少一个数字）
 VERIFICATION_PATTERN = r"\b[A-Z0-9]{4,8}\b"
 
+# 带连字符的字母数字验证码，例如 x.ai 的 84A-KMN
+HYPHENATED_VERIFICATION_PATTERN = r"\b[A-Z0-9]{2,4}-[A-Z0-9]{2,4}\b"
+
+# 验证码语境提权：出现这些短语时允许识别带连字符验证码，降低订单号/追踪号误判
+CODE_CONTEXT_PHRASES = [
+    "validate your email",
+    "validate your email address",
+    "code below",
+    "xai account",
+    "x.ai",
+    "support@x.ai",
+    "verification code",
+    "confirm your email",
+    "verify your email",
+    "your code",
+    "the code below",
+]
+
 # 链接正则表达式
 LINK_PATTERN = r'https?://[^\s<>"{}|\\^`\[\]]+'
 
@@ -117,6 +135,66 @@ class HTMLTextExtractor(HTMLParser):
         return " ".join(self.text_parts)
 
 
+def _is_valid_hyphenated_code(code: str) -> bool:
+    """校验带连字符验证码：两段字母数字、总长 4-10、至少含一位数字。"""
+    if not code or "-" not in code:
+        return False
+
+    parts = code.split("-")
+    if len(parts) != 2:
+        return False
+    if not all(part.isalnum() for part in parts):
+        return False
+
+    alnum = "".join(parts)
+    if not (4 <= len(alnum) <= 10):
+        return False
+    return any(c.isdigit() for c in alnum)
+
+
+def _has_code_context(email_content: str) -> bool:
+    content_lower = email_content.lower()
+    return any(phrase.lower() in content_lower for phrase in CODE_CONTEXT_PHRASES)
+
+
+def _find_hyphenated_code_in_text(text: str) -> Optional[str]:
+    if not text:
+        return None
+
+    for match in re.findall(HYPHENATED_VERIFICATION_PATTERN, text, re.IGNORECASE):
+        code = match.upper()
+        if _is_valid_hyphenated_code(code):
+            return code
+    return None
+
+
+def _smart_extract_hyphenated_verification_code(email_content: str) -> Optional[str]:
+    """在验证码关键词附近搜索带连字符验证码。"""
+    if not email_content:
+        return None
+
+    content_lower = email_content.lower()
+    for keyword in VERIFICATION_KEYWORDS:
+        keyword_lower = keyword.lower()
+        pos = content_lower.find(keyword_lower)
+        if pos == -1:
+            continue
+
+        start = max(0, pos - 50)
+        end = min(len(email_content), pos + len(keyword) + 50)
+        code = _find_hyphenated_code_in_text(email_content[start:end])
+        if code:
+            return code
+    return None
+
+
+def _fallback_extract_hyphenated_verification_code(email_content: str) -> Optional[str]:
+    """在验证码语境明确时，从全文搜索带连字符验证码。"""
+    if not email_content or not _has_code_context(email_content):
+        return None
+    return _find_hyphenated_code_in_text(email_content)
+
+
 def smart_extract_verification_code(email_content: str) -> Optional[str]:
     """
     智能提取验证码（基于关键词）
@@ -155,6 +233,10 @@ def smart_extract_verification_code(email_content: str) -> Optional[str]:
                 for match in matches:
                     if any(c.isdigit() for c in match):
                         return match.upper()
+
+    hyphenated_code = _smart_extract_hyphenated_verification_code(email_content)
+    if hyphenated_code:
+        return hyphenated_code
 
     return None
 
@@ -211,7 +293,10 @@ def fallback_extract_verification_code(email_content: str) -> Optional[str]:
 
         filtered.append(match_upper)
 
-    return filtered[0] if filtered else None
+    if filtered:
+        return filtered[0]
+
+    return _fallback_extract_hyphenated_verification_code(email_content)
 
 
 def extract_links(email_content: str) -> List[str]:
@@ -568,6 +653,14 @@ def extract_verification_info_with_options(
         verification_code = _fallback_extract_code(source_text, code_re)
         # 调用方显式指定了 code_regex（强判别力正则）→ 提取命中即视为可信
         if verification_code and caller_directed_code:
+            code_confidence = "high"
+    if not verification_code:
+        verification_code = _smart_extract_hyphenated_verification_code(source_text)
+        if verification_code:
+            code_confidence = "high"
+    if not verification_code:
+        verification_code = _fallback_extract_hyphenated_verification_code(source_text)
+        if verification_code:
             code_confidence = "high"
 
     # ── 链接提取 & 置信度 ──

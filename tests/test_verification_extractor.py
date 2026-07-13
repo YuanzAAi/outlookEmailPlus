@@ -413,6 +413,54 @@ class TestVerificationExtractor(unittest.TestCase):
         text = extract_email_text(email)
         self.assertIn("555666", text)
 
+    # ==================== 带连字符验证码（x.ai）测试 ====================
+
+    def test_smart_extract_xai_hyphenated_code(self):
+        """x.ai 邮件：关键词附近应识别 84A-KMN。"""
+        content = (
+            "Thank you for creating an xAI account. "
+            "Please use the code below to validate your email address.\n\n84A-KMN"
+        )
+        result = smart_extract_verification_code(content)
+        self.assertEqual(result, "84A-KMN")
+
+    def test_fallback_extract_xai_hyphenated_code_with_context(self):
+        """x.ai 邮件：无紧邻关键词时，凭验证码语境应识别 84A-KMN。"""
+        content = (
+            "Validate your email\n"
+            "Thank you for creating an xAI account. "
+            "Please use the code below to validate your email address.\n\n"
+            "84A-KMN\n"
+            "© 2026 X.AI LLC\n"
+            "For questions contact support@x.ai"
+        )
+        result = fallback_extract_verification_code(content)
+        self.assertEqual(result, "84A-KMN")
+
+    def test_hyphenated_code_not_extracted_without_context(self):
+        """无验证码语境时，不应把订单号样式的连字符串当成验证码。"""
+        content = "Your order reference AB-12 has shipped. Tracking ID: XY-99-ZZ."
+        result = fallback_extract_verification_code(content)
+        self.assertIsNone(result)
+
+    def test_extract_verification_info_xai_email_without_ai(self):
+        """ZER-57 回归：未开启 AI 时也应从 x.ai 邮件提取验证码。"""
+        email = {
+            "subject": "Validate your email",
+            "body": (
+                "Hi,\n\n"
+                "Thank you for creating an xAI account. "
+                "Please use the code below to validate your email address.\n\n"
+                "84A-KMN\n\n"
+                "If you did not create a new account, please ignore this email.\n\n"
+                "SpaceXAI Team\n"
+                "© 2026 X.AI LLC\n"
+                "For questions contact support@x.ai"
+            ),
+        }
+        result = extract_verification_info(email)
+        self.assertEqual(result["verification_code"], "84A-KMN")
+
 
 if __name__ == "__main__":
     unittest.main()
