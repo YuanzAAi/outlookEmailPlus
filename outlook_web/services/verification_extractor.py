@@ -44,8 +44,11 @@ VERIFICATION_KEYWORDS = [
 # 验证码模式（4-8位数字或字母，必须包含至少一个数字）
 VERIFICATION_PATTERN = r"\b[A-Z0-9]{4,8}\b"
 
-# 带连字符的字母数字验证码，例如 x.ai 的 84A-KMN
-HYPHENATED_VERIFICATION_PATTERN = r"\b[A-Z0-9]{2,4}-[A-Z0-9]{2,4}\b"
+# 带连字符的字母数字验证码，例如 x.ai 的 84A-KMN。
+# x.ai HTML 常把验证码紧贴在句末（如 address.84A-KMNIf），因此允许验证码后接英文单词首字母。
+HYPHENATED_VERIFICATION_PATTERN = (
+    r"(?<![A-Z0-9])([A-Z0-9]{2,4}-[A-Z0-9]{2,4})(?=$|[^A-Z0-9-]|[A-Z][a-z])"
+)
 
 # 验证码语境提权：出现这些短语时允许识别带连字符验证码，降低订单号/追踪号误判
 CODE_CONTEXT_PHRASES = [
@@ -161,8 +164,8 @@ def _find_hyphenated_code_in_text(text: str) -> Optional[str]:
     if not text:
         return None
 
-    for match in re.findall(HYPHENATED_VERIFICATION_PATTERN, text, re.IGNORECASE):
-        code = match.upper()
+    for match in re.finditer(HYPHENATED_VERIFICATION_PATTERN, text, re.IGNORECASE):
+        code = match.group(1).upper()
         if _is_valid_hyphenated_code(code):
             return code
     return None

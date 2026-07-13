@@ -443,6 +443,16 @@ class TestVerificationExtractor(unittest.TestCase):
         result = fallback_extract_verification_code(content)
         self.assertIsNone(result)
 
+    def test_fallback_extract_xai_glued_hyphenated_code(self):
+        """x.ai HTML 解析后验证码可能与英文句首粘连（84A-KMNIf）。"""
+        content = (
+            "Thank you for creating an xAI account. "
+            "Please use the code below to validate your email address.84A-KMNIf "
+            "you did not create a new account, please ignore this email."
+        )
+        result = fallback_extract_verification_code(content)
+        self.assertEqual(result, "84A-KMN")
+
     def test_extract_verification_info_xai_email_without_ai(self):
         """ZER-57 回归：未开启 AI 时也应从 x.ai 邮件提取验证码。"""
         email = {
