@@ -1206,3 +1206,41 @@ def api_external_account_status() -> Any:
         },
     )
     return jsonify(external_api_service.ok(data))
+
+
+def api_demo_rule_extract_verification() -> Any:
+    """演示环境：用规则引擎从原始邮件文本提取验证码（不触发 AI）。"""
+    demo_token = (os.getenv("DEMO_API_TOKEN") or "").strip()
+    if not demo_token:
+        return jsonify({"code": "DEMO_DISABLED", "message": "演示接口未启用"}), 404
+
+    provided = (request.headers.get("X-Demo-Token") or "").strip()
+    if provided != demo_token:
+        return jsonify({"code": "UNAUTHORIZED", "message": "演示 Token 无效"}), 401
+
+    from outlook_web.services.verification_extractor import (
+        apply_confidence_gate,
+        extract_verification_info_with_options,
+    )
+
+    data = request.get_json(silent=True) or {}
+    email = {
+        "subject": str(data.get("subject") or "").strip(),
+        "body": str(data.get("body") or "").strip(),
+        "body_html": str(data.get("body_html") or "").strip(),
+    }
+    extracted = extract_verification_info_with_options(email, enforce_mutual_exclusion=False)
+    gated = apply_confidence_gate(extracted, enforce_mutual_exclusion=False)
+    return jsonify(
+        {
+            "code": "OK",
+            "message": "规则提取完成",
+            "data": {
+                "verification_code": gated.get("verification_code"),
+                "verification_link": gated.get("verification_link"),
+                "code_confidence": gated.get("code_confidence"),
+                "link_confidence": gated.get("link_confidence"),
+                "formatted": gated.get("formatted"),
+            },
+        }
+    )

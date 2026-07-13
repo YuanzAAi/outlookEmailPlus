@@ -184,7 +184,7 @@ def create_app(*, autostart_scheduler: Optional[bool] = None):
         app.register_blueprint(settings.create_blueprint())
         app.register_blueprint(plugins.create_blueprint(csrf_exempt=csrf_exempt))
         app.register_blueprint(scheduler.create_blueprint())
-        app.register_blueprint(system.create_blueprint())
+        app.register_blueprint(system.create_blueprint(csrf_exempt=csrf_exempt))
         app.register_blueprint(audit.create_blueprint())
         app.register_blueprint(overview.create_blueprint())
         app.register_blueprint(pool_admin.create_blueprint())
