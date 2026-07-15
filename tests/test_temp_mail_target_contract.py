@@ -376,7 +376,7 @@ class TempMailTargetContractTests(unittest.TestCase):
         combined = groups_js + "\n" + temp_js + "\n" + emails_js
 
         self.assertIn("/api/temp-emails/", combined)
-        self.assertIn("extract-verification", combined)
+        self.assertIn("/verification", combined)
         self.assertIn("buildVerificationExtractEndpoint", groups_js)
         self.assertIn("source: 'temp'", temp_js)
         self.assertIn("copyVerificationInfo(currentAccount, buttonElement", emails_js)
@@ -447,17 +447,17 @@ if (typeof context.buildVerificationExtractEndpoint !== 'function') {
 }
 
 const tempResult = context.buildVerificationExtractEndpoint('demo+1@test.example', { source: 'temp-mail' });
-if (tempResult !== '/api/temp-emails/demo%2B1%40test.example/extract-verification') {
+if (tempResult !== '/api/temp-emails/demo%2B1%40test.example/verification') {
   throw new Error(`unexpected temp endpoint: ${tempResult}`);
 }
 
 const normalResult = context.buildVerificationExtractEndpoint('demo+1@test.example', { source: 'outlook' });
-if (normalResult !== '/api/emails/demo%2B1%40test.example/extract-verification') {
+if (normalResult !== '/api/emails/demo%2B1%40test.example/verification') {
   throw new Error(`unexpected normal endpoint: ${normalResult}`);
 }
 
 const defaultResult = context.buildVerificationExtractEndpoint('demo+1@test.example');
-if (defaultResult !== '/api/emails/demo%2B1%40test.example/extract-verification') {
+if (defaultResult !== '/api/emails/demo%2B1%40test.example/verification') {
   throw new Error(`unexpected default endpoint: ${defaultResult}`);
 }
 

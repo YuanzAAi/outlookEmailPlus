@@ -227,6 +227,15 @@ def api_get_temp_email_message_detail(email_addr: str, message_id: str) -> Any:
 
 @login_required
 def api_extract_temp_email_verification(email_addr: str) -> Any:
+    return _api_extract_temp_email_verification_impl(email_addr)
+
+
+@login_required
+def api_get_temp_email_verification(email_addr: str) -> Any:
+    return _api_extract_temp_email_verification_impl(email_addr)
+
+
+def _api_extract_temp_email_verification_impl(email_addr: str) -> Any:
     try:
         result = temp_mail_service.extract_verification(email_addr)
         return jsonify({"success": True, "data": result, "message": "提取成功"})
