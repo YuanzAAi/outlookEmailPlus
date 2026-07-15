@@ -10,9 +10,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import html
 import re
+from dataclasses import dataclass
 from html.parser import HTMLParser
 from typing import Any, Dict, List, Optional
 
@@ -102,7 +102,6 @@ LINK_CONTEXT_PHRASES = [
 ]
 
 
-
 @dataclass(frozen=True)
 class VerificationInput:
     """Normalized verification extraction input."""
@@ -147,6 +146,7 @@ class VerificationPolicy:
     code_source: str = "all"
     prefer_link_keywords: list[str] | None = None
     enforce_mutual_exclusion: bool = True
+
 
 class HTMLTextExtractor(HTMLParser):
     """HTML 转纯文本提取器"""
@@ -777,6 +777,7 @@ def extract_verification(
         enforce_mutual_exclusion=resolved_policy.enforce_mutual_exclusion,
     )
 
+
 def apply_confidence_gate(extracted: Dict[str, Any], *, enforce_mutual_exclusion: bool = True) -> Dict[str, Any]:
     """
     对 extract_verification_info_with_options() 的返回结果应用置信度门控。
@@ -813,4 +814,3 @@ def apply_confidence_gate(extracted: Dict[str, Any], *, enforce_mutual_exclusion
         "high" if result.get("code_confidence") == "high" or result.get("link_confidence") == "high" else "low"
     )
     return result
-

@@ -92,7 +92,9 @@ def _resolve_account_verification_policy(account_id: int) -> Dict[str, Any]:
         return {"code_length": "6-6", "code_regex": None}
 
 
-def _pick_latest_verification_message(messages: Iterable[Dict[str, Any]], *, policy: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, str]]:
+def _pick_latest_verification_message(
+    messages: Iterable[Dict[str, Any]], *, policy: Optional[Dict[str, Any]] = None
+) -> Optional[Dict[str, str]]:
     latest_match: Optional[Dict[str, str]] = None
 
     for message in messages:

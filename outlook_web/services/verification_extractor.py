@@ -20,11 +20,11 @@ from outlook_web.services.verification_code_extraction import (
     CODE_CONTEXT_PHRASES,
     DEFAULT_LINK_KEYWORDS,
     HYPHENATED_VERIFICATION_PATTERN,
-    HTMLTextExtractor,
     LINK_CONTEXT_PHRASES,
     LINK_PATTERN,
     VERIFICATION_KEYWORDS,
     VERIFICATION_PATTERN,
+    HTMLTextExtractor,
     VerificationInput,
     VerificationPolicy,
     _build_code_regex,
@@ -38,8 +38,12 @@ from outlook_web.services.verification_code_extraction import (
     _smart_extract_code_by_keywords,
     _smart_extract_hyphenated_verification_code,
     apply_confidence_gate,
-    extract_content_text_without_subject,
+)
+from outlook_web.services.verification_code_extraction import extract_content_text_without_subject
+from outlook_web.services.verification_code_extraction import (
     extract_content_text_without_subject as _extract_content_text_without_subject,
+)
+from outlook_web.services.verification_code_extraction import (
     extract_email_text,
     extract_links,
     extract_verification,
@@ -92,6 +96,7 @@ __all__ = [
     "probe_verification_ai_runtime",
     "smart_extract_verification_code",
 ]
+
 
 def get_verification_ai_runtime_config() -> Dict[str, Any]:
     """读取系统级验证码 AI 配置。"""
