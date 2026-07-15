@@ -151,6 +151,76 @@ class VerificationChannelMemoryV1Tests(unittest.TestCase):
             "body": {"content": body_text, "contentType": "text"},
         }
 
+    def test_expected_field_code_skips_newer_link_only_message(self):
+        with self.app.app_context():
+            from outlook_web.services import verification_channel_routing as vcr
+
+            fake_account = {
+                "id": 10,
+                "email": "expected@outlook.com",
+                "account_type": "outlook",
+                "provider": "outlook",
+                "group_id": None,
+                "preferred_verification_channel": None,
+                "client_id": "cid",
+                "refresh_token": "rt",
+            }
+            emails = [
+                {
+                    "id": "link-msg",
+                    "subject": "Verify with link",
+                    "date": "2026-04-19T10:01:00Z",
+                    "body_preview": "Click the verification link",
+                },
+                {
+                    "id": "code-msg",
+                    "subject": "Your code",
+                    "date": "2026-04-19T10:00:00Z",
+                    "body_preview": "Your code is 123456",
+                },
+            ]
+
+            def detail_for_message(*, message_id: str, **_kwargs):
+                body_text = (
+                    "Use this verification link: https://verify.example/link"
+                    if message_id == "link-msg"
+                    else "Your verification code is 123456"
+                )
+                return {
+                    "id": message_id,
+                    "subject": "Verification",
+                    "from": {"emailAddress": {"address": "noreply@example.com"}},
+                    "receivedDateTime": "2026-04-19T10:00:00Z",
+                    "body": {"content": body_text, "contentType": "text"},
+                }
+
+            with (
+                patch.object(vcr, "build_verification_channel_plan", return_value=["graph_inbox"]),
+                patch.object(vcr.channel_capability_cache, "filter_channel_plan", return_value=["graph_inbox"]),
+                patch.object(
+                    vcr,
+                    "fetch_emails_and_detail_for_channel",
+                    return_value={"success": True, "emails": emails},
+                ),
+                patch.object(vcr, "fetch_email_detail_for_channel", side_effect=detail_for_message) as mock_detail,
+                patch(
+                    "outlook_web.services.graph.get_access_token_graph_result",
+                    return_value={"success": True, "scope": "Mail.Read"},
+                ),
+                patch("outlook_web.services.graph.has_mail_read_permission", return_value=True),
+            ):
+                result = vcr.extract_verification_for_outlook(
+                    account=fake_account,
+                    resolved_policy={"code_regex": None, "code_length": "6-6"},
+                    code_source="all",
+                    expected_field="verification_code",
+                )
+
+            self.assertTrue(result.get("success"))
+            self.assertEqual((result.get("data") or {}).get("matched_email_id"), "code-msg")
+            self.assertEqual((result.get("data") or {}).get("verification_code"), "123456")
+            self.assertEqual(mock_detail.call_count, 2)
+
     @patch("outlook_web.services.graph.get_emails_graph")
     @patch("outlook_web.services.imap.get_email_detail_imap_with_server")
     @patch("outlook_web.services.imap.get_emails_imap_with_server")

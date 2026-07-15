@@ -402,85 +402,86 @@ def extract_verification_for_outlook(
         if not emails:
             continue
 
-        latest = sorted(
+        sorted_emails = sorted(
             emails,
             key=lambda x: x.get("date", "") or x.get("receivedDateTime", ""),
             reverse=True,
-        )[0]
+        )
 
-        if channel.startswith("imap_"):
-            detail = channel_result.get("detail")
-        else:
-            detail = fetch_email_detail_for_channel(
-                account=account,
-                channel=channel,
-                message_id=latest.get("id", ""),
-                proxy_url=proxy_url,
+        for index, latest in enumerate(sorted_emails):
+            if channel.startswith("imap_") and index == 0 and channel_result.get("detail"):
+                detail = channel_result.get("detail")
+            else:
+                detail = fetch_email_detail_for_channel(
+                    account=account,
+                    channel=channel,
+                    message_id=latest.get("id", ""),
+                    proxy_url=proxy_url,
+                )
+
+            if not detail:
+                continue
+
+            verification_attempted = True
+
+            email_obj = _build_email_obj_from_channel_detail(detail=detail, latest=latest)
+
+            from outlook_web.services.verification_extractor import (
+                apply_confidence_gate,
+                enhance_verification_with_ai_fallback,
+                extract_verification_info_with_options,
             )
 
-        if not detail:
-            continue
+            extracted = extract_verification_info_with_options(
+                email_obj,
+                code_regex=resolved_policy.get("code_regex"),
+                code_length=resolved_policy.get("code_length"),
+                code_source=code_source,
+                enforce_mutual_exclusion=False,
+            )
+            extracted = enhance_verification_with_ai_fallback(
+                email=email_obj,
+                extracted=extracted,
+                code_regex=resolved_policy.get("code_regex"),
+                code_length=resolved_policy.get("code_length"),
+                code_source=code_source,
+                enforce_mutual_exclusion=False,
+            )
+            extracted = apply_confidence_gate(extracted, enforce_mutual_exclusion=False)
 
-        verification_attempted = True
+            extracted.update(
+                {
+                    "email": account.get("email", ""),
+                    "matched_email_id": latest.get("id", ""),
+                    "from": email_obj["from"],
+                    "subject": email_obj["subject"],
+                    "received_at": email_obj["date"],
+                    "folder": latest.get("folder", "inbox"),
+                    "method": _get_channel_display_name(channel),
+                }
+            )
+            extracted["_log_channel"] = (
+                "ai_fallback" if extracted.get("_used_ai") and _is_extraction_success(extracted, expected_field) else channel
+            )
+            extracted["_log_used_ai"] = bool(extracted.get("_used_ai"))
+            last_extracted = extracted
 
-        email_obj = _build_email_obj_from_channel_detail(detail=detail, latest=latest)
+            if _is_extraction_success(extracted, expected_field):
+                try:
+                    from outlook_web.repositories import accounts as accounts_repo
 
-        from outlook_web.services.verification_extractor import (
-            apply_confidence_gate,
-            enhance_verification_with_ai_fallback,
-            extract_verification_info_with_options,
-        )
+                    accounts_repo.update_preferred_verification_channel(int(account["id"]), channel)
+                except Exception:
+                    pass
 
-        extracted = extract_verification_info_with_options(
-            email_obj,
-            code_regex=resolved_policy.get("code_regex"),
-            code_length=resolved_policy.get("code_length"),
-            code_source=code_source,
-            enforce_mutual_exclusion=False,
-        )
-        extracted = enhance_verification_with_ai_fallback(
-            email=email_obj,
-            extracted=extracted,
-            code_regex=resolved_policy.get("code_regex"),
-            code_length=resolved_policy.get("code_length"),
-            code_source=code_source,
-            enforce_mutual_exclusion=False,
-        )
-        extracted = apply_confidence_gate(extracted, enforce_mutual_exclusion=False)
-
-        extracted.update(
-            {
-                "email": account.get("email", ""),
-                "matched_email_id": latest.get("id", ""),
-                "from": email_obj["from"],
-                "subject": email_obj["subject"],
-                "received_at": email_obj["date"],
-                "folder": latest.get("folder", "inbox"),
-                "method": _get_channel_display_name(channel),
-            }
-        )
-        extracted["_log_channel"] = (
-            "ai_fallback" if extracted.get("_used_ai") and _is_extraction_success(extracted, expected_field) else channel
-        )
-        extracted["_log_used_ai"] = bool(extracted.get("_used_ai"))
-        last_extracted = extracted
-
-        if _is_extraction_success(extracted, expected_field):
-            try:
-                from outlook_web.repositories import accounts as accounts_repo
-
-                accounts_repo.update_preferred_verification_channel(int(account["id"]), channel)
-            except Exception:
-                pass
-
-            return {
-                "success": True,
-                "data": extracted,
-                "channel_used": channel,
-                "_log_channel": extracted.get("_log_channel") or channel,
-                "_log_used_ai": bool(extracted.get("_used_ai")),
-                "new_refresh_token": new_refresh_token,
-            }
+                return {
+                    "success": True,
+                    "data": extracted,
+                    "channel_used": channel,
+                    "_log_channel": extracted.get("_log_channel") or channel,
+                    "_log_used_ai": bool(extracted.get("_used_ai")),
+                    "new_refresh_token": new_refresh_token,
+                }
 
     if not any_channel_read_success:
         return {

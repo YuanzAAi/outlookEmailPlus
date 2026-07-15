@@ -35,6 +35,23 @@ _EXTERNAL_NESTED_UPSTREAM_CODES = {
     "IMAP_CONNECT_FAILED",
     "IMAP_FOLDER_NOT_FOUND",
 }
+_VERIFICATION_REQUEST_FIELDS = {"code", "link", "any"}
+
+
+def _expected_field_for_verification_request(field: str) -> str | None:
+    if field == "code":
+        return "verification_code"
+    if field == "link":
+        return "verification_link"
+    return None
+
+
+def _has_requested_verification_result(data: Dict[str, Any], expected_field: str | None) -> bool:
+    if expected_field:
+        return bool((data or {}).get(expected_field))
+    return bool(
+        (data or {}).get("formatted") or (data or {}).get("verification_code") or (data or {}).get("verification_link")
+    )
 
 
 def _build_response_from_error_payload(error_payload: dict[str, Any]):
@@ -954,13 +971,14 @@ def _api_extract_verification_impl(email_addr: str) -> Any:
         )
 
     field = (request.args.get("field") or "any").strip().lower()
-    if field not in {"code", "link", "any"}:
+    if field not in _VERIFICATION_REQUEST_FIELDS:
         return build_error_response(
             "INVALID_PARAM",
             "field 参数无效",
             message_en="Invalid field parameter",
             status=400,
         )
+    expected_field = _expected_field_for_verification_request(field)
 
     account_type = (account.get("account_type") or "outlook").strip().lower()
     if account_type != "imap":
@@ -979,8 +997,9 @@ def _api_extract_verification_impl(email_addr: str) -> Any:
             code_regex=request_code_regex,
             code_length=request_code_length,
             code_source=code_source,
+            expected_field=expected_field,
         )
-        if not data.get("formatted") and not data.get("verification_code") and not data.get("verification_link"):
+        if not _has_requested_verification_result(data, expected_field):
             raise external_api_service.MailNotFoundError("未找到验证信息", data={"email": email_addr})
 
         if field == "code":
