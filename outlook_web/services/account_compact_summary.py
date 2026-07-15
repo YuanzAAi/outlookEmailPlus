@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, Optional
 
 from outlook_web.repositories import accounts as accounts_repo
+from outlook_web.repositories import groups as groups_repo
 from outlook_web.services.verification_extractor import apply_confidence_gate, extract_verification_info_with_options
 
 COMPACT_SUMMARY_FIELDS = (
@@ -81,7 +82,17 @@ def _pick_latest_message(messages: Iterable[Dict[str, Any]]) -> Optional[Dict[st
     return max(normalized, key=lambda item: parse_received_at(item.get("received_at")))
 
 
-def _pick_latest_verification_message(messages: Iterable[Dict[str, Any]]) -> Optional[Dict[str, str]]:
+def _resolve_account_verification_policy(account_id: int) -> Dict[str, Any]:
+    try:
+        account = accounts_repo.get_account_by_id(int(account_id)) or {}
+        group_id = account.get("group_id")
+        group = groups_repo.get_group_by_id(int(group_id)) if group_id else None
+        return groups_repo.resolve_group_verification_policy(group=group)
+    except Exception:
+        return {"code_length": "6-6", "code_regex": None}
+
+
+def _pick_latest_verification_message(messages: Iterable[Dict[str, Any]], *, policy: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, str]]:
     latest_match: Optional[Dict[str, str]] = None
 
     for message in messages:
@@ -95,7 +106,13 @@ def _pick_latest_verification_message(messages: Iterable[Dict[str, Any]]) -> Opt
         }
 
         try:
-            result = extract_verification_info_with_options(candidate_payload, code_source="all", code_length="6-6")
+            resolved_policy = policy or {"code_length": "6-6", "code_regex": None}
+            result = extract_verification_info_with_options(
+                candidate_payload,
+                code_source="all",
+                code_regex=resolved_policy.get("code_regex"),
+                code_length=resolved_policy.get("code_length"),
+            )
             result = apply_confidence_gate(result, enforce_mutual_exclusion=False)
         except ValueError:
             continue
@@ -171,7 +188,8 @@ def update_summary_from_message_list(
     current = accounts_repo.get_account_compact_summary(account_id) or empty_compact_summary()
     normalized_messages = [normalize_message_summary(message, folder=folder) for message in messages or []]
     latest = _pick_latest_message(normalized_messages)
-    latest_verification = _pick_latest_verification_message(normalized_messages)
+    verification_policy = _resolve_account_verification_policy(account_id)
+    latest_verification = _pick_latest_verification_message(normalized_messages, policy=verification_policy)
     updated = _merge_latest_email(current, latest)
     if latest_verification:
         updated = _merge_latest_verification(

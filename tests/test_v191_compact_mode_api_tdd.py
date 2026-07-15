@@ -361,6 +361,59 @@ class V191CompactModeApiRedTests(unittest.TestCase):
         self.assertIsNotNone(row)
         self.assertEqual(row["latest_verification_code"], "Ab12Cd")
 
+    @patch("outlook_web.controllers.emails.graph_service.get_emails_graph")
+    def test_t_api_005e_fetch_emails_updates_latest_verification_with_group_regex_policy(self, mock_get_emails_graph):
+        client = self.app.test_client()
+        self._login(client)
+        group_id = self._create_group()
+        unique = uuid.uuid4().hex
+        email_addr = f"fetch_regex_policy_{unique}@example.com"
+        account_id = self._create_account(group_id=group_id, email_addr=email_addr)
+
+        conn = self._db()
+        try:
+            conn.execute(
+                "UPDATE groups SET verification_code_length = ?, verification_code_regex = ? WHERE id = ?",
+                ("6-6", r"[A-Z]{2}-\d{4}", group_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        mock_get_emails_graph.return_value = {
+            "success": True,
+            "emails": [
+                {
+                    "id": "msg-policy-code",
+                    "subject": "Your verification code",
+                    "from": {"emailAddress": {"address": "security@example.com"}},
+                    "receivedDateTime": "2026-03-20T10:02:00Z",
+                    "bodyPreview": "Your verification code is AB-1234. It expires in 10 minutes.",
+                    "isRead": False,
+                    "hasAttachments": False,
+                }
+            ],
+        }
+
+        resp = client.get(f"/api/emails/{email_addr}?folder=inbox&skip=0&top=20")
+
+        self.assertEqual(resp.status_code, 200)
+        payload = resp.get_json() or {}
+        self.assertEqual(payload.get("success"), True)
+        self.assertEqual((payload.get("account_summary") or {}).get("latest_verification_code"), "AB-1234")
+
+        conn = self._db()
+        try:
+            row = conn.execute(
+                "SELECT latest_verification_code FROM accounts WHERE id = ?",
+                (account_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+
+        self.assertIsNotNone(row)
+        self.assertEqual(row["latest_verification_code"], "AB-1234")
+
     def test_t_api_005b_accounts_api_does_not_fetch_remote_mail_during_list_render(self):
         client = self.app.test_client()
         self._login(client)

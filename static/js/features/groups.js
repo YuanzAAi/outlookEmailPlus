@@ -868,7 +868,7 @@
             if (normalizedSource === 'temp' || normalizedSource === 'temp-mail' || normalizedSource === 'temp_mail') {
                 return `/api/temp-emails/${encodeURIComponent(email)}/extract-verification`;
             }
-            return `/api/emails/${encodeURIComponent(email)}/extract-verification`;
+            return `/api/emails/${encodeURIComponent(email)}/verification`;
         }
 
         async function tryFallbackVerificationExtraction(options = {}) {

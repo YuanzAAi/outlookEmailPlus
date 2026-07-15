@@ -452,12 +452,12 @@ if (tempResult !== '/api/temp-emails/demo%2B1%40test.example/extract-verificatio
 }
 
 const normalResult = context.buildVerificationExtractEndpoint('demo+1@test.example', { source: 'outlook' });
-if (normalResult !== '/api/emails/demo%2B1%40test.example/extract-verification') {
+if (normalResult !== '/api/emails/demo%2B1%40test.example/verification') {
   throw new Error(`unexpected normal endpoint: ${normalResult}`);
 }
 
 const defaultResult = context.buildVerificationExtractEndpoint('demo+1@test.example');
-if (defaultResult !== '/api/emails/demo%2B1%40test.example/extract-verification') {
+if (defaultResult !== '/api/emails/demo%2B1%40test.example/verification') {
   throw new Error(`unexpected default endpoint: ${defaultResult}`);
 }
 

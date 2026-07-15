@@ -159,6 +159,8 @@ class V191CompactModeFrontendContractTests(unittest.TestCase):
         self.assertIn("verificationCopyInFlight.has(requestKey)", groups_js)
         self.assertIn("syncAccountSummaryToAccountCache", groups_js)
         self.assertIn("syncExtractedVerificationToAccountCache", groups_js)
+        self.assertIn("/api/emails/${encodeURIComponent(email)}/verification", groups_js)
+        self.assertNotIn("/api/emails/${encodeURIComponent(email)}/extract-verification", groups_js)
         self.assertNotIn("let copyVerificationInProgress = false;", groups_js)
 
     def test_compact_action_menu_does_not_restore_extra_copy_menu_items(self):

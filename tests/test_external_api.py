@@ -797,6 +797,38 @@ class ExternalApiRegressionTests(ExternalApiBaseTest):
         self.assertTrue(data.get("success"))
         self.assertEqual(data.get("data", {}).get("verification_code"), "123456")
 
+    @patch("outlook_web.services.graph.get_email_detail_graph")
+    @patch("outlook_web.services.graph.get_emails_graph")
+    def test_external_verification_code_matches_internal_unified_verification_api(
+        self, mock_get_emails_graph, mock_get_email_detail_graph
+    ):
+        email_addr = self._insert_outlook_account()
+        self._set_external_api_key("abc123")
+        mock_get_emails_graph.return_value = {
+            "success": True,
+            "emails": [self._graph_email(subject="Your verification code")],
+        }
+        mock_get_email_detail_graph.return_value = self._graph_detail(body_text="Your verification code is Ab12Cd")
+
+        client = self.app.test_client()
+        self._login(client)
+        web_resp = client.get(f"/api/emails/{email_addr}/verification?code_length=6-6")
+        external_resp = client.get(
+            f"/api/external/verification-code?email={email_addr}&code_length=6-6",
+            headers=self._auth_headers(),
+        )
+
+        self.assertEqual(web_resp.status_code, 200)
+        self.assertEqual(external_resp.status_code, 200)
+        web_data = web_resp.get_json() or {}
+        external_data = external_resp.get_json() or {}
+        self.assertEqual(web_data.get("data", {}).get("verification_code"), "Ab12Cd")
+        self.assertEqual(external_data.get("data", {}).get("verification_code"), "Ab12Cd")
+        self.assertEqual(
+            web_data.get("data", {}).get("verification_code"),
+            external_data.get("data", {}).get("verification_code"),
+        )
+
     def test_internal_settings_api_still_returns_existing_fields(self):
         client = self.app.test_client()
         self._login(client)
