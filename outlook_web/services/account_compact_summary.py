@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, Optional
 
 from outlook_web.repositories import accounts as accounts_repo
-from outlook_web.services.verification_extractor import extract_verification_info
+from outlook_web.services.verification_extractor import apply_confidence_gate, extract_verification_info_with_options
 
 COMPACT_SUMMARY_FIELDS = (
     "latest_email_subject",
@@ -90,11 +90,13 @@ def _pick_latest_verification_message(messages: Iterable[Dict[str, Any]]) -> Opt
 
         candidate_payload = {
             "subject": str(message.get("subject") or ""),
+            "body": str(message.get("body_preview") or ""),
             "body_preview": str(message.get("body_preview") or ""),
         }
 
         try:
-            result = extract_verification_info(candidate_payload)
+            result = extract_verification_info_with_options(candidate_payload, code_source="all", code_length="6-6")
+            result = apply_confidence_gate(result, enforce_mutual_exclusion=False)
         except ValueError:
             continue
 

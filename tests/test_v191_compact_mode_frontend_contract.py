@@ -125,6 +125,13 @@ class V191CompactModeFrontendContractTests(unittest.TestCase):
         ]:
             self.assertIn(field, compact_js)
 
+    def test_compact_verification_copy_uses_unified_extractor(self):
+        client = self.app.test_client()
+        compact_js = self._get_text(client, "/static/js/features/mailbox_compact.js")
+
+        self.assertIn("return copyVerificationInfo(account.email, buttonElement);", compact_js)
+        self.assertNotIn("copyToClipboard(account.latest_verification_code)", compact_js)
+
     def test_compact_mode_exposes_server_pagination_controls(self):
         client = self.app.test_client()
         compact_js = self._get_text(client, "/static/js/features/mailbox_compact.js")

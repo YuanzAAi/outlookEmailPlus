@@ -44,6 +44,25 @@ VERIFICATION_KEYWORDS = [
 # 验证码模式（4-8位数字或字母，必须包含至少一个数字）
 VERIFICATION_PATTERN = r"\b[A-Z0-9]{4,8}\b"
 
+# 带连字符的字母数字验证码，例如 x.ai 的 84A-KMN。
+# x.ai HTML 常把验证码紧贴在句末（如 address.84A-KMNIf），因此允许验证码后接英文单词首字母。
+HYPHENATED_VERIFICATION_PATTERN = r"(?<![A-Z0-9])([A-Z0-9]{2,4}-[A-Z0-9]{2,4})(?=$|[^A-Z0-9-]|[A-Z][a-z])"
+
+# 验证码语境提权：出现这些短语时允许识别带连字符验证码，降低订单号/追踪号误判
+CODE_CONTEXT_PHRASES = [
+    "validate your email",
+    "validate your email address",
+    "code below",
+    "xai account",
+    "x.ai",
+    "support@x.ai",
+    "verification code",
+    "confirm your email",
+    "verify your email",
+    "your code",
+    "the code below",
+]
+
 # 链接正则表达式
 LINK_PATTERN = r'https?://[^\s<>"{}|\\^`\[\]]+'
 
@@ -117,6 +136,74 @@ class HTMLTextExtractor(HTMLParser):
         return " ".join(self.text_parts)
 
 
+def _is_valid_hyphenated_code(code: str) -> bool:
+    """校验带连字符验证码：两段字母数字、总长 4-10。
+
+    x.ai 常见两种形态：
+    - 含数字：84A-KMN
+    - 全大写字母：NJF-KUU（无数字，但两段均 >=3 且总长 >=6）
+    """
+    if not code or "-" not in code:
+        return False
+
+    parts = code.split("-")
+    if len(parts) != 2:
+        return False
+    if not all(part.isalnum() for part in parts):
+        return False
+
+    alnum = "".join(parts)
+    if not (4 <= len(alnum) <= 10):
+        return False
+    if any(c.isdigit() for c in alnum):
+        return True
+    # x.ai 全字母验证码（如 NJF-KUU）
+    return len(alnum) >= 6 and all(len(part) >= 3 for part in parts) and alnum.isalpha()
+
+
+def _has_code_context(email_content: str) -> bool:
+    content_lower = email_content.lower()
+    return any(phrase.lower() in content_lower for phrase in CODE_CONTEXT_PHRASES)
+
+
+def _find_hyphenated_code_in_text(text: str) -> Optional[str]:
+    if not text:
+        return None
+
+    for match in re.finditer(HYPHENATED_VERIFICATION_PATTERN, text, re.IGNORECASE):
+        code = match.group(1)
+        if _is_valid_hyphenated_code(code):
+            return code
+    return None
+
+
+def _smart_extract_hyphenated_verification_code(email_content: str) -> Optional[str]:
+    """在验证码关键词附近搜索带连字符验证码。"""
+    if not email_content:
+        return None
+
+    content_lower = email_content.lower()
+    for keyword in VERIFICATION_KEYWORDS:
+        keyword_lower = keyword.lower()
+        pos = content_lower.find(keyword_lower)
+        if pos == -1:
+            continue
+
+        start = max(0, pos - 50)
+        end = min(len(email_content), pos + len(keyword) + 50)
+        code = _find_hyphenated_code_in_text(email_content[start:end])
+        if code:
+            return code
+    return None
+
+
+def _fallback_extract_hyphenated_verification_code(email_content: str) -> Optional[str]:
+    """在验证码语境明确时，从全文搜索带连字符验证码。"""
+    if not email_content or not _has_code_context(email_content):
+        return None
+    return _find_hyphenated_code_in_text(email_content)
+
+
 def smart_extract_verification_code(email_content: str) -> Optional[str]:
     """
     智能提取验证码（基于关键词）
@@ -154,7 +241,11 @@ def smart_extract_verification_code(email_content: str) -> Optional[str]:
                 # 过滤掉纯字母的匹配（验证码通常包含数字）
                 for match in matches:
                     if any(c.isdigit() for c in match):
-                        return match.upper()
+                        return match
+
+    hyphenated_code = _smart_extract_hyphenated_verification_code(email_content)
+    if hyphenated_code:
+        return hyphenated_code
 
     return None
 
@@ -183,8 +274,6 @@ def fallback_extract_verification_code(email_content: str) -> Optional[str]:
     # 过滤规则
     filtered = []
     for match in matches:
-        match_upper = match.upper()
-
         # 必须包含至少一个数字
         if not any(c.isdigit() for c in match):
             continue
@@ -209,9 +298,12 @@ def fallback_extract_verification_code(email_content: str) -> Optional[str]:
             if 2020 <= num <= 2030:
                 continue
 
-        filtered.append(match_upper)
+        filtered.append(match)
 
-    return filtered[0] if filtered else None
+    if filtered:
+        return filtered[0]
+
+    return _fallback_extract_hyphenated_verification_code(email_content)
 
 
 def extract_links(email_content: str) -> List[str]:
@@ -435,9 +527,9 @@ def _build_code_regex(*, code_regex: str | None, code_length: str | None) -> re.
 
     if code_length:
         min_len, max_len = _parse_code_length(code_length)
-        return re.compile(rf"\b\d{{{min_len},{max_len}}}\b")
+        return re.compile(rf"\b[A-Za-z0-9]{{{min_len},{max_len}}}\b")
 
-    # 默认：4-8 位数字验证码（更贴近“验证码”场景）
+    # 默认：4-8 位数字验证码；字母数字验证码由 group/request 的 code_length 策略启用。
     return re.compile(r"\b\d{4,8}\b")
 
 
@@ -460,7 +552,7 @@ def _smart_extract_code_by_keywords(email_content: str, code_re: re.Pattern) -> 
         for m in code_re.finditer(context):
             value = m.group(0)
             if value and any(c.isdigit() for c in value):
-                return value.upper()
+                return value
 
     return None
 
@@ -492,7 +584,7 @@ def _fallback_extract_code(email_content: str, code_re: re.Pattern) -> Optional[
             if 2020 <= num <= 2030:
                 continue
 
-        candidates.append(value.upper())
+        candidates.append(value)
 
     return candidates[0] if candidates else None
 
@@ -551,10 +643,19 @@ def extract_verification_info_with_options(
         source_text = content
         match_source = "content"
     elif source == "html":
-        source_text = html_content
+        if html_content:
+            parser = HTMLTextExtractor()
+            try:
+                parser.feed(html_content)
+                source_text = html.unescape(parser.get_text() or "").strip()
+            except Exception:
+                source_text = html_content
+        else:
+            source_text = ""
         match_source = "html"
     else:
-        source_text = f"{subject} {content} {html_content}".strip()
+        # all：content 已含 HTML 转纯文本；勿再拼接原始 HTML，避免 CSS 色值（如 #333333）误判
+        source_text = f"{subject} {content}".strip()
         match_source = "all"
 
     code_re = _build_code_regex(code_regex=code_regex, code_length=code_length)
@@ -568,6 +669,14 @@ def extract_verification_info_with_options(
         verification_code = _fallback_extract_code(source_text, code_re)
         # 调用方显式指定了 code_regex（强判别力正则）→ 提取命中即视为可信
         if verification_code and caller_directed_code:
+            code_confidence = "high"
+    if not verification_code:
+        verification_code = _smart_extract_hyphenated_verification_code(source_text)
+        if verification_code:
+            code_confidence = "high"
+    if not verification_code:
+        verification_code = _fallback_extract_hyphenated_verification_code(source_text)
+        if verification_code:
             code_confidence = "high"
 
     # ── 链接提取 & 置信度 ──
@@ -1055,7 +1164,7 @@ def enhance_verification_with_ai_fallback(
 
     updated = False
     if ai_code:
-        result["verification_code"] = ai_code.upper()
+        result["verification_code"] = ai_code
         result["code_confidence"] = "high" if ai_confidence == "high" else "low"
         updated = True
     if ai_link:
