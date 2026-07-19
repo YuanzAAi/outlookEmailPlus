@@ -3,6 +3,7 @@ from __future__ import annotations
 import html
 import json
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote
@@ -30,7 +31,17 @@ from outlook_web.repositories.refresh_runs import create_refresh_run, finish_ref
 from outlook_web.security.auth import get_client_ip, get_user_agent, login_required
 from outlook_web.security.crypto import decrypt_data
 from outlook_web.services import graph as graph_service
+from outlook_web.services import outlook_transport
 from outlook_web.services import refresh as refresh_service
+
+
+def _probe_account_transport(account: Dict[str, Any], proxy_url: str) -> Dict[str, Any]:
+    result = outlook_transport.probe_account(account, proxy_url)
+    return {
+        "account_id": int(account["id"]),
+        "email": str(account.get("email") or ""),
+        "result": result,
+    }
 
 
 def sanitize_input(text: str, max_length: int = 500) -> str:
@@ -1798,6 +1809,96 @@ def api_batch_delete_accounts() -> Any:
             "message": f"成功删除 {deleted_count} 个账号" + (f"，失败 {failed_count} 个" if failed_count > 0 else ""),
             "deleted_count": deleted_count,
             "failed_count": failed_count,
+        }
+    )
+
+
+@login_required
+def api_probe_mail_methods() -> Any:
+    """Detect Graph/IMAP capability before the first mailbox read."""
+    payload = request.get_json(silent=True) or {}
+    raw_emails = payload.get("emails") or []
+    if not isinstance(raw_emails, list):
+        return build_error_response("INVALID_PARAM", "emails 必须为数组", message_en="emails must be an array")
+
+    emails: List[str] = []
+    seen = set()
+    for item in raw_emails[:200]:
+        email_addr = str(item or "").strip()
+        normalized = email_addr.lower()
+        if email_addr and normalized not in seen:
+            seen.add(normalized)
+            emails.append(email_addr)
+
+    if not emails:
+        return build_error_response("EMAILS_REQUIRED", "请选择要识别的账号", message_en="Select accounts to probe")
+
+    candidates: List[tuple[Dict[str, Any], str]] = []
+    skipped = 0
+    for email_addr in emails:
+        account = accounts_repo.get_account_by_email(email_addr)
+        if not account or str(account.get("account_type") or "outlook").strip().lower() != "outlook":
+            skipped += 1
+            continue
+        proxy_url = ""
+        if account.get("group_id"):
+            group = groups_repo.get_group_by_id(account["group_id"])
+            if group:
+                proxy_url = str(group.get("proxy_url") or "")
+        candidates.append((account, proxy_url))
+
+    detected: List[Dict[str, Any]] = []
+    max_workers = min(6, max(1, len(candidates)))
+    if candidates:
+        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="mail-method-probe") as executor:
+            futures = [executor.submit(_probe_account_transport, account, proxy_url) for account, proxy_url in candidates]
+            for future in as_completed(futures):
+                try:
+                    item = future.result()
+                except Exception as exc:
+                    detected.append({"success": False, "method": "unknown", "message": type(exc).__name__})
+                    continue
+
+                account_id = item["account_id"]
+                email_addr = item["email"]
+                result = item["result"]
+                channel = outlook_transport.normalize_channel(result.get("channel"))
+                new_refresh_token = str(result.get("new_refresh_token") or "").strip()
+                if new_refresh_token:
+                    accounts_repo.update_refresh_token_if_changed(account_id, new_refresh_token)
+                if result.get("success") and channel:
+                    accounts_repo.update_preferred_verification_channel(account_id, channel)
+                detected.append(
+                    {
+                        "account_id": account_id,
+                        "email": email_addr,
+                        "success": bool(result.get("success")),
+                        "method": str(result.get("method_key") or "unknown"),
+                        "channel": channel or "",
+                    }
+                )
+
+    graph_count = sum(1 for item in detected if item.get("method") == "graph")
+    imap_count = sum(1 for item in detected if str(item.get("method") or "").startswith("imap_"))
+    unresolved_count = sum(1 for item in detected if not item.get("success"))
+    log_audit(
+        "probe",
+        "account_mail_method",
+        None,
+        f"邮箱读取方式识别：Graph {graph_count}，IMAP {imap_count}，未识别 {unresolved_count}",
+    )
+    return jsonify(
+        {
+            "success": True,
+            "summary": {
+                "requested": len(emails),
+                "probed": len(detected),
+                "graph": graph_count,
+                "imap": imap_count,
+                "unresolved": unresolved_count,
+                "skipped": skipped,
+            },
+            "results": detected,
         }
     )
 

@@ -8,6 +8,7 @@
     <link rel="icon" type="image/png" href="/img/ico.png">
     <script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.8/dist/purify.min.js"></script>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/main.css') }}?v={{ APP_VERSION }}-resp">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/mail_search.css') }}?v={{ APP_VERSION }}">
 </head>
 
 <body>
@@ -37,6 +38,9 @@
                 <div class="nav-section">邮箱管理</div>
                 <button class="nav-item" data-page="mailbox" onclick="navigate('mailbox')">
                     <span class="nav-icon">📬</span><span>账号管理</span>
+                </button>
+                <button class="nav-item" data-page="mail-search" onclick="navigate('mail-search')">
+                    <span class="nav-icon">🔎</span><span>邮件检索</span>
                 </button>
                 <button class="nav-item" data-page="pool-admin" onclick="navigate('pool-admin')">
                     <span class="nav-icon">🎱</span><span>号池管理</span>
@@ -1039,6 +1043,84 @@
             </div>
 
             <!-- ===== Page: Pool Admin ===== -->
+            <div class="page page-hidden page-no-padding" id="page-mail-search">
+                <div class="mail-search-page">
+                    <form class="mail-search-query-band" onsubmit="event.preventDefault(); startMailSearch();">
+                        <div class="mail-search-primary-row">
+                            <input id="mailSearchQuery" class="mail-search-query-input" type="text"
+                                   placeholder="输入邮件主题、摘要或正文内容" autocomplete="off" maxlength="500">
+                            <button id="mailSearchSubmit" class="btn btn-primary" type="submit">搜索</button>
+                            <button id="mailSearchCancel" class="btn btn-ghost" type="button" onclick="cancelMailSearch()" disabled>停止</button>
+                        </div>
+                        <div class="mail-search-options-row">
+                            <div class="mail-search-option-group" aria-label="匹配范围">
+                                <span class="mail-search-option-label">范围</span>
+                                <label><input type="checkbox" name="mailSearchField" value="subject" checked>主题</label>
+                                <label><input type="checkbox" name="mailSearchField" value="sender">发件人</label>
+                                <label><input type="checkbox" name="mailSearchField" value="preview" checked>摘要</label>
+                                <label><input type="checkbox" name="mailSearchField" value="body" checked>正文</label>
+                            </div>
+                            <div class="mail-search-option-group" aria-label="邮件文件夹">
+                                <span class="mail-search-option-label">文件夹</span>
+                                <label><input type="checkbox" name="mailSearchFolder" value="inbox" checked>收件箱</label>
+                                <label><input type="checkbox" name="mailSearchFolder" value="junkemail" checked>垃圾邮件</label>
+                            </div>
+                            <label class="mail-search-toggle"><input id="mailSearchRegex" type="checkbox">正则</label>
+                            <select id="mailSearchGroup" class="form-control mail-search-select" title="限定分组">
+                                <option value="all">全部分组</option>
+                            </select>
+                            <input id="mailSearchAccount" class="form-control mail-search-account-input" type="text"
+                                   placeholder="限定邮箱地址">
+                            <select id="mailSearchTop" class="form-control mail-search-select" title="每个文件夹扫描数量">
+                                <option value="10">每箱 10 封</option>
+                                <option value="20" selected>每箱 20 封</option>
+                                <option value="50">每箱 50 封</option>
+                            </select>
+                        </div>
+                    </form>
+
+                    <div class="mail-search-status-band">
+                        <span id="mailSearchStatus">输入内容后开始检索</span>
+                        <span id="mailSearchSummary" class="mail-search-summary"></span>
+                        <div class="mail-search-progress" aria-hidden="true"><span id="mailSearchProgressBar"></span></div>
+                    </div>
+
+                    <div class="mail-search-results-wrap" id="mailSearchResultsWrap">
+                        <div class="mail-search-result-toolbar">
+                            <label class="mail-search-select-all">
+                                <input id="mailSearchSelectAll" type="checkbox" onchange="toggleAllMailSearchResults(this.checked)">
+                                <span>全选当前结果</span>
+                            </label>
+                            <span id="mailSearchResultSummary" class="mail-search-result-summary"></span>
+                        </div>
+                        <div id="mailSearchResults" class="mail-search-results-list" role="list">
+                            <div class="mail-search-empty">暂无检索结果</div>
+                        </div>
+                    </div>
+
+                    <div id="mailSearchBatchBar" class="batch-action-bar mail-search-batch-bar" style="display:none;">
+                        <span id="mailSearchSelectedCount">已选 0 封</span>
+                        <div style="flex:1;"></div>
+                        <button class="btn btn-sm btn-ghost" onclick="moveSelectedMailSearchAccounts()">移动关联邮箱</button>
+                        <button class="btn btn-sm btn-danger" onclick="deleteSelectedMailSearchMessages()">删除邮件</button>
+                        <button class="btn btn-sm btn-danger" onclick="deleteSelectedMailSearchAccounts()">删除关联账号</button>
+                    </div>
+                </div>
+
+                <div class="modal" id="mailSearchDetailModal" onclick="if(event.target === this) closeMailSearchDetail()">
+                    <div class="modal-content mail-search-detail-modal">
+                        <div class="modal-header">
+                            <h3 id="mailSearchDetailTitle">邮件详情</h3>
+                            <button class="modal-close" onclick="closeMailSearchDetail()">&times;</button>
+                        </div>
+                        <div class="modal-body" id="mailSearchDetailBody"></div>
+                        <div class="modal-footer">
+                            <button class="btn btn-ghost" onclick="closeMailSearchDetail()">关闭</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
             <div class="page page-hidden" id="page-pool-admin">
                 <div class="card">
                     <div class="card-header">

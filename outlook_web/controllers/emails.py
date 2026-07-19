@@ -18,6 +18,9 @@ from outlook_web.services import email_delete as email_delete_service
 from outlook_web.services import external_api as external_api_service
 from outlook_web.services import graph as graph_service
 from outlook_web.services import imap as imap_service
+from outlook_web.services import (
+    outlook_transport,
+)
 from outlook_web.services import verification_channel_routing as verification_channel_service
 from outlook_web.services.imap_generic import (
     get_email_detail_imap_generic_result,
@@ -525,165 +528,68 @@ def api_get_emails(email_addr: str) -> Any:
         if group:
             proxy_url = group.get("proxy_url", "") or ""
 
-    # 收集所有错误信息
-    all_errors = {}
-
-    # 1. 尝试 Graph API
-    _t_graph = time.monotonic()
-    graph_result = graph_service.get_emails_graph(account["client_id"], account["refresh_token"], folder, skip, top, proxy_url)
-    _LOGGER.debug(
-        "[PERF] get_emails | email=%s | graph_api | %dms | success=%s",
-        email_addr,
-        (time.monotonic() - _t_graph) * 1000,
-        graph_result.get("success"),
+    transport_result = outlook_transport.list_messages(
+        account,
+        folder=folder,
+        skip=skip,
+        top=top,
+        proxy_url=proxy_url,
     )
-    if graph_result.get("success"):
-        emails = graph_result.get("emails", [])
-        account_summary = compact_summary_service.update_summary_from_message_list(
-            int(account["id"]),
-            emails,
-            folder=folder,
-        )
-        # 更新刷新时间，同时保存 Microsoft 可能返回的新 refresh_token（Token Rotation）
-        new_rt = graph_result.get("new_refresh_token")
-        if new_rt:
-            _persist_refresh_token(account, str(new_rt or ""))
-        accounts_repo.touch_last_refresh_at(int(account["id"]))
-
-        # 格式化 Graph API 返回的数据
-        formatted = []
-        for e in emails:
-            formatted.append(
+    if transport_result.get("success"):
+        method = str(transport_result.get("method") or "")
+        raw_emails = transport_result.get("emails") or []
+        if method == "Graph API":
+            emails = [
                 {
-                    "id": e.get("id"),
-                    "subject": e.get("subject", "无主题"),
-                    "from": e.get("from", {}).get("emailAddress", {}).get("address", "未知"),
-                    "date": e.get("receivedDateTime", ""),
-                    "is_read": e.get("isRead", False),
-                    "has_attachments": e.get("hasAttachments", False),
-                    "body_preview": e.get("bodyPreview", ""),
+                    "id": item.get("id"),
+                    "subject": item.get("subject", "无主题"),
+                    "from": (item.get("from") or {}).get("emailAddress", {}).get("address", "未知"),
+                    "date": item.get("receivedDateTime", ""),
+                    "is_read": item.get("isRead", False),
+                    "has_attachments": item.get("hasAttachments", False),
+                    "body_preview": item.get("bodyPreview", ""),
                 }
-            )
+                for item in raw_emails
+            ]
+        else:
+            emails = raw_emails
 
+        new_refresh_token = str(transport_result.get("new_refresh_token") or "").strip()
+        if new_refresh_token:
+            _persist_refresh_token(account, new_refresh_token)
+        channel = outlook_transport.normalize_channel(transport_result.get("channel"))
+        if channel:
+            accounts_repo.update_preferred_verification_channel(int(account["id"]), channel)
+        accounts_repo.touch_last_refresh_at(int(account["id"]))
+        account_summary = compact_summary_service.update_summary_from_message_list(int(account["id"]), emails, folder=folder)
         _LOGGER.debug(
-            "[PERF] get_emails | email=%s | 总耗时=%dms | method=graph_api",
+            "[PERF] get_emails | email=%s | 总耗时=%dms | method=%s",
             email_addr,
             (time.monotonic() - _t0) * 1000,
+            transport_result.get("method_key"),
         )
         return jsonify(
             {
                 "success": True,
-                "emails": formatted,
-                "method": "Graph API",
-                "has_more": len(formatted) >= top,
+                "emails": emails,
+                "method": method,
+                "has_more": method == "Graph API" and len(emails) >= top,
                 "account_summary": account_summary,
             }
         )
-    else:
-        graph_error = graph_result.get("error")
-        all_errors["graph"] = graph_error
 
-        # 如果是代理错误，不再回退 IMAP
-        if isinstance(graph_error, dict) and graph_error.get("type") in (
-            "ProxyError",
-            "ConnectionError",
-        ):
-            return build_error_response(
-                "EMAIL_PROXY_CONNECTION_FAILED",
-                "代理连接失败，请检查分组代理设置",
-                message_en="Proxy connection failed. Please check the group proxy settings",
-                err_type="ProxyError",
-                status=502,
-                details=all_errors,
-                extra={"details": all_errors},
-            )
-
-    _t_imap_new = time.monotonic()
-    imap_new_result = imap_service.get_emails_imap_with_server(
-        account["email"],
-        account["client_id"],
-        account["refresh_token"],
-        folder,
-        skip,
-        top,
-        IMAP_SERVER_NEW,
-    )
-    _LOGGER.debug(
-        "[PERF] get_emails | email=%s | imap_new | %dms | success=%s",
-        email_addr,
-        (time.monotonic() - _t_imap_new) * 1000,
-        imap_new_result.get("success"),
-    )
-    if imap_new_result.get("success"):
-        account_summary = compact_summary_service.update_summary_from_message_list(
-            int(account["id"]),
-            imap_new_result.get("emails", []),
-            folder=folder,
+    all_errors = transport_result.get("errors") or {}
+    if transport_result.get("proxy_error"):
+        return build_error_response(
+            "EMAIL_PROXY_CONNECTION_FAILED",
+            "代理连接失败，请检查分组代理设置",
+            message_en="Proxy connection failed. Please check the group proxy settings",
+            err_type="ProxyError",
+            status=502,
+            details=all_errors,
+            extra={"details": all_errors},
         )
-        _LOGGER.debug(
-            "[PERF] get_emails | email=%s | 总耗时=%dms | method=imap_new",
-            email_addr,
-            (time.monotonic() - _t0) * 1000,
-        )
-        return jsonify(
-            {
-                "success": True,
-                "emails": imap_new_result.get("emails", []),
-                "method": "IMAP (New)",
-                "has_more": False,  # IMAP 分页暂未完全实现
-                "account_summary": account_summary,
-            }
-        )
-    else:
-        all_errors["imap_new"] = imap_new_result.get("error")
-
-    # 3. 尝试旧版 IMAP (outlook.office365.com)
-    _t_imap_old = time.monotonic()
-    imap_old_result = imap_service.get_emails_imap_with_server(
-        account["email"],
-        account["client_id"],
-        account["refresh_token"],
-        folder,
-        skip,
-        top,
-        IMAP_SERVER_OLD,
-    )
-    _LOGGER.debug(
-        "[PERF] get_emails | email=%s | imap_old | %dms | success=%s",
-        email_addr,
-        (time.monotonic() - _t_imap_old) * 1000,
-        imap_old_result.get("success"),
-    )
-    if imap_old_result.get("success"):
-        account_summary = compact_summary_service.update_summary_from_message_list(
-            int(account["id"]),
-            imap_old_result.get("emails", []),
-            folder=folder,
-        )
-        _LOGGER.debug(
-            "[PERF] get_emails | email=%s | 总耗时=%dms | method=imap_old",
-            email_addr,
-            (time.monotonic() - _t0) * 1000,
-        )
-        return jsonify(
-            {
-                "success": True,
-                "emails": imap_old_result.get("emails", []),
-                "method": "IMAP (Old)",
-                "has_more": False,
-                "account_summary": account_summary,
-            }
-        )
-    else:
-        all_errors["imap_old"] = imap_old_result.get("error")
-
-    _LOGGER.debug(
-        "[PERF] get_emails | email=%s | 总耗时=%dms | 全部失败",
-        email_addr,
-        (time.monotonic() - _t0) * 1000,
-    )
-    # 先尝试 Graph→IMAP 全链路；仅在全部失败且 Graph 明确 401 时提示重授权
-    if graph_result.get("auth_expired"):
+    if transport_result.get("auth_expired"):
         return build_error_response(
             "ACCOUNT_AUTH_EXPIRED",
             "账号授权已失效，请前往「刷新 Token」页面重新授权",
@@ -709,6 +615,7 @@ def api_delete_emails() -> Any:
     data = request.json
     email_addr = data.get("email", "")
     message_ids = data.get("ids", [])
+    folder = str(data.get("folder") or "inbox").strip().lower() or "inbox"
 
     if not email_addr or not message_ids:
         return build_error_response("INVALID_PARAM", "参数不完整", message_en="Missing required parameters")
@@ -741,6 +648,29 @@ def api_delete_emails() -> Any:
         if group:
             proxy_url = group.get("proxy_url", "") or ""
 
+    preferred_channel = outlook_transport.normalize_channel(account.get("preferred_verification_channel"))
+    if preferred_channel in (outlook_transport.IMAP_NEW, outlook_transport.IMAP_OLD):
+        imap_result = imap_service.delete_emails_imap(
+            email_addr,
+            account["client_id"],
+            account["refresh_token"],
+            message_ids,
+            (
+                outlook_transport.IMAP_SERVER_NEW
+                if preferred_channel == outlook_transport.IMAP_NEW
+                else outlook_transport.IMAP_SERVER_OLD
+            ),
+            folder=folder,
+        )
+        if imap_result.get("success"):
+            log_audit(
+                "delete",
+                "email",
+                email_addr,
+                f"删除邮件 {len(message_ids)} 封（{preferred_channel}）",
+            )
+            return jsonify(imap_result)
+
     response_data, method_used = email_delete_service.delete_emails_with_fallback(
         email_addr=email_addr,
         client_id=account["client_id"],
@@ -751,6 +681,7 @@ def api_delete_emails() -> Any:
         delete_emails_imap=imap_service.delete_emails_imap,
         imap_server_new=IMAP_SERVER_NEW,
         imap_server_old=IMAP_SERVER_OLD,
+        folder=folder,
     )
 
     if method_used == "graph":
@@ -1142,10 +1073,15 @@ def _resolve_external_error(
 
 def _external_error_response(exc: external_api_service.ExternalApiError, *, allow_nested_upstream: bool = False):
     resolved = _resolve_external_error(exc, allow_nested_upstream=allow_nested_upstream)
-    return jsonify(external_api_service.fail(resolved["code"], resolved["message"], data=resolved["data"])), resolved["status"]
+    return (
+        jsonify(external_api_service.fail(resolved["code"], resolved["message"], data=resolved["data"])),
+        resolved["status"],
+    )
 
 
-def _should_return_email_not_found_for_web_extract(exc: external_api_service.ExternalApiError) -> bool:
+def _should_return_email_not_found_for_web_extract(
+    exc: external_api_service.ExternalApiError,
+) -> bool:
     # Web 端提取时：只有当所有渠道都是"无邮件"（非鉴权失败/非连接错误）才返回 EMAIL_NOT_FOUND
     # 鉴权失败等错误需要透传原始 code，引导用户重新授权而非误报"无邮件"
     if not isinstance(exc, external_api_service.UpstreamReadFailedError):
@@ -1165,7 +1101,12 @@ def _should_return_email_not_found_for_web_extract(exc: external_api_service.Ext
             status = int(item.get("status") or 0)
         except Exception:
             status = 0
-        if code in {"IMAP_AUTH_FAILED", "IMAP_CONNECT_FAILED", "IMAP_FOLDER_NOT_FOUND", "ACCOUNT_AUTH_EXPIRED"}:
+        if code in {
+            "IMAP_AUTH_FAILED",
+            "IMAP_CONNECT_FAILED",
+            "IMAP_FOLDER_NOT_FOUND",
+            "ACCOUNT_AUTH_EXPIRED",
+        }:
             return False
         if status in {401, 403}:
             return False
