@@ -1,17 +1,18 @@
 from __future__ import annotations
 
+import json
+import logging
 import re
 import secrets
+import threading
 import time
 from datetime import datetime, timezone
 from typing import Any
 
+from outlook_web.repositories import settings as settings_repo
 from outlook_web.repositories import temp_emails as temp_emails_repo
 from outlook_web.services.temp_mail_provider_custom import TempMailProviderReadError
-from outlook_web.services.temp_mail_provider_factory import (
-    TempMailProviderFactoryError,
-    get_temp_mail_provider,
-)
+from outlook_web.services.temp_mail_provider_factory import TempMailProviderFactoryError, get_temp_mail_provider
 from outlook_web.services.verification_extract_log import (
     encode_temp_mail_log_account_id,
     resolve_extract_log_outcome,
@@ -27,6 +28,9 @@ from outlook_web.services.verification_extractor import (
 
 TEMP_MAIL_SOURCE = temp_emails_repo.DEFAULT_TEMP_MAIL_SOURCE
 TEMP_MAIL_METHOD = "Temp Mail"
+REMOTE_SYNC_ERROR_LOG_INTERVAL_SECONDS = 300
+
+logger = logging.getLogger(__name__)
 
 
 class TempMailError(Exception):
@@ -121,6 +125,14 @@ class TempMailService:
     def __init__(self, provider: Any | None = None, provider_factory: Any | None = None):
         self._provider = provider
         self._provider_factory = provider_factory or get_temp_mail_provider
+        self._remote_sync_lock = threading.Lock()
+        self._discovery_lock = threading.Lock()
+        self._remote_sync_last_attempt = 0.0
+        self._remote_sync_last_error = ""
+        self._remote_sync_last_error_log_at = 0.0
+        self._message_sync_at: dict[str, float] = {}
+        self._message_sync_locks: dict[str, threading.Lock] = {}
+        self._message_sync_locks_guard = threading.Lock()
 
     def _provider_error(self, exc: TempMailProviderFactoryError, *, purpose: str) -> TempMailError:
         if purpose == "options":
@@ -164,6 +176,214 @@ class TempMailService:
         if not descriptor:
             raise TempMailError("TEMP_EMAIL_NOT_FOUND", "临时邮箱不存在", status=404)
         return descriptor
+
+    @staticmethod
+    def _provider_name(provider: Any) -> str:
+        return str(getattr(provider, "provider_name", "") or "").strip()
+
+    def is_managed_email(self, email_addr: str) -> bool:
+        """判断地址是否属于当前 CF Worker 管理的域名。"""
+        normalized = str(email_addr or "").strip()
+        if "@" not in normalized:
+            return False
+        if settings_repo.get_temp_mail_provider() != settings_repo.CLOUDFLARE_TEMP_MAIL_PROVIDER:
+            return False
+        domain = normalized.rsplit("@", 1)[1].casefold()
+        return any(
+            bool(item.get("enabled", True)) and str(item.get("name") or "").strip().casefold() == domain
+            for item in settings_repo.get_cf_worker_domains()
+            if isinstance(item, dict)
+        )
+
+    def _provider_meta_from_remote_row(self, provider: Any, row: dict[str, Any]) -> dict[str, Any]:
+        address_id = str(row.get("id") or row.get("address_id") or "").strip()
+        jwt = str(row.get("jwt") or "").strip()
+        build_meta = getattr(provider, "_build_meta", None)
+        if callable(build_meta):
+            return build_meta(jwt=jwt, address_id=address_id)
+        return {
+            "provider_name": self._provider_name(provider),
+            "provider_mailbox_id": address_id,
+            "provider_jwt": jwt,
+            "provider_capabilities": {
+                "delete_mailbox": True,
+                "delete_message": True,
+                "clear_messages": True,
+            },
+        }
+
+    def _log_remote_sync_error(self, exc: Exception) -> None:
+        now = time.monotonic()
+        signature = f"{type(exc).__name__}:{getattr(exc, 'code', '')}:{exc}"
+        if (
+            signature == self._remote_sync_last_error
+            and now - self._remote_sync_last_error_log_at < REMOTE_SYNC_ERROR_LOG_INTERVAL_SECONDS
+        ):
+            return
+        self._remote_sync_last_error = signature
+        self._remote_sync_last_error_log_at = now
+        logger.warning(
+            "[temp_mail] remote address sync failed code=%s err=%s",
+            getattr(exc, "code", type(exc).__name__),
+            exc,
+        )
+
+    def _persist_discovered_mailbox(
+        self,
+        *,
+        email_addr: str,
+        provider: Any,
+        discovered: dict[str, Any],
+    ) -> dict[str, Any]:
+        canonical_email = str(discovered.get("email") or email_addr).strip()
+        provider_name = str(discovered.get("provider_name") or self._provider_name(provider)).strip() or None
+        meta = discovered.get("meta") or {}
+        existing = temp_emails_repo.get_temp_email_by_address(canonical_email)
+        if existing:
+            temp_emails_repo.update_temp_email_provider_meta(
+                canonical_email,
+                meta,
+                provider_name=provider_name,
+            )
+        else:
+            prefix, domain = canonical_email.rsplit("@", 1) if "@" in canonical_email else (canonical_email, "")
+            self._create_or_load_mailbox_record(
+                email_addr=canonical_email,
+                mailbox_type="user",
+                visible_in_ui=True,
+                source=TEMP_MAIL_SOURCE,
+                prefix=prefix,
+                domain=domain,
+                meta=meta,
+                provider_name=provider_name,
+            )
+        return temp_emails_repo.build_temp_mailbox_descriptor(
+            temp_emails_repo.get_temp_email_by_address(canonical_email) or {}
+        )
+
+    def discover_user_mailbox(
+        self,
+        email_addr: str,
+        *,
+        provider: Any | None = None,
+    ) -> dict[str, Any] | None:
+        """精确发现远程地址并导入本地；不存在时返回 None，不创建伪邮箱。"""
+        normalized_email = str(email_addr or "").strip()
+        if not normalized_email or "@" not in normalized_email:
+            return None
+        provider = provider or self._get_provider(purpose="runtime")
+        if self._provider_name(provider) != settings_repo.CLOUDFLARE_TEMP_MAIL_PROVIDER:
+            return temp_emails_repo.get_temp_email_by_address(normalized_email, view="descriptor")
+
+        existing = temp_emails_repo.get_temp_email_by_address(normalized_email, view="descriptor")
+        existing_meta = (existing or {}).get("meta") or {}
+        if existing and str(existing_meta.get("provider_jwt") or "").strip():
+            return existing
+
+        with self._discovery_lock:
+            existing = temp_emails_repo.get_temp_email_by_address(normalized_email, view="descriptor")
+            existing_meta = (existing or {}).get("meta") or {}
+            if existing and str(existing_meta.get("provider_jwt") or "").strip():
+                return existing
+            try:
+                discovered = provider.discover_mailbox(normalized_email)
+            except TempMailProviderReadError as exc:
+                raise TempMailError(
+                    exc.code,
+                    exc.message,
+                    status=502,
+                    data=exc.data,
+                ) from exc
+            if not discovered:
+                return None
+            return self._persist_discovered_mailbox(
+                email_addr=normalized_email,
+                provider=provider,
+                discovered=discovered,
+            )
+
+    def sync_remote_mailboxes(self, *, force: bool = False) -> int:
+        """增量同步远程地址元数据，不读取每个邮箱的邮件。"""
+        now = time.monotonic()
+        if not force and now - self._remote_sync_last_attempt < 15:
+            return 0
+        self._remote_sync_last_attempt = now
+        if not self._remote_sync_lock.acquire(blocking=False):
+            return 0
+        imported = 0
+        try:
+            provider = self._get_provider(purpose="runtime")
+            if self._provider_name(provider) != settings_repo.CLOUDFLARE_TEMP_MAIL_PROVIDER:
+                return 0
+            try:
+                cursor = int(settings_repo.get_setting("cf_worker_address_sync_cursor", "0") or "0")
+            except (TypeError, ValueError):
+                cursor = 0
+            for _ in range(20):
+                result = provider.list_remote_mailboxes(after_id=cursor, limit=500)
+                rows = result.get("results") or []
+                if not isinstance(rows, list):
+                    break
+                for row in rows:
+                    email_addr = str(row.get("name") or row.get("address") or "").strip()
+                    if not email_addr or "@" not in email_addr:
+                        continue
+                    existing = temp_emails_repo.get_temp_email_by_address(email_addr)
+                    meta = self._provider_meta_from_remote_row(provider, row)
+                    if existing:
+                        temp_emails_repo.update_temp_email_provider_meta(
+                            email_addr,
+                            meta,
+                            provider_name=self._provider_name(provider),
+                        )
+                    else:
+                        prefix, domain = email_addr.rsplit("@", 1)
+                        self._create_or_load_mailbox_record(
+                            email_addr=email_addr,
+                            mailbox_type="user",
+                            visible_in_ui=True,
+                            source=TEMP_MAIL_SOURCE,
+                            prefix=prefix,
+                            domain=domain,
+                            meta=meta,
+                            provider_name=self._provider_name(provider),
+                        )
+                        imported += 1
+                next_cursor = int(result.get("next_cursor") or cursor)
+                if not rows or next_cursor <= cursor:
+                    break
+                cursor = next_cursor
+                if len(rows) < 500:
+                    break
+            settings_repo.set_setting("cf_worker_address_sync_cursor", str(cursor), commit=True)
+            self._remote_sync_last_error = ""
+            return imported
+        except TempMailProviderReadError as exc:
+            # 后台同步失败不影响已有本地邮箱和 URL 取件。
+            self._log_remote_sync_error(exc)
+            return imported
+        except Exception as exc:
+            self._log_remote_sync_error(exc)
+            return imported
+        finally:
+            self._remote_sync_lock.release()
+
+    def _ensure_provider_credentials(self, mailbox: dict[str, Any]) -> dict[str, Any]:
+        provider = self._get_provider(mailbox=mailbox, purpose="runtime")
+        if self._provider_name(provider) != settings_repo.CLOUDFLARE_TEMP_MAIL_PROVIDER:
+            return mailbox
+        meta = mailbox.get("meta") or {}
+        if isinstance(meta, str):
+            try:
+                meta = json.loads(meta)
+            except Exception:
+                meta = {}
+        if str(meta.get("provider_jwt") or "").strip():
+            return mailbox
+        discovered = self.discover_user_mailbox(str(mailbox.get("email") or ""), provider=provider)
+        if not discovered:
+            raise TempMailError("TEMP_EMAIL_NOT_FOUND", "临时邮箱不存在", status=404)
+        return discovered
 
     def _provider_read_failed(
         self,
@@ -299,6 +519,7 @@ class TempMailService:
         return normalized_prefix, normalized_domain
 
     def list_user_mailboxes(self) -> list[dict[str, Any]]:
+        self.sync_remote_mailboxes(force=False)
         return temp_emails_repo.load_temp_emails(
             visible_only=True,
             mailbox_type="user",
@@ -386,6 +607,12 @@ class TempMailService:
                 raise
 
         if provider is not None:
+            if self._provider_name(provider) == settings_repo.CLOUDFLARE_TEMP_MAIL_PROVIDER:
+                discovered = self.discover_user_mailbox(normalized_email, provider=provider)
+                if discovered:
+                    return _mailbox_from_record(discovered.get("record") or discovered)
+                raise TempMailError("TEMP_EMAIL_NOT_FOUND", "临时邮箱不存在", status=404)
+
             probe_mailbox = {
                 "kind": temp_emails_repo.TEMP_MAIL_KIND,
                 "email": normalized_email,
@@ -518,12 +745,23 @@ class TempMailService:
     def get_task_mailbox(self, task_token: str, *, view: str = "record") -> dict[str, Any] | None:
         return temp_emails_repo.get_temp_email_by_task_token(task_token, view=view)
 
-    def list_messages(self, email_or_mailbox: str | dict[str, Any], *, sync_remote: bool = True) -> list[dict[str, Any]]:
-        mailbox = self._get_mailbox_descriptor(email_or_mailbox)
+    def _message_sync_lock_for(self, email_addr: str) -> threading.Lock:
+        key = str(email_addr or "").strip().casefold()
+        with self._message_sync_locks_guard:
+            lock = self._message_sync_locks.get(key)
+            if lock is None:
+                lock = threading.Lock()
+                self._message_sync_locks[key] = lock
+            return lock
+
+    def _sync_provider_messages(self, provider: Any, mailbox: dict[str, Any]) -> None:
         email_addr = str(mailbox.get("email") or "")
-        if sync_remote:
-            # BUG-03: cache-only 场景（sync_remote=False）不得依赖 provider 初始化。
-            provider = self._get_provider(mailbox=mailbox)
+        is_cloudflare = self._provider_name(provider) == settings_repo.CLOUDFLARE_TEMP_MAIL_PROVIDER
+        lock = self._message_sync_lock_for(email_addr) if is_cloudflare else threading.Lock()
+        with lock:
+            sync_key = email_addr.casefold()
+            if is_cloudflare and time.monotonic() - self._message_sync_at.get(sync_key, 0.0) < 0.75:
+                return
             try:
                 api_messages = provider.list_messages(mailbox)
             except TempMailProviderReadError as exc:
@@ -531,6 +769,17 @@ class TempMailService:
             if api_messages is None:
                 raise self._provider_read_failed(None, mailbox=mailbox, operation="list_messages")
             temp_emails_repo.save_temp_email_messages(email_addr, api_messages)
+            if is_cloudflare:
+                self._message_sync_at[sync_key] = time.monotonic()
+
+    def list_messages(self, email_or_mailbox: str | dict[str, Any], *, sync_remote: bool = True) -> list[dict[str, Any]]:
+        mailbox = self._get_mailbox_descriptor(email_or_mailbox)
+        email_addr = str(mailbox.get("email") or "")
+        if sync_remote:
+            mailbox = self._ensure_provider_credentials(mailbox)
+            email_addr = str(mailbox.get("email") or email_addr)
+            provider = self._get_provider(mailbox=mailbox)
+            self._sync_provider_messages(provider, mailbox)
         rows = temp_emails_repo.get_temp_email_messages(email_addr)
         return [_message_summary(email_addr, row) for row in rows]
 
@@ -546,6 +795,7 @@ class TempMailService:
         row = temp_emails_repo.get_temp_email_message_by_id(message_id, email_addr=email_addr)
         if refresh_if_missing and row is None:
             # BUG-03: cache-only 场景（refresh_if_missing=False）不得依赖 provider 初始化。
+            mailbox = self._ensure_provider_credentials(mailbox)
             provider = self._get_provider(mailbox=mailbox)
             try:
                 api_row = provider.get_message_detail(mailbox, message_id)
@@ -570,6 +820,7 @@ class TempMailService:
 
     def refresh_message_detail(self, email_or_mailbox: str | dict[str, Any], message_id: str) -> dict[str, Any]:
         mailbox = self._get_mailbox_descriptor(email_or_mailbox)
+        mailbox = self._ensure_provider_credentials(mailbox)
         email_addr = str(mailbox.get("email") or "")
         provider = self._get_provider(mailbox=mailbox)
         try:
@@ -590,6 +841,7 @@ class TempMailService:
 
     def delete_message(self, email_or_mailbox: str | dict[str, Any], message_id: str) -> bool:
         mailbox = self._get_mailbox_descriptor(email_or_mailbox)
+        mailbox = self._ensure_provider_credentials(mailbox)
         email_addr = str(mailbox.get("email") or "")
         provider = self._get_provider(mailbox=mailbox)
         if not provider.delete_message(mailbox, message_id):
@@ -598,6 +850,7 @@ class TempMailService:
 
     def clear_messages(self, email_or_mailbox: str | dict[str, Any]) -> bool:
         mailbox = self._get_mailbox_descriptor(email_or_mailbox)
+        mailbox = self._ensure_provider_credentials(mailbox)
         email_addr = str(mailbox.get("email") or "")
         provider = self._get_provider(mailbox=mailbox)
         if not provider.clear_messages(mailbox):

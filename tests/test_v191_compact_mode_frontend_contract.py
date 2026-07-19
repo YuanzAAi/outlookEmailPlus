@@ -78,7 +78,7 @@ class V191CompactModeFrontendContractTests(unittest.TestCase):
 
         self.assertIn("let mailboxViewMode = localStorage.getItem('ol_mailbox_view_mode') || 'standard';", main_js)
         self.assertIn("let batchTagContext = { scopedAccountIds: null };", main_js)
-        self.assertIn("let batchMoveGroupContext = { scopedAccountIds: null };", main_js)
+        self.assertIn("let batchMoveGroupContext = { scopedAccountIds: null, onSuccess: null };", main_js)
         self.assertIn("async function showBatchTagModal(type, options = {})", main_js)
         self.assertIn("async function showBatchMoveGroupModal(options = {})", main_js)
         self.assertIn("scopedAccountIds", main_js)

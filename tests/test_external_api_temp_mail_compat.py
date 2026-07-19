@@ -24,6 +24,8 @@ class ExternalApiTempMailCompatTests(unittest.TestCase):
             db.execute("DELETE FROM external_probe_cache")
             db.execute("DELETE FROM temp_email_messages WHERE email_address LIKE '%@compat-temp.test'")
             db.execute("DELETE FROM temp_emails WHERE email LIKE '%@compat-temp.test'")
+            db.execute("DELETE FROM temp_email_messages WHERE email_address LIKE '%@managed-temp.test'")
+            db.execute("DELETE FROM temp_emails WHERE email LIKE '%@managed-temp.test'")
             db.commit()
             settings_repo.set_setting("external_api_key", "compat-key")
             settings_repo.set_setting("temp_mail_provider", "custom_domain_temp_mail")
@@ -181,6 +183,59 @@ class ExternalApiTempMailCompatTests(unittest.TestCase):
                 verification_link_resp.get_json()["data"]["verification_link"],
                 "https://verify.example/confirm",
             )
+
+    def test_external_verification_auto_discovers_managed_cloudflare_address(self):
+        with self.app.app_context():
+            from outlook_web.repositories import settings as settings_repo
+
+            settings_repo.set_setting("temp_mail_provider", "cloudflare_temp_mail")
+            settings_repo.set_setting(
+                "cf_worker_domains",
+                '[{"name":"managed-temp.test","enabled":true,"is_default":true}]',
+            )
+            settings_repo.set_setting("cf_worker_default_domain", "managed-temp.test")
+
+        discovered = {
+            "success": True,
+            "email": "autoflow@managed-temp.test",
+            "provider_name": "cloudflare_temp_mail",
+            "meta": {
+                "provider_name": "cloudflare_temp_mail",
+                "provider_mailbox_id": "501",
+                "provider_jwt": "jwt-501",
+            },
+        }
+        messages = [
+            {
+                "id": "cf_9001",
+                "from_address": "noreply@example.com",
+                "subject": "Your verification code",
+                "content": "Use code 135790 to continue.",
+                "html_content": "",
+                "timestamp": int(time.time()),
+            }
+        ]
+        client = self.app.test_client()
+        with (
+            patch(
+                "outlook_web.services.temp_mail_provider_cf.CloudflareTempMailProvider.discover_mailbox",
+                return_value=discovered,
+            ) as discover_mock,
+            patch(
+                "outlook_web.services.temp_mail_provider_cf.CloudflareTempMailProvider.list_messages",
+                return_value=messages,
+            ),
+        ):
+            response = client.get(
+                "/api/external/verification-code?email=AUTOFLOW@managed-temp.test",
+                headers=self._headers("compat-key"),
+            )
+
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()["data"]
+        self.assertEqual(data["verification_code"], "135790")
+        self.assertEqual(data["email"], "autoflow@managed-temp.test")
+        discover_mock.assert_called_once_with("AUTOFLOW@managed-temp.test")
 
     def test_finish_rejects_external_read_matrix_for_task_mailbox(self):
         email_addr = self._create_task_mailbox(task_token="tmptask_finish_matrix")

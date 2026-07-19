@@ -56,6 +56,14 @@ class TempMailProviderBase(ABC):
     def generate_mailbox(self, *, prefix: str | None = None, domain: str | None = None) -> dict[str, Any]:
         return self.create_mailbox(prefix=prefix, domain=domain)
 
+    def discover_mailbox(self, email_addr: str) -> dict[str, Any] | None:
+        """可选能力：按完整邮箱发现既有远程地址，不创建新邮箱。"""
+        return None
+
+    def list_remote_mailboxes(self, *, after_id: int = 0, limit: int = 200) -> dict[str, Any]:
+        """可选能力：增量列出远程地址元数据。"""
+        return {"results": [], "next_cursor": int(after_id or 0), "supported": False}
+
     @abstractmethod
     def delete_mailbox(self, mailbox: dict[str, Any]) -> bool:
         raise NotImplementedError

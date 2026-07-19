@@ -28,16 +28,25 @@ import logging
 import secrets
 import string
 from datetime import datetime, timezone
+from email.utils import parseaddr
 from typing import Any
 
 import requests
+from requests.adapters import HTTPAdapter
 
 from outlook_web.repositories import settings as settings_repo
 from outlook_web.services.temp_mail_provider_base import TempMailProviderBase, register_provider
+from outlook_web.services.temp_mail_provider_custom import TempMailProviderReadError
 
 logger = logging.getLogger(__name__)
 
-_CF_REQUEST_TIMEOUT = 30  # seconds
+_CF_REQUEST_TIMEOUT = (5, 30)
+_CF_SESSION = requests.Session()
+_CF_SESSION.trust_env = False
+_CF_SESSION.headers.update({"Connection": "keep-alive"})
+_CF_ADAPTER = HTTPAdapter(pool_connections=4, pool_maxsize=16, max_retries=0, pool_block=False)
+_CF_SESSION.mount("http://", _CF_ADAPTER)
+_CF_SESSION.mount("https://", _CF_ADAPTER)
 
 DEFAULT_PREFIX_RULES = {
     "min_length": 1,
@@ -51,12 +60,9 @@ DEFAULT_PREFIX_RULES = {
 # ---------------------------------------------------------------------------
 
 
-class CloudflareTempMailProviderError(Exception):
+class CloudflareTempMailProviderError(TempMailProviderReadError):
     def __init__(self, code: str, message: str, *, data: dict[str, Any] | None = None):
-        super().__init__(message)
-        self.code = code
-        self.message = message
-        self.data = data or {}
+        super().__init__(code, message, data=data)
 
 
 # ---------------------------------------------------------------------------
@@ -83,9 +89,19 @@ def _iso_to_timestamp(iso_str: str) -> int:
         # 兼容毫秒格式：2025-12-07T10:30:00.000+00:00
         if "." in clean:
             clean = clean[: clean.index(".")] + clean[clean.index("+") :]
-        return int(datetime.fromisoformat(clean).timestamp())
+        parsed = datetime.fromisoformat(clean)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return int(parsed.timestamp())
     except (ValueError, AttributeError):
         return 0
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def _parse_mime_raw(raw_mime: str) -> dict[str, Any]:
@@ -250,6 +266,28 @@ class CloudflareTempMailProvider(TempMailProviderBase):
     def _user_headers(self, jwt: str) -> dict[str, str]:
         return {"Authorization": f"Bearer {jwt}", "Content-Type": "application/json"}
 
+    def _request(self, method: str, path: str, **kwargs: Any) -> requests.Response:
+        return _CF_SESSION.request(
+            method,
+            f"{self._base_url()}{path}",
+            timeout=_CF_REQUEST_TIMEOUT,
+            **kwargs,
+        )
+
+    def _read_request(self, method: str, path: str, *, operation: str, **kwargs: Any) -> requests.Response:
+        try:
+            return self._request(method, path, **kwargs)
+        except requests.Timeout as exc:
+            raise CloudflareTempMailProviderError(
+                "UPSTREAM_TIMEOUT",
+                f"CF Worker {operation}超时",
+            ) from exc
+        except requests.RequestException as exc:
+            raise CloudflareTempMailProviderError(
+                "UPSTREAM_SERVER_ERROR",
+                f"CF Worker {operation}失败: {exc}",
+            ) from exc
+
     def _coerce_email(self, mailbox: dict[str, Any] | str) -> str:
         if isinstance(mailbox, dict):
             return str(mailbox.get("email") or "").strip()
@@ -281,6 +319,185 @@ class CloudflareTempMailProvider(TempMailProviderBase):
             },
             "provider_debug": {"bridge": "cloudflare_worker"},
         }
+
+    def discover_mailbox(self, email_addr: str) -> dict[str, Any] | None:
+        """按完整邮箱精确发现远程地址，不创建新邮箱。"""
+        normalized_email = str(email_addr or "").strip()
+        if not normalized_email or "@" not in normalized_email:
+            return None
+        if not self._base_url() or not self._admin_key():
+            raise CloudflareTempMailProviderError(
+                "TEMP_MAIL_PROVIDER_NOT_CONFIGURED",
+                "CF Worker 地址或 Admin Key 未配置",
+            )
+
+        try:
+            resp = self._request(
+                "GET",
+                "/admin/address/resolve",
+                headers=self._admin_headers(),
+                params={"email": normalized_email},
+            )
+        except requests.Timeout as exc:
+            raise CloudflareTempMailProviderError("UPSTREAM_TIMEOUT", "CF Worker 地址查询超时") from exc
+        except requests.RequestException as exc:
+            raise CloudflareTempMailProviderError(
+                "UPSTREAM_SERVER_ERROR",
+                f"CF Worker 地址查询失败: {exc}",
+            ) from exc
+
+        if resp.status_code == 404:
+            return self._discover_mailbox_legacy(normalized_email)
+        if not resp.ok:
+            self._raise_http_error(resp, operation="地址查询")
+
+        try:
+            data = resp.json()
+        except Exception as exc:
+            raise CloudflareTempMailProviderError(
+                "UPSTREAM_BAD_PAYLOAD",
+                "CF Worker 地址查询返回非 JSON 响应",
+            ) from exc
+        return self._normalize_discovered_mailbox(data, normalized_email)
+
+    def _discover_mailbox_legacy(self, email_addr: str) -> dict[str, Any] | None:
+        resp = self._read_request(
+            "GET",
+            "/admin/address",
+            operation="地址查询",
+            headers=self._admin_headers(),
+            params={"query": email_addr, "limit": 100, "offset": 0},
+        )
+        if not resp.ok:
+            self._raise_http_error(resp, operation="地址查询")
+        try:
+            rows = (resp.json() or {}).get("results") or []
+        except Exception as exc:
+            raise CloudflareTempMailProviderError(
+                "UPSTREAM_BAD_PAYLOAD",
+                "CF Worker 地址列表返回非 JSON 响应",
+            ) from exc
+        row = next(
+            (item for item in rows if str(item.get("name") or "").strip().casefold() == email_addr.casefold()),
+            None,
+        )
+        if not row:
+            return None
+        address_id = str(row.get("id") or "").strip()
+        token_resp = self._read_request(
+            "GET",
+            f"/admin/show_password/{address_id}",
+            operation="地址凭据查询",
+            headers=self._admin_headers(),
+        )
+        if not token_resp.ok:
+            self._raise_http_error(token_resp, operation="地址凭据查询")
+        try:
+            token_data = token_resp.json() or {}
+        except Exception as exc:
+            raise CloudflareTempMailProviderError(
+                "UPSTREAM_BAD_PAYLOAD",
+                "CF Worker 地址凭据返回非 JSON 响应",
+            ) from exc
+        return self._normalize_discovered_mailbox({**row, "jwt": token_data.get("jwt")}, email_addr)
+
+    def _normalize_discovered_mailbox(self, data: dict[str, Any], requested_email: str) -> dict[str, Any] | None:
+        address = str(data.get("name") or data.get("address") or "").strip()
+        if not address or address.casefold() != requested_email.casefold():
+            return None
+        address_id = str(data.get("id") or data.get("address_id") or "").strip()
+        jwt = str(data.get("jwt") or "").strip()
+        if not address_id or not jwt:
+            raise CloudflareTempMailProviderError(
+                "UPSTREAM_BAD_PAYLOAD",
+                "CF Worker 地址查询缺少 id 或 jwt",
+                data={"email": requested_email},
+            )
+        return {
+            "success": True,
+            "email": address,
+            "provider_name": self.provider_name,
+            "meta": self._build_meta(jwt=jwt, address_id=address_id),
+        }
+
+    def list_remote_mailboxes(self, *, after_id: int = 0, limit: int = 200) -> dict[str, Any]:
+        """增量读取远程地址元数据，供本地后台同步。"""
+        if not self._base_url() or not self._admin_key():
+            return {"results": [], "next_cursor": int(after_id or 0), "supported": False}
+        safe_after_id = max(0, int(after_id or 0))
+        safe_limit = max(1, min(int(limit or 200), 500))
+        try:
+            resp = self._request(
+                "GET",
+                "/admin/address/sync",
+                headers=self._admin_headers(),
+                params={"after_id": safe_after_id, "limit": safe_limit},
+            )
+        except requests.Timeout as exc:
+            raise CloudflareTempMailProviderError("UPSTREAM_TIMEOUT", "CF Worker 地址同步超时") from exc
+        except requests.RequestException as exc:
+            raise CloudflareTempMailProviderError(
+                "UPSTREAM_SERVER_ERROR",
+                f"CF Worker 地址同步失败: {exc}",
+            ) from exc
+
+        if resp.status_code == 404:
+            return self._list_remote_mailboxes_legacy(after_id=safe_after_id, limit=safe_limit)
+        if not resp.ok:
+            self._raise_http_error(resp, operation="地址同步")
+        try:
+            data = resp.json() or {}
+        except Exception as exc:
+            raise CloudflareTempMailProviderError(
+                "UPSTREAM_BAD_PAYLOAD",
+                "CF Worker 地址同步返回非 JSON 响应",
+            ) from exc
+        rows = data.get("results") or []
+        if not isinstance(rows, list):
+            raise CloudflareTempMailProviderError("UPSTREAM_BAD_PAYLOAD", "CF Worker 地址同步字段格式错误")
+        next_cursor = max([safe_after_id] + [_safe_int(item.get("id")) for item in rows if isinstance(item, dict)])
+        return {"results": rows, "next_cursor": next_cursor, "supported": True}
+
+    def _list_remote_mailboxes_legacy(self, *, after_id: int, limit: int) -> dict[str, Any]:
+        offset = 0
+        collected: list[dict[str, Any]] = []
+        while len(collected) < limit:
+            resp = self._read_request(
+                "GET",
+                "/admin/address",
+                operation="地址同步",
+                headers=self._admin_headers(),
+                params={
+                    "limit": min(100, limit - len(collected)),
+                    "offset": offset,
+                    "sort_by": "id",
+                    "sort_order": "ascend",
+                },
+            )
+            if not resp.ok:
+                self._raise_http_error(resp, operation="地址同步")
+            try:
+                data = resp.json() or {}
+            except Exception as exc:
+                raise CloudflareTempMailProviderError(
+                    "UPSTREAM_BAD_PAYLOAD",
+                    "CF Worker 地址同步返回非 JSON 响应",
+                ) from exc
+            rows = data.get("results") or []
+            if not isinstance(rows, list):
+                raise CloudflareTempMailProviderError(
+                    "UPSTREAM_BAD_PAYLOAD",
+                    "CF Worker 地址同步字段格式错误",
+                )
+            if not rows:
+                break
+            collected.extend(item for item in rows if isinstance(item, dict) and _safe_int(item.get("id")) > after_id)
+            offset += len(rows)
+            if offset >= _safe_int(data.get("count")):
+                break
+        rows = collected[:limit]
+        next_cursor = max([after_id] + [_safe_int(item.get("id")) for item in rows])
+        return {"results": rows, "next_cursor": next_cursor, "supported": False}
 
     def _raise_http_error(self, resp: requests.Response, *, operation: str) -> None:
         code = _map_cf_http_error(resp.status_code, resp.text)
@@ -429,11 +646,11 @@ class CloudflareTempMailProvider(TempMailProviderBase):
             payload["domain"] = target_domain
 
         try:
-            resp = requests.post(
-                f"{base_url}/admin/new_address",
+            resp = self._request(
+                "POST",
+                "/admin/new_address",
                 headers=self._admin_headers(),
                 json=payload,
-                timeout=_CF_REQUEST_TIMEOUT,
             )
         except requests.Timeout:
             return {
@@ -506,12 +723,11 @@ class CloudflareTempMailProvider(TempMailProviderBase):
             )
             return False
 
-        base_url = self._base_url()
         try:
-            resp = requests.delete(
-                f"{base_url}/admin/delete_address/{address_id}",
+            resp = self._request(
+                "DELETE",
+                f"/admin/delete_address/{address_id}",
                 headers=self._admin_headers(),
-                timeout=_CF_REQUEST_TIMEOUT,
             )
             return resp.ok
         except requests.RequestException as exc:
@@ -537,13 +753,12 @@ class CloudflareTempMailProvider(TempMailProviderBase):
                 data={"email": email_addr},
             )
 
-        base_url = self._base_url()
         try:
-            resp = requests.get(
-                f"{base_url}/api/mails",
+            resp = self._request(
+                "GET",
+                "/api/parsed_mails",
                 params={"limit": 100, "offset": 0},
                 headers=self._user_headers(jwt),
-                timeout=_CF_REQUEST_TIMEOUT,
             )
         except requests.Timeout:
             raise CloudflareTempMailProviderError(
@@ -557,6 +772,27 @@ class CloudflareTempMailProvider(TempMailProviderBase):
                 f"CF Worker 网络错误: {exc}",
                 data={"email": email_addr},
             )
+
+        if resp.status_code == 404:
+            try:
+                resp = self._request(
+                    "GET",
+                    "/api/mails",
+                    params={"limit": 100, "offset": 0},
+                    headers=self._user_headers(jwt),
+                )
+            except requests.Timeout as exc:
+                raise CloudflareTempMailProviderError(
+                    "UPSTREAM_TIMEOUT",
+                    "CF Worker 读取邮件超时",
+                    data={"email": email_addr},
+                ) from exc
+            except requests.RequestException as exc:
+                raise CloudflareTempMailProviderError(
+                    "UPSTREAM_SERVER_ERROR",
+                    f"CF Worker 网络错误: {exc}",
+                    data={"email": email_addr},
+                ) from exc
 
         if not resp.ok:
             code = _map_cf_http_error(resp.status_code, resp.text)
@@ -575,7 +811,7 @@ class CloudflareTempMailProvider(TempMailProviderBase):
                 data={"email": email_addr},
             )
 
-        cf_mails = data.get("mails") or data.get("results") or []
+        cf_mails = data.get("results") or data.get("mails") or []
         if not isinstance(cf_mails, list):
             raise CloudflareTempMailProviderError(
                 "UPSTREAM_BAD_PAYLOAD",
@@ -617,11 +853,16 @@ class CloudflareTempMailProvider(TempMailProviderBase):
                 "has_html": False,
             }
 
-        # BUG-CF-01：from_address 优先从解析后的 MIME 中取，其次使用 CF 的 source 字段
-        from_address = (parsed.get("from_address") or str(cf_msg.get("source") or "")).strip()
+        parsed_sender_raw = str(cf_msg.get("sender") or cf_msg.get("from_address") or "").strip()
+        parsed_sender = parseaddr(parsed_sender_raw)[1] or parsed_sender_raw
+        parsed_content = str(cf_msg.get("text") or cf_msg.get("content") or "")
+        parsed_html = str(cf_msg.get("html") or cf_msg.get("html_content") or "")
+
+        # BUG-CF-01：优先使用 Worker 服务端解析字段，再回退本地 MIME 解析与 source。
+        from_address = (parsed_sender or parsed.get("from_address") or str(cf_msg.get("source") or "")).strip()
 
         # subject 优先从 MIME 中取，其次从顶层字段取（部分 CF 版本可能有）
-        subject = (parsed.get("subject") or str(cf_msg.get("subject") or "")).strip()
+        subject = (str(cf_msg.get("subject") or "") or parsed.get("subject") or "").strip()
 
         # message_id 字段（RFC 822 Message-ID），用于去重
         cf_message_id_header = str(cf_msg.get("message_id") or "")
@@ -632,9 +873,9 @@ class CloudflareTempMailProvider(TempMailProviderBase):
             "from_address": from_address,
             "source": from_address,  # 保留原始字段（兼容 save_temp_email_messages 的 source fallback）
             "subject": subject,
-            "content": parsed.get("content", ""),
-            "html_content": parsed.get("html_content", ""),
-            "has_html": parsed.get("has_html", False),
+            "content": parsed_content or parsed.get("content", ""),
+            "html_content": parsed_html or parsed.get("html_content", ""),
+            "has_html": bool(parsed_html or parsed.get("has_html", False)),
             "timestamp": timestamp,
             "created_at": created_at_str,
             "raw_message_id": cf_message_id_header,
@@ -642,14 +883,47 @@ class CloudflareTempMailProvider(TempMailProviderBase):
 
     def get_message_detail(self, mailbox: dict[str, Any] | str, message_id: str) -> dict[str, Any] | None:
         """
-        CF Worker 无独立「获取单封邮件」接口，
-        通过 list_messages 获取全部邮件后按 message_id 过滤。
+        优先调用 GET /api/parsed_mail/:id，旧 Worker 再回退列表过滤。
         """
-        messages = self.list_messages(mailbox)
-        for msg in messages:
-            if msg.get("id") == message_id or msg.get("message_id") == message_id:
-                return msg
-        return None
+        jwt = self._get_jwt(mailbox) if isinstance(mailbox, dict) else ""
+        if not jwt:
+            raise CloudflareTempMailProviderError(
+                "UNAUTHORIZED",
+                f"邮箱 {self._coerce_email(mailbox)} 缺少 provider_jwt，无法读取邮件",
+            )
+        cf_id = message_id[3:] if message_id.startswith("cf_") else message_id
+        try:
+            resp = self._request(
+                "GET",
+                f"/api/parsed_mail/{cf_id}",
+                headers=self._user_headers(jwt),
+            )
+        except requests.Timeout as exc:
+            raise CloudflareTempMailProviderError("UPSTREAM_TIMEOUT", "CF Worker 读取邮件详情超时") from exc
+        except requests.RequestException as exc:
+            raise CloudflareTempMailProviderError(
+                "UPSTREAM_SERVER_ERROR",
+                f"CF Worker 读取邮件详情失败: {exc}",
+            ) from exc
+
+        if resp.status_code == 404:
+            messages = self.list_messages(mailbox)
+            return next(
+                (msg for msg in messages if msg.get("id") == message_id or msg.get("message_id") == message_id),
+                None,
+            )
+        if not resp.ok:
+            self._raise_http_error(resp, operation="读取邮件详情")
+        try:
+            data = resp.json()
+        except Exception as exc:
+            raise CloudflareTempMailProviderError(
+                "UPSTREAM_BAD_PAYLOAD",
+                "CF Worker 邮件详情返回非 JSON 响应",
+            ) from exc
+        if not data:
+            return None
+        return self._normalize_cf_message(data)
 
     def delete_message(self, mailbox: dict[str, Any] | str, message_id: str) -> bool:
         """
@@ -671,12 +945,11 @@ class CloudflareTempMailProvider(TempMailProviderBase):
         if message_id.startswith("cf_"):
             cf_id = message_id[3:]
 
-        base_url = self._base_url()
         try:
-            resp = requests.delete(
-                f"{base_url}/api/mails/{cf_id}",
+            resp = self._request(
+                "DELETE",
+                f"/api/mails/{cf_id}",
                 headers=self._user_headers(jwt),
-                timeout=_CF_REQUEST_TIMEOUT,
             )
             return resp.ok
         except requests.RequestException as exc:
@@ -706,12 +979,11 @@ class CloudflareTempMailProvider(TempMailProviderBase):
             )
             return False
 
-        base_url = self._base_url()
         try:
-            resp = requests.delete(
-                f"{base_url}/admin/clear_inbox/{address_id}",
+            resp = self._request(
+                "DELETE",
+                f"/admin/clear_inbox/{address_id}",
                 headers=self._admin_headers(),
-                timeout=_CF_REQUEST_TIMEOUT,
             )
             return resp.ok
         except requests.RequestException as exc:
@@ -740,10 +1012,7 @@ class CloudflareTempMailProvider(TempMailProviderBase):
             }
 
         try:
-            resp = requests.get(
-                f"{base_url}/open_api/settings",
-                timeout=_CF_REQUEST_TIMEOUT,
-            )
+            resp = self._request("GET", "/open_api/settings")
         except requests.Timeout:
             return {
                 "success": False,

@@ -30,11 +30,19 @@ def build_token_url(tenant: str | None = None) -> str:
     return TOKEN_URL_TEMPLATE.format(tenant=normalized_tenant)
 
 
-def get_access_token_graph_result(client_id: str, refresh_token: str, proxy_url: str = None) -> Dict[str, Any]:
+def get_access_token_graph_result(
+    client_id: str,
+    refresh_token: str,
+    proxy_url: str = None,
+    *,
+    session: Optional[requests.Session] = None,
+    timeout: int = 30,
+) -> Dict[str, Any]:
     """获取 Graph API access_token（包含错误详情）"""
     try:
         proxies = build_proxies(proxy_url)
-        res = requests.post(
+        http = session or requests
+        res = http.post(
             TOKEN_URL_GRAPH,
             data={
                 "client_id": client_id,
@@ -42,7 +50,7 @@ def get_access_token_graph_result(client_id: str, refresh_token: str, proxy_url:
                 "refresh_token": refresh_token,
                 "scope": DEFAULT_GRAPH_SCOPE,
             },
-            timeout=30,
+            timeout=timeout,
             proxies=proxies,
         )
 
@@ -186,6 +194,80 @@ def get_emails_graph(
             "error": build_error_payload(
                 "EMAIL_FETCH_FAILED",
                 "获取邮件失败，请检查账号配置",
+                type(exc).__name__,
+                500,
+                str(exc),
+            ),
+        }
+
+
+def get_emails_graph_with_access_token(
+    access_token: str,
+    folder: str = "inbox",
+    top: int = 20,
+    proxy_url: str = None,
+    *,
+    search_query: Optional[str] = None,
+    include_body: bool = False,
+    session: Optional[requests.Session] = None,
+    timeout: int = 20,
+) -> Dict[str, Any]:
+    """使用已有 access token 读取文件夹，供批量检索复用连接和授权。"""
+    folder_map = {
+        "inbox": "inbox",
+        "junkemail": "junkemail",
+        "deleteditems": "deleteditems",
+        "trash": "deleteditems",
+    }
+    folder_name = folder_map.get((folder or "").lower(), "inbox")
+    selected_fields = "id,subject,from,receivedDateTime,isRead,hasAttachments,bodyPreview"
+    if include_body:
+        selected_fields += ",body"
+
+    params: Dict[str, Any] = {
+        "$top": max(1, min(int(top or 20), 50)),
+        "$select": selected_fields,
+    }
+    if search_query:
+        params["$search"] = f'"{search_query}"'
+    else:
+        params["$orderby"] = "receivedDateTime desc"
+
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Prefer": "outlook.body-content-type='text'",
+    }
+    url = f"https://graph.microsoft.com/v1.0/me/mailFolders/{folder_name}/messages"
+
+    try:
+        http = session or requests
+        response = http.get(
+            url,
+            headers=headers,
+            params=params,
+            timeout=timeout,
+            proxies=build_proxies(proxy_url),
+        )
+        if response.status_code != 200:
+            return {
+                "success": False,
+                "auth_expired": response.status_code == GRAPH_AUTH_EXPIRED_STATUS,
+                "status_code": response.status_code,
+                "error": build_error_payload(
+                    "EMAIL_SEARCH_FAILED",
+                    "检索邮件失败",
+                    "GraphAPIError",
+                    response.status_code,
+                    get_response_details(response),
+                ),
+            }
+        return {"success": True, "emails": response.json().get("value", [])}
+    except Exception as exc:
+        return {
+            "success": False,
+            "error": build_error_payload(
+                "EMAIL_SEARCH_FAILED",
+                "检索邮件失败",
                 type(exc).__name__,
                 500,
                 str(exc),

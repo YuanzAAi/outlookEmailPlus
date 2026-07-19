@@ -11,21 +11,11 @@ from outlook_web.repositories import accounts as accounts_repo
 from outlook_web.repositories import external_api_keys as external_api_keys_repo
 from outlook_web.repositories import groups as groups_repo
 from outlook_web.security.auth import get_external_api_consumer
-from outlook_web.services import graph as graph_service
-from outlook_web.services import imap as imap_service
-from outlook_web.services import (
-    mailbox_resolver,
-)
+from outlook_web.services import mailbox_resolver, outlook_transport
 from outlook_web.services import verification_channel_routing as verification_channel_service
-from outlook_web.services.imap_generic import (
-    get_email_detail_imap_generic_result,
-    get_emails_imap_generic,
-)
+from outlook_web.services.imap_generic import get_email_detail_imap_generic_result, get_emails_imap_generic
 from outlook_web.services.temp_mail_service import TempMailError, get_temp_mail_service
-from outlook_web.services.verification_extract_log import (
-    resolve_extract_log_outcome,
-    write_verification_extract_log,
-)
+from outlook_web.services.verification_extract_log import resolve_extract_log_outcome, write_verification_extract_log
 from outlook_web.services.verification_extractor import (
     apply_confidence_gate,
     enhance_verification_with_ai_fallback,
@@ -478,7 +468,7 @@ def probe_instance_upstream(*, cache_ttl_seconds: int = 60, force: bool = False)
     return probe_account_upstream(account, cache_ttl_seconds=cache_ttl_seconds, force=force)
 
 
-def list_messages_for_external(
+def list_messages_for_external(  # noqa: C901
     *,
     email_addr: str,
     folder: str = "inbox",
@@ -486,6 +476,7 @@ def list_messages_for_external(
     top: int = 20,
 ) -> Tuple[List[Dict[str, Any]], str]:
     mailbox = mailbox_resolver.resolve_mailbox(email_addr)
+    email_addr = str(mailbox.get("email") or email_addr).strip()
     mailbox_meta = mailbox_resolver.ensure_mailbox_can_read(mailbox, consumer=get_current_external_api_consumer())
     folder = (folder or "inbox").strip().lower() or "inbox"
     skip = max(0, int(skip or 0))
@@ -525,63 +516,37 @@ def list_messages_for_external(
         return emails, method_label
 
     proxy_url = _get_proxy_url(account)
-
-    graph_result = graph_service.get_emails_graph(
-        account.get("client_id") or "",
-        account.get("refresh_token") or "",
+    transport_result = outlook_transport.list_messages(
+        account,
         folder=folder,
         skip=skip,
         top=top,
         proxy_url=proxy_url,
     )
-    if graph_result.get("success"):
-        method_label = "Graph API"
-        emails = [_build_message_summary(email_addr, e, method=method_label) for e in (graph_result.get("emails") or [])]
+    if transport_result.get("success"):
+        new_refresh_token = str(transport_result.get("new_refresh_token") or "").strip()
+        if new_refresh_token:
+            account["refresh_token"] = new_refresh_token
+            try:
+                accounts_repo.update_refresh_token_if_changed(int(account["id"]), new_refresh_token)
+            except Exception:
+                pass
+        channel = transport_result.get("channel")
+        if channel:
+            try:
+                accounts_repo.update_preferred_verification_channel(int(account["id"]), channel)
+            except Exception:
+                pass
+        method_label = str(transport_result.get("method") or "Graph API")
+        emails = [_build_message_summary(email_addr, e, method=method_label) for e in (transport_result.get("emails") or [])]
         return emails, method_label
 
-    graph_error = graph_result.get("error")
-    if isinstance(graph_error, dict) and graph_error.get("type") in (
-        "ProxyError",
-        "ConnectionError",
-    ):
-        raise ProxyError("代理连接失败", data=graph_error)
-
-    # Graph 失败 → IMAP(New) → IMAP(Old) 回退
-    imap_new_result = imap_service.get_emails_imap_with_server(
-        email_addr,
-        account.get("client_id") or "",
-        account.get("refresh_token") or "",
-        folder,
-        skip,
-        top,
-        IMAP_SERVER_NEW,
-    )
-    if imap_new_result.get("success"):
-        method_label = "IMAP (New)"
-        emails = [_build_message_summary(email_addr, e, method=method_label) for e in (imap_new_result.get("emails") or [])]
-        return emails, method_label
-
-    imap_old_result = imap_service.get_emails_imap_with_server(
-        email_addr,
-        account.get("client_id") or "",
-        account.get("refresh_token") or "",
-        folder,
-        skip,
-        top,
-        IMAP_SERVER_OLD,
-    )
-    if imap_old_result.get("success"):
-        method_label = "IMAP (Old)"
-        emails = [_build_message_summary(email_addr, e, method=method_label) for e in (imap_old_result.get("emails") or [])]
-        return emails, method_label
+    if transport_result.get("proxy_error"):
+        raise ProxyError("代理连接失败", data=transport_result.get("error"))
 
     raise UpstreamReadFailedError(
         "Graph/IMAP 均读取失败",
-        data={
-            "graph": graph_error,
-            "imap_new": imap_new_result.get("error"),
-            "imap_old": imap_old_result.get("error"),
-        },
+        data=transport_result.get("errors") or transport_result.get("error"),
     )
 
 
@@ -668,6 +633,8 @@ def get_message_detail_for_external(  # noqa: C901
     if mailbox.get("kind") == "temp":
         service = get_temp_mail_service()
         try:
+            if str(mailbox.get("provider_name") or "").strip() == "cloudflare_temp_mail":
+                return service.get_message_detail(mailbox, message_id, refresh_if_missing=True)
             return service.refresh_message_detail(mailbox, message_id)
         except TempMailError as exc:
             if exc.code == "TEMP_EMAIL_MESSAGE_NOT_FOUND":
@@ -716,46 +683,23 @@ def get_message_detail_for_external(  # noqa: C901
         }
 
     proxy_url = _get_proxy_url(account)
-
-    detail = graph_service.get_email_detail_graph(
-        account.get("client_id") or "",
-        account.get("refresh_token") or "",
-        message_id,
-        proxy_url,
+    transport_result = outlook_transport.get_detail(
+        account,
+        message_id=message_id,
+        folder=folder,
+        proxy_url=proxy_url,
     )
-    method_label = "Graph API"
-    graph_raw_content = None
-    if detail:
-        graph_raw_content = graph_service.get_email_raw_graph(
-            account.get("client_id") or "",
-            account.get("refresh_token") or "",
-            message_id,
-            proxy_url,
-        )
-    if not detail:
-        detail = imap_service.get_email_detail_imap_with_server(
-            email_addr,
-            account.get("client_id") or "",
-            account.get("refresh_token") or "",
-            message_id,
-            folder,
-            IMAP_SERVER_NEW,
-        )
-        method_label = "IMAP (New)"
-
-    if not detail:
-        detail = imap_service.get_email_detail_imap_with_server(
-            email_addr,
-            account.get("client_id") or "",
-            account.get("refresh_token") or "",
-            message_id,
-            folder,
-            IMAP_SERVER_OLD,
-        )
-        method_label = "IMAP (Old)"
-
-    if not detail:
+    if not transport_result.get("success"):
         raise MailNotFoundError("未找到邮件详情", data={"email": email_addr, "message_id": message_id})
+    detail = transport_result.get("detail") or {}
+    method_label = str(transport_result.get("method") or "")
+    graph_raw_content = transport_result.get("raw_content")
+    channel = transport_result.get("channel")
+    if channel:
+        try:
+            accounts_repo.update_preferred_verification_channel(int(account["id"]), channel)
+        except Exception:
+            pass
 
     created_at_raw = ""
     timestamp = 0
@@ -1179,7 +1123,7 @@ def _run_generic_verification_extract(
     )
     extracted = apply_confidence_gate(extracted, enforce_mutual_exclusion=False)
 
-    extracted["email"] = email_addr
+    extracted["email"] = detail.get("email_address") or latest_summary.get("email_address") or email_addr
     extracted["matched_email_id"] = message_id
     extracted["from"] = detail.get("from_address") or latest_summary.get("from_address") or ""
     extracted["subject"] = detail.get("subject") or latest_summary.get("subject") or ""
@@ -1214,6 +1158,8 @@ def get_verification_result(
     started_at = time.time()
     trace_id = None
     account, account_id, group = _resolve_verification_extract_context(email_addr)
+    if account and str(account.get("email") or "").strip():
+        email_addr = str(account.get("email") or "").strip()
     resolved_policy = _resolve_verification_policy_for_request(
         code_length=code_length,
         code_regex=code_regex,
@@ -1677,10 +1623,7 @@ def record_claim_read_context(
     if not claim_token or not claim_token.strip():
         return
     try:
-        from outlook_web.services.pool import (
-            append_claim_read_context,
-            get_claim_context,
-        )
+        from outlook_web.services.pool import append_claim_read_context, get_claim_context
 
         ctx = get_claim_context(claim_token=claim_token.strip())
         if ctx is None:

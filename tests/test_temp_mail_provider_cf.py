@@ -188,9 +188,7 @@ class CloudflareTempMailProviderTests(unittest.TestCase):
             settings_repo.set_setting("temp_mail_prefix_rules", "")
 
     def _make_provider(self):
-        from outlook_web.services.temp_mail_provider_cf import (
-            CloudflareTempMailProvider,
-        )
+        from outlook_web.services.temp_mail_provider_cf import CloudflareTempMailProvider
 
         return CloudflareTempMailProvider(provider_name="cloudflare_temp_mail")
 
@@ -270,7 +268,7 @@ class CloudflareTempMailProviderTests(unittest.TestCase):
                 "jwt": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.test",
                 "address_id": "addr-456",
             }
-            with patch("requests.post", return_value=mock_resp) as post_mock:
+            with patch.object(provider, "_request", return_value=mock_resp) as request_mock:
                 result = provider.create_mailbox(prefix="hello", domain="cf-mail.example.com")
 
         self.assertTrue(result["success"])
@@ -280,8 +278,8 @@ class CloudflareTempMailProviderTests(unittest.TestCase):
         self.assertEqual(meta["provider_mailbox_id"], "addr-456")
         self.assertTrue(meta["provider_capabilities"]["delete_mailbox"])
         # enablePrefix=False 必须被传入
-        call_kwargs = post_mock.call_args
-        payload = call_kwargs[1]["json"] if "json" in call_kwargs[1] else call_kwargs[0][1]
+        self.assertEqual(request_mock.call_args.args[:2], ("POST", "/admin/new_address"))
+        payload = request_mock.call_args.kwargs["json"]
         self.assertFalse(payload.get("enablePrefix", True))
 
     def test_create_mailbox_missing_base_url_returns_error(self):
@@ -311,7 +309,7 @@ class CloudflareTempMailProviderTests(unittest.TestCase):
             mock_resp.ok = False
             mock_resp.status_code = 401
             mock_resp.text = "Unauthorized"
-            with patch("requests.post", return_value=mock_resp):
+            with patch.object(provider, "_request", return_value=mock_resp):
                 result = provider.create_mailbox(prefix="x")
 
         self.assertFalse(result["success"])
@@ -322,7 +320,7 @@ class CloudflareTempMailProviderTests(unittest.TestCase):
 
         with self.app.app_context():
             provider = self._make_provider()
-            with patch("requests.post", side_effect=req.Timeout):
+            with patch.object(provider, "_request", side_effect=req.Timeout):
                 result = provider.create_mailbox(prefix="x")
 
         self.assertFalse(result["success"])
@@ -338,18 +336,101 @@ class CloudflareTempMailProviderTests(unittest.TestCase):
                 "jwt": "jwt-token",
                 "address_id": "auto-id",
             }
-            with patch("requests.post", return_value=mock_resp) as post_mock:
+            with patch.object(provider, "_request", return_value=mock_resp) as request_mock:
                 result = provider.create_mailbox()
 
         self.assertTrue(result["success"])
         # CF Worker v1.5.0+ 支持 domain 字段；当有可用域名配置时，
         # payload 中应包含 name（非空随机前缀）和 domain（来自配置的默认域名）。
-        payload = post_mock.call_args[1]["json"]
+        payload = request_mock.call_args.kwargs["json"]
         self.assertIn("name", payload)
         self.assertTrue(len(payload["name"]) > 0)
         # 有 domain 配置时应传入 domain 字段
         self.assertIn("domain", payload)
         self.assertEqual(payload["domain"], "cf-mail.example.com")
+
+    # ------------------------------------------------------------------
+    # remote discovery / address sync
+    # ------------------------------------------------------------------
+
+    def test_discover_mailbox_uses_exact_resolve_endpoint(self):
+        with self.app.app_context():
+            provider = self._make_provider()
+            mock_resp = MagicMock()
+            mock_resp.ok = True
+            mock_resp.status_code = 200
+            mock_resp.json.return_value = {
+                "found": True,
+                "id": 77,
+                "name": "mixedcase@cf-mail.example.com",
+                "jwt": "resolved-jwt",
+            }
+            with patch.object(provider, "_request", return_value=mock_resp) as request_mock:
+                result = provider.discover_mailbox("MixedCase@cf-mail.example.com")
+
+        self.assertEqual(result["email"], "mixedcase@cf-mail.example.com")
+        self.assertEqual(result["meta"]["provider_mailbox_id"], "77")
+        self.assertEqual(result["meta"]["provider_jwt"], "resolved-jwt")
+        self.assertEqual(request_mock.call_args.args[:2], ("GET", "/admin/address/resolve"))
+
+    def test_discover_mailbox_returns_none_for_exact_miss(self):
+        with self.app.app_context():
+            provider = self._make_provider()
+            mock_resp = MagicMock()
+            mock_resp.ok = True
+            mock_resp.status_code = 200
+            mock_resp.json.return_value = {"found": False}
+            with patch.object(provider, "_request", return_value=mock_resp):
+                result = provider.discover_mailbox("missing@cf-mail.example.com")
+
+        self.assertIsNone(result)
+
+    def test_discover_mailbox_legacy_maps_timeout(self):
+        import requests as req
+
+        with self.app.app_context():
+            from outlook_web.services.temp_mail_provider_cf import CloudflareTempMailProviderError
+
+            provider = self._make_provider()
+            endpoint_missing = MagicMock(ok=False, status_code=404, text="not found")
+            with patch.object(provider, "_request", side_effect=[endpoint_missing, req.Timeout()]):
+                with self.assertRaises(CloudflareTempMailProviderError) as ctx:
+                    provider.discover_mailbox("legacy@cf-mail.example.com")
+
+        self.assertEqual(ctx.exception.code, "UPSTREAM_TIMEOUT")
+
+    def test_discover_mailbox_legacy_rejects_non_json_payload(self):
+        with self.app.app_context():
+            from outlook_web.services.temp_mail_provider_cf import CloudflareTempMailProviderError
+
+            provider = self._make_provider()
+            endpoint_missing = MagicMock(ok=False, status_code=404, text="not found")
+            legacy_resp = MagicMock(ok=True, status_code=200)
+            legacy_resp.json.side_effect = ValueError("bad json")
+            with patch.object(provider, "_request", side_effect=[endpoint_missing, legacy_resp]):
+                with self.assertRaises(CloudflareTempMailProviderError) as ctx:
+                    provider.discover_mailbox("legacy@cf-mail.example.com")
+
+        self.assertEqual(ctx.exception.code, "UPSTREAM_BAD_PAYLOAD")
+
+    def test_list_remote_mailboxes_returns_incremental_cursor(self):
+        with self.app.app_context():
+            provider = self._make_provider()
+            mock_resp = MagicMock()
+            mock_resp.ok = True
+            mock_resp.status_code = 200
+            mock_resp.json.return_value = {
+                "results": [
+                    {"id": 12, "name": "a@cf-mail.example.com"},
+                    {"id": 13, "name": "b@cf-mail.example.com"},
+                ],
+                "next_cursor": 13,
+            }
+            with patch.object(provider, "_request", return_value=mock_resp):
+                result = provider.list_remote_mailboxes(after_id=11, limit=20)
+
+        self.assertEqual(len(result["results"]), 2)
+        self.assertEqual(result["next_cursor"], 13)
 
     # ------------------------------------------------------------------
     # delete_mailbox
@@ -360,7 +441,7 @@ class CloudflareTempMailProviderTests(unittest.TestCase):
             provider = self._make_provider()
             mock_resp = MagicMock()
             mock_resp.ok = True
-            with patch("requests.delete", return_value=mock_resp):
+            with patch.object(provider, "_request", return_value=mock_resp):
                 result = provider.delete_mailbox(self._make_mailbox())
 
         self.assertTrue(result)
@@ -370,7 +451,7 @@ class CloudflareTempMailProviderTests(unittest.TestCase):
 
         with self.app.app_context():
             provider = self._make_provider()
-            with patch("requests.delete", side_effect=req.RequestException("conn error")):
+            with patch.object(provider, "_request", side_effect=req.RequestException("conn error")):
                 result = provider.delete_mailbox(self._make_mailbox())
 
         self.assertFalse(result)
@@ -382,28 +463,25 @@ class CloudflareTempMailProviderTests(unittest.TestCase):
     def test_list_messages_success_parses_mime_and_normalizes_fields(self):
         with self.app.app_context():
             provider = self._make_provider()
-            raw_mime = (
-                "From: shop@verify.com\r\n"
-                "Subject: Your verification code\r\n"
-                "Content-Type: text/html; charset=utf-8\r\n"
-                "\r\n"
-                "<p>Code: <strong>654321</strong></p>"
-            )
             mock_resp = MagicMock()
             mock_resp.ok = True
+            mock_resp.status_code = 200
             mock_resp.json.return_value = {
-                "mails": [
+                "results": [
                     {
                         "id": 999,
                         "source": "shop@verify.com",
                         "address": "test@cf-mail.example.com",
-                        "raw": raw_mime,
+                        "sender": "Shop <shop@verify.com>",
+                        "subject": "Your verification code",
+                        "text": "Code: 654321",
+                        "html": "<p>Code: <strong>654321</strong></p>",
                         "message_id": "<abc@verify.com>",
                         "created_at": "2025-12-07T10:30:00.000Z",
                     }
                 ]
             }
-            with patch("requests.get", return_value=mock_resp):
+            with patch.object(provider, "_request", return_value=mock_resp):
                 messages = provider.list_messages(self._make_mailbox())
 
         self.assertEqual(len(messages), 1)
@@ -421,11 +499,31 @@ class CloudflareTempMailProviderTests(unittest.TestCase):
         self.assertIsInstance(msg["timestamp"], int)
         self.assertGreater(msg["timestamp"], 0)
 
+    def test_list_messages_falls_back_to_raw_api_for_old_worker(self):
+        with self.app.app_context():
+            provider = self._make_provider()
+            parsed_missing = MagicMock(ok=False, status_code=404, text="not found")
+            raw_resp = MagicMock(ok=True, status_code=200)
+            raw_resp.json.return_value = {
+                "mails": [
+                    {
+                        "id": 1001,
+                        "source": "fallback@example.com",
+                        "raw": "Subject: Legacy worker\r\n\r\nCode 112233",
+                        "created_at": "2025-12-07T10:30:00Z",
+                    }
+                ]
+            }
+            with patch.object(provider, "_request", side_effect=[parsed_missing, raw_resp]):
+                messages = provider.list_messages(self._make_mailbox())
+
+        self.assertEqual(messages[0]["id"], "cf_1001")
+        self.assertEqual(messages[0]["subject"], "Legacy worker")
+        self.assertIn("112233", messages[0]["content"])
+
     def test_list_messages_raises_error_when_jwt_missing(self):
         with self.app.app_context():
-            from outlook_web.services.temp_mail_provider_cf import (
-                CloudflareTempMailProviderError,
-            )
+            from outlook_web.services.temp_mail_provider_cf import CloudflareTempMailProviderError
 
             provider = self._make_provider()
             mailbox_no_jwt = self._make_mailbox(jwt="")
@@ -436,16 +534,14 @@ class CloudflareTempMailProviderTests(unittest.TestCase):
 
     def test_list_messages_raises_error_on_http_403(self):
         with self.app.app_context():
-            from outlook_web.services.temp_mail_provider_cf import (
-                CloudflareTempMailProviderError,
-            )
+            from outlook_web.services.temp_mail_provider_cf import CloudflareTempMailProviderError
 
             provider = self._make_provider()
             mock_resp = MagicMock()
             mock_resp.ok = False
             mock_resp.status_code = 403
             mock_resp.text = "Forbidden"
-            with patch("requests.get", return_value=mock_resp):
+            with patch.object(provider, "_request", return_value=mock_resp):
                 with self.assertRaises(CloudflareTempMailProviderError) as ctx:
                     provider.list_messages(self._make_mailbox())
 
@@ -453,16 +549,14 @@ class CloudflareTempMailProviderTests(unittest.TestCase):
 
     def test_list_messages_raises_error_on_server_error(self):
         with self.app.app_context():
-            from outlook_web.services.temp_mail_provider_cf import (
-                CloudflareTempMailProviderError,
-            )
+            from outlook_web.services.temp_mail_provider_cf import CloudflareTempMailProviderError
 
             provider = self._make_provider()
             mock_resp = MagicMock()
             mock_resp.ok = False
             mock_resp.status_code = 503
             mock_resp.text = "Service Unavailable"
-            with patch("requests.get", return_value=mock_resp):
+            with patch.object(provider, "_request", return_value=mock_resp):
                 with self.assertRaises(CloudflareTempMailProviderError) as ctx:
                     provider.list_messages(self._make_mailbox())
 
@@ -472,12 +566,10 @@ class CloudflareTempMailProviderTests(unittest.TestCase):
         import requests as req
 
         with self.app.app_context():
-            from outlook_web.services.temp_mail_provider_cf import (
-                CloudflareTempMailProviderError,
-            )
+            from outlook_web.services.temp_mail_provider_cf import CloudflareTempMailProviderError
 
             provider = self._make_provider()
-            with patch("requests.get", side_effect=req.Timeout):
+            with patch.object(provider, "_request", side_effect=req.Timeout):
                 with self.assertRaises(CloudflareTempMailProviderError) as ctx:
                     provider.list_messages(self._make_mailbox())
 
@@ -486,9 +578,7 @@ class CloudflareTempMailProviderTests(unittest.TestCase):
     def test_list_messages_skips_unparseable_items_and_continues(self):
         """解析单封邮件失败时应跳过该封，不影响其他邮件。"""
         with self.app.app_context():
-            from outlook_web.services.temp_mail_provider_cf import (
-                CloudflareTempMailProvider,
-            )
+            from outlook_web.services.temp_mail_provider_cf import CloudflareTempMailProvider
 
             provider = self._make_provider()
             mock_resp = MagicMock()
@@ -511,7 +601,7 @@ class CloudflareTempMailProviderTests(unittest.TestCase):
                     },
                 ]
             }
-            with patch("requests.get", return_value=mock_resp):
+            with patch.object(provider, "_request", return_value=mock_resp):
                 messages = provider.list_messages(self._make_mailbox())
 
         self.assertEqual(len(messages), 2)
@@ -525,17 +615,17 @@ class CloudflareTempMailProviderTests(unittest.TestCase):
             provider = self._make_provider()
             mock_resp = MagicMock()
             mock_resp.ok = True
+            mock_resp.status_code = 200
             mock_resp.json.return_value = {
-                "mails": [
-                    {
-                        "id": 42,
-                        "source": "sender@a.com",
-                        "raw": "Subject: Detail Test\r\n\r\nbody",
-                        "created_at": "2025-06-01T12:00:00Z",
-                    }
-                ]
+                "id": 42,
+                "source": "sender@a.com",
+                "sender": "sender@a.com",
+                "subject": "Detail Test",
+                "text": "body",
+                "html": "",
+                "created_at": "2025-06-01T12:00:00Z",
             }
-            with patch("requests.get", return_value=mock_resp):
+            with patch.object(provider, "_request", return_value=mock_resp):
                 detail = provider.get_message_detail(self._make_mailbox(), "cf_42")
 
         self.assertIsNotNone(detail)
@@ -547,8 +637,9 @@ class CloudflareTempMailProviderTests(unittest.TestCase):
             provider = self._make_provider()
             mock_resp = MagicMock()
             mock_resp.ok = True
-            mock_resp.json.return_value = {"mails": []}
-            with patch("requests.get", return_value=mock_resp):
+            mock_resp.status_code = 200
+            mock_resp.json.return_value = None
+            with patch.object(provider, "_request", return_value=mock_resp):
                 detail = provider.get_message_detail(self._make_mailbox(), "cf_999")
 
         self.assertIsNone(detail)
@@ -562,14 +653,12 @@ class CloudflareTempMailProviderTests(unittest.TestCase):
             provider = self._make_provider()
             mock_resp = MagicMock()
             mock_resp.ok = True
-            with patch("requests.delete", return_value=mock_resp) as del_mock:
+            with patch.object(provider, "_request", return_value=mock_resp) as request_mock:
                 result = provider.delete_message(self._make_mailbox(), "cf_789")
 
         self.assertTrue(result)
         # 确认请求 URL 中包含原始 integer ID（789），不含 cf_
-        call_url = del_mock.call_args[0][0]
-        self.assertIn("/mails/789", call_url)
-        self.assertNotIn("cf_789", call_url)
+        self.assertEqual(request_mock.call_args.args[:2], ("DELETE", "/api/mails/789"))
 
     def test_delete_message_returns_false_when_no_jwt(self):
         with self.app.app_context():
@@ -583,7 +672,7 @@ class CloudflareTempMailProviderTests(unittest.TestCase):
 
         with self.app.app_context():
             provider = self._make_provider()
-            with patch("requests.delete", side_effect=req.RequestException):
+            with patch.object(provider, "_request", side_effect=req.RequestException):
                 result = provider.delete_message(self._make_mailbox(), "cf_1")
 
         self.assertFalse(result)
@@ -597,19 +686,18 @@ class CloudflareTempMailProviderTests(unittest.TestCase):
             provider = self._make_provider()
             mock_resp = MagicMock()
             mock_resp.ok = True
-            with patch("requests.delete", return_value=mock_resp) as del_mock:
+            with patch.object(provider, "_request", return_value=mock_resp) as request_mock:
                 result = provider.clear_messages(self._make_mailbox())
 
         self.assertTrue(result)
-        call_url = del_mock.call_args[0][0]
-        # clear_messages 改为 DELETE /admin/clear_inbox/{address_id}
-        self.assertIn("/admin/clear_inbox/", call_url)
-        self.assertTrue(call_url.endswith("addr-123"))
+        self.assertEqual(request_mock.call_args.args[:2], ("DELETE", "/admin/clear_inbox/addr-123"))
 
-    def test_clear_messages_returns_false_when_no_jwt(self):
+    def test_clear_messages_returns_false_when_no_address_id(self):
         with self.app.app_context():
             provider = self._make_provider()
-            result = provider.clear_messages(self._make_mailbox(jwt=""))
+            mailbox = self._make_mailbox()
+            mailbox["meta"]["provider_mailbox_id"] = ""
+            result = provider.clear_messages(mailbox)
 
         self.assertFalse(result)
 
@@ -688,12 +776,8 @@ class CfProviderFactoryRoutingTests(unittest.TestCase):
     def test_factory_routes_cloudflare_provider_to_cf_implementation(self):
         with self.app.app_context():
             from outlook_web.repositories import settings as settings_repo
-            from outlook_web.services.temp_mail_provider_cf import (
-                CloudflareTempMailProvider,
-            )
-            from outlook_web.services.temp_mail_provider_factory import (
-                get_temp_mail_provider,
-            )
+            from outlook_web.services.temp_mail_provider_cf import CloudflareTempMailProvider
+            from outlook_web.services.temp_mail_provider_factory import get_temp_mail_provider
 
             settings_repo.set_setting("temp_mail_provider", "cloudflare_temp_mail")
             provider = get_temp_mail_provider()
@@ -704,12 +788,8 @@ class CfProviderFactoryRoutingTests(unittest.TestCase):
     def test_factory_still_routes_custom_provider_correctly(self):
         with self.app.app_context():
             from outlook_web.repositories import settings as settings_repo
-            from outlook_web.services.temp_mail_provider_custom import (
-                CustomTempMailProvider,
-            )
-            from outlook_web.services.temp_mail_provider_factory import (
-                get_temp_mail_provider,
-            )
+            from outlook_web.services.temp_mail_provider_custom import CustomTempMailProvider
+            from outlook_web.services.temp_mail_provider_factory import get_temp_mail_provider
 
             settings_repo.set_setting("temp_mail_provider", "custom_domain_temp_mail")
             provider = get_temp_mail_provider()
@@ -725,10 +805,7 @@ class CfProviderFactoryRoutingTests(unittest.TestCase):
     def test_factory_rejects_unknown_provider_name(self):
         with self.app.app_context():
             from outlook_web.repositories import settings as settings_repo
-            from outlook_web.services.temp_mail_provider_factory import (
-                TempMailProviderFactoryError,
-                get_temp_mail_provider,
-            )
+            from outlook_web.services.temp_mail_provider_factory import TempMailProviderFactoryError, get_temp_mail_provider
 
             settings_repo.set_setting("temp_mail_provider", "totally_unknown_provider_xyz")
             with self.assertRaises(TempMailProviderFactoryError) as ctx:

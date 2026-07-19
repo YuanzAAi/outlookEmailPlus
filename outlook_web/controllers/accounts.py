@@ -3,6 +3,7 @@ from __future__ import annotations
 import html
 import json
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote
@@ -12,25 +13,28 @@ from flask import Response, g, jsonify, request
 from outlook_web import config
 from outlook_web.audit import log_audit
 from outlook_web.db import get_db
-from outlook_web.errors import (
-    build_error_payload,
-    build_error_response,
-    build_export_verify_failure_response,
-)
+from outlook_web.errors import build_error_payload, build_error_response, build_export_verify_failure_response
 from outlook_web.repositories import accounts as accounts_repo
 from outlook_web.repositories import groups as groups_repo
 from outlook_web.repositories import refresh_logs as refresh_logs_repo
 from outlook_web.repositories import settings as settings_repo
 from outlook_web.repositories import tags as tags_repo
-from outlook_web.repositories.distributed_locks import (
-    acquire_distributed_lock,
-    release_distributed_lock,
-)
+from outlook_web.repositories.distributed_locks import acquire_distributed_lock, release_distributed_lock
 from outlook_web.repositories.refresh_runs import create_refresh_run, finish_refresh_run
 from outlook_web.security.auth import get_client_ip, get_user_agent, login_required
 from outlook_web.security.crypto import decrypt_data
 from outlook_web.services import graph as graph_service
+from outlook_web.services import outlook_transport
 from outlook_web.services import refresh as refresh_service
+
+
+def _probe_account_transport(account: Dict[str, Any], proxy_url: str) -> Dict[str, Any]:
+    result = outlook_transport.probe_account(account, proxy_url)
+    return {
+        "account_id": int(account["id"]),
+        "email": str(account.get("email") or ""),
+        "result": result,
+    }
 
 
 def sanitize_input(text: str, max_length: int = 500) -> str:
@@ -891,9 +895,7 @@ def _detect_line_type(
         prov = infer_provider_from_email(email)
         if prov:
             if prov == "outlook":
-                return _err(
-                    "Outlook 两段格式不支持密码直连，请使用 4 段 OAuth 格式：邮箱----密码----client_id----refresh_token"
-                )
+                return _err("Outlook 两段格式不支持密码直连，请使用 4 段 OAuth 格式：邮箱----密码----client_id----refresh_token")
             cfg = MAIL_PROVIDERS.get(prov, {})
             host = cfg.get("imap_host", "")
             port = int(cfg.get("imap_port", 993))
@@ -1014,10 +1016,7 @@ def _handle_temp_mail_import(
 ) -> bool:
     """处理临时邮箱的导入，写入 temp_emails 表。"""
     from outlook_web.repositories import temp_emails as temp_emails_repo
-    from outlook_web.services.temp_mail_service import (
-        TEMP_MAIL_SOURCE,
-        get_temp_mail_service,
-    )
+    from outlook_web.services.temp_mail_service import TEMP_MAIL_SOURCE, get_temp_mail_service
 
     if temp_mail_count >= max_temp_mail:
         errors.append(
@@ -1802,6 +1801,96 @@ def api_batch_delete_accounts() -> Any:
     )
 
 
+@login_required
+def api_probe_mail_methods() -> Any:
+    """Detect Graph/IMAP capability before the first mailbox read."""
+    payload = request.get_json(silent=True) or {}
+    raw_emails = payload.get("emails") or []
+    if not isinstance(raw_emails, list):
+        return build_error_response("INVALID_PARAM", "emails 必须为数组", message_en="emails must be an array")
+
+    emails: List[str] = []
+    seen = set()
+    for item in raw_emails[:200]:
+        email_addr = str(item or "").strip()
+        normalized = email_addr.lower()
+        if email_addr and normalized not in seen:
+            seen.add(normalized)
+            emails.append(email_addr)
+
+    if not emails:
+        return build_error_response("EMAILS_REQUIRED", "请选择要识别的账号", message_en="Select accounts to probe")
+
+    candidates: List[tuple[Dict[str, Any], str]] = []
+    skipped = 0
+    for email_addr in emails:
+        account = accounts_repo.get_account_by_email(email_addr)
+        if not account or str(account.get("account_type") or "outlook").strip().lower() != "outlook":
+            skipped += 1
+            continue
+        proxy_url = ""
+        if account.get("group_id"):
+            group = groups_repo.get_group_by_id(account["group_id"])
+            if group:
+                proxy_url = str(group.get("proxy_url") or "")
+        candidates.append((account, proxy_url))
+
+    detected: List[Dict[str, Any]] = []
+    max_workers = min(6, max(1, len(candidates)))
+    if candidates:
+        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="mail-method-probe") as executor:
+            futures = [executor.submit(_probe_account_transport, account, proxy_url) for account, proxy_url in candidates]
+            for future in as_completed(futures):
+                try:
+                    item = future.result()
+                except Exception as exc:
+                    detected.append({"success": False, "method": "unknown", "message": type(exc).__name__})
+                    continue
+
+                account_id = item["account_id"]
+                email_addr = item["email"]
+                result = item["result"]
+                channel = outlook_transport.normalize_channel(result.get("channel"))
+                new_refresh_token = str(result.get("new_refresh_token") or "").strip()
+                if new_refresh_token:
+                    accounts_repo.update_refresh_token_if_changed(account_id, new_refresh_token)
+                if result.get("success") and channel:
+                    accounts_repo.update_preferred_verification_channel(account_id, channel)
+                detected.append(
+                    {
+                        "account_id": account_id,
+                        "email": email_addr,
+                        "success": bool(result.get("success")),
+                        "method": str(result.get("method_key") or "unknown"),
+                        "channel": channel or "",
+                    }
+                )
+
+    graph_count = sum(1 for item in detected if item.get("method") == "graph")
+    imap_count = sum(1 for item in detected if str(item.get("method") or "").startswith("imap_"))
+    unresolved_count = sum(1 for item in detected if not item.get("success"))
+    log_audit(
+        "probe",
+        "account_mail_method",
+        None,
+        f"邮箱读取方式识别：Graph {graph_count}，IMAP {imap_count}，未识别 {unresolved_count}",
+    )
+    return jsonify(
+        {
+            "success": True,
+            "summary": {
+                "requested": len(emails),
+                "probed": len(detected),
+                "graph": graph_count,
+                "imap": imap_count,
+                "unresolved": unresolved_count,
+                "skipped": skipped,
+            },
+            "results": detected,
+        }
+    )
+
+
 # ==================== 批量操作 API ====================
 
 
@@ -2139,11 +2228,7 @@ def _build_export_text(accounts: List[Dict[str, Any]], temp_emails: Optional[Lis
 @login_required
 def api_export_all_accounts() -> Any:
     """导出所有邮箱账号为 TXT 文件（需要二次验证）"""
-    from outlook_web.security.auth import (
-        consume_export_verify_token,
-        get_client_ip,
-        get_user_agent,
-    )
+    from outlook_web.security.auth import consume_export_verify_token, get_client_ip, get_user_agent
 
     # 从请求头获取二次验证 token（避免 URL 泄露）
     verify_token = request.headers.get("X-Export-Token")
@@ -2195,11 +2280,7 @@ def api_export_all_accounts() -> Any:
 @login_required
 def api_export_selected_accounts() -> Any:
     """导出选中分组的邮箱账号为 TXT 文件（需要二次验证）"""
-    from outlook_web.security.auth import (
-        consume_export_verify_token,
-        get_client_ip,
-        get_user_agent,
-    )
+    from outlook_web.security.auth import consume_export_verify_token, get_client_ip, get_user_agent
 
     data = request.json or {}
     group_ids = data.get("group_ids", [])
@@ -2266,11 +2347,7 @@ def api_export_selected_accounts() -> Any:
 def api_generate_export_verify_token() -> Any:
     """生成导出验证token（二次验证）"""
     from outlook_web.repositories import settings as settings_repo
-    from outlook_web.security.auth import (
-        get_client_ip,
-        get_user_agent,
-        issue_export_verify_token,
-    )
+    from outlook_web.security.auth import get_client_ip, get_user_agent, issue_export_verify_token
     from outlook_web.security.crypto import verify_password
 
     data = request.json
@@ -2564,7 +2641,8 @@ def api_get_failed_refresh_logs() -> Any:
     db = get_db()
 
     # 获取每个账号最近一次失败的刷新记录
-    cursor = db.execute("""
+    cursor = db.execute(
+        """
         SELECT l.*, a.email as account_email, a.status as account_status
         FROM account_refresh_logs l
         INNER JOIN (
@@ -2575,7 +2653,8 @@ def api_get_failed_refresh_logs() -> Any:
         LEFT JOIN accounts a ON l.account_id = a.id
         WHERE l.status = 'failed'
         ORDER BY l.created_at DESC
-    """)
+    """
+    )
 
     logs = []
     for row in cursor.fetchall():
@@ -2677,22 +2756,27 @@ def api_get_refresh_stats() -> Any:
     """获取刷新统计信息（统计当前失败状态的邮箱数量）"""
     db = get_db()
 
-    cursor = db.execute("""
+    cursor = db.execute(
+        """
         SELECT MAX(created_at) as last_refresh_time
         FROM account_refresh_logs
         WHERE refresh_type IN ('manual', 'manual_all', 'scheduled', 'retry')
-    """)
+    """
+    )
     row = cursor.fetchone()
     last_refresh_time = row["last_refresh_time"] if row else None
 
-    cursor = db.execute("""
+    cursor = db.execute(
+        """
         SELECT COUNT(*) as total_accounts
         FROM accounts
         WHERE status = 'active'
-    """)
+    """
+    )
     total_accounts = cursor.fetchone()["total_accounts"]
 
-    cursor = db.execute("""
+    cursor = db.execute(
+        """
         SELECT COUNT(DISTINCT l.account_id) as failed_count
         FROM account_refresh_logs l
         INNER JOIN (
@@ -2702,7 +2786,8 @@ def api_get_refresh_stats() -> Any:
         ) latest ON l.account_id = latest.account_id AND l.created_at = latest.last_refresh
         INNER JOIN accounts a ON l.account_id = a.id
         WHERE l.status = 'failed' AND a.status = 'active'
-    """)
+    """
+    )
     failed_count = cursor.fetchone()["failed_count"]
 
     return jsonify(

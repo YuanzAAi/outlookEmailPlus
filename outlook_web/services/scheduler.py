@@ -21,10 +21,7 @@ from outlook_web import config
 from outlook_web.db import create_sqlite_connection
 from outlook_web.errors import generate_trace_id
 from outlook_web.repositories import settings as settings_repo
-from outlook_web.repositories.distributed_locks import (
-    acquire_distributed_lock,
-    release_distributed_lock,
-)
+from outlook_web.repositories.distributed_locks import acquire_distributed_lock, release_distributed_lock
 from outlook_web.repositories.refresh_runs import create_refresh_run, finish_refresh_run
 from outlook_web.security.crypto import decrypt_data, encrypt_data
 
@@ -157,10 +154,7 @@ def _configure_email_notification_job(scheduler, app) -> None:
 
 def _configure_probe_poll_job(scheduler, app) -> None:
     """P2: 注册异步探测轮询 Job。每 5 秒执行一次，处理 pending 探测并清理过期记录。"""
-    from outlook_web.services.external_api import (
-        cleanup_expired_probes,
-        poll_pending_probes,
-    )
+    from outlook_web.services.external_api import cleanup_expired_probes, poll_pending_probes
 
     try:
         scheduler.remove_job("external_probe_poll")
@@ -186,6 +180,43 @@ def _configure_probe_poll_job(scheduler, app) -> None:
         misfire_grace_time=10,
     )
     print("✓ 对外 API 异步探测 Job 已配置（轮询间隔：5 秒）")
+
+
+def _configure_temp_mail_address_sync_job(scheduler, app) -> None:
+    """只同步 CF 临时邮箱地址元数据，并保持远端 HTTP 连接热状态。"""
+    try:
+        interval = int(str(os.getenv("TEMP_MAIL_ADDRESS_SYNC_INTERVAL", "15")).strip() or "15")
+    except (TypeError, ValueError):
+        interval = 15
+    interval = max(5, min(interval, 300))
+
+    try:
+        scheduler.remove_job("temp_mail_address_sync")
+    except Exception:
+        pass
+
+    def _sync_task():
+        try:
+            with app.app_context():
+                from outlook_web.services.temp_mail_service import get_temp_mail_service
+
+                get_temp_mail_service().sync_remote_mailboxes(force=True)
+        except Exception:
+            pass
+
+    scheduler.add_job(
+        func=_sync_task,
+        trigger="interval",
+        seconds=interval,
+        id="temp_mail_address_sync",
+        name="CF 临时邮箱地址同步",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=interval,
+        next_run_time=datetime.now(),
+    )
+    print(f"✓ CF 临时邮箱地址同步 Job 已配置（间隔：{interval} 秒）")
 
 
 def _configure_pool_maintenance_jobs(scheduler) -> None:
@@ -291,6 +322,7 @@ def configure_scheduler_jobs(scheduler, app, test_refresh_token) -> None:
 
     _configure_email_notification_job(scheduler, app)
     _configure_probe_poll_job(scheduler, app)
+    _configure_temp_mail_address_sync_job(scheduler, app)
     _configure_pool_maintenance_jobs(scheduler)
 
     # 刷新 Job：根据 enable_scheduled 决定是否启用
@@ -398,7 +430,8 @@ def scheduled_refresh_task(app, test_refresh_token):
 
         # 按天数策略：未到周期则跳过（不产生账号级刷新日志）
         if not use_cron:
-            row = conn.execute("""
+            row = conn.execute(
+                """
                 SELECT finished_at
                 FROM refresh_runs
                 WHERE trigger_source = 'scheduled'
@@ -406,7 +439,8 @@ def scheduled_refresh_task(app, test_refresh_token):
                   AND finished_at IS NOT NULL
                 ORDER BY finished_at DESC
                 LIMIT 1
-            """).fetchone()
+            """
+            ).fetchone()
 
             if row and row["finished_at"]:
                 try:
@@ -441,12 +475,14 @@ def scheduled_refresh_task(app, test_refresh_token):
             pass
 
         # PRD-00005 / TDD-00005：定时刷新只处理 Outlook 账号（IMAP 账号无 OAuth token 刷新语义）
-        accounts = conn.execute("""
+        accounts = conn.execute(
+            """
             SELECT id, email, client_id, refresh_token, group_id
             FROM accounts
             WHERE status = 'active'
               AND (account_type = 'outlook' OR account_type IS NULL)
-        """).fetchall()
+        """
+        ).fetchall()
         total = len(accounts)
 
         # 更新 run_id 的 total

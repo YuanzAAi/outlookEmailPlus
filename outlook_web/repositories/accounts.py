@@ -120,12 +120,14 @@ def load_accounts(group_id: int = None) -> List[Dict]:
             (group_id,),
         )
     else:
-        cursor = db.execute("""
+        cursor = db.execute(
+            """
             SELECT a.*, g.name as group_name, g.color as group_color
             FROM accounts a
             LEFT JOIN groups g ON a.group_id = g.id
             ORDER BY a.created_at DESC
-        """)
+        """
+        )
     rows = cursor.fetchall()
     return _hydrate_accounts(rows, db)
 
@@ -146,7 +148,8 @@ def _build_account_list_where(
     normalized_search = str(search or "").strip().lower()
     if normalized_search:
         like_value = f"%{normalized_search}%"
-        where_clauses.append("""
+        where_clauses.append(
+            """
             (
                 LOWER(COALESCE(a.email, '')) LIKE ?
                 OR LOWER(COALESCE(a.remark, '')) LIKE ?
@@ -158,20 +161,23 @@ def _build_account_list_where(
                       AND LOWER(COALESCE(t_search.name, '')) LIKE ?
                 )
             )
-            """)
+            """
+        )
         params.extend([like_value, like_value, like_value])
 
     normalized_tag_ids = [int(tag_id) for tag_id in tag_ids if int(tag_id) > 0]
     if normalized_tag_ids:
         placeholders = ",".join(["?"] * len(normalized_tag_ids))
-        where_clauses.append(f"""
+        where_clauses.append(
+            f"""
             EXISTS (
                 SELECT 1
                 FROM account_tags at_filter
                 WHERE at_filter.account_id = a.id
                   AND at_filter.tag_id IN ({placeholders})
             )
-            """)
+            """
+        )
         params.extend(normalized_tag_ids)
 
     if not where_clauses:
@@ -251,7 +257,7 @@ def load_accounts_page(
 def get_account_by_email(email_addr: str) -> Optional[Dict]:
     """根据邮箱地址获取账号（自动解密敏感字段）"""
     db = get_db()
-    cursor = db.execute("SELECT * FROM accounts WHERE email = ?", (email_addr,))
+    cursor = db.execute("SELECT * FROM accounts WHERE email = ? COLLATE NOCASE", (email_addr,))
     row = cursor.fetchone()
     if not row:
         return None
@@ -710,11 +716,13 @@ def update_telegram_cursor(account_id: int, checked_at: str) -> None:
 def get_telegram_push_accounts() -> List[Dict]:
     """返回所有 telegram_push_enabled=1 且处于 active 状态的账号。"""
     db = get_db()
-    rows = db.execute("""SELECT a.id, a.email, a.account_type, a.provider, a.client_id, a.refresh_token,
+    rows = db.execute(
+        """SELECT a.id, a.email, a.account_type, a.provider, a.client_id, a.refresh_token,
                   a.imap_host, a.imap_port, a.imap_password,
                   a.telegram_last_checked_at, a.group_id,
                   g.proxy_url
            FROM accounts a
            LEFT JOIN groups g ON a.group_id = g.id
-           WHERE a.telegram_push_enabled = 1 AND a.status = 'active'""").fetchall()
+           WHERE a.telegram_push_enabled = 1 AND a.status = 'active'"""
+    ).fetchall()
     return [dict(r) for r in rows]

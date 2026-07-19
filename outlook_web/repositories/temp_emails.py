@@ -245,7 +245,7 @@ def load_temp_emails(
 def get_temp_email_by_address(email_addr: str, *, view: str = "record") -> Optional[Dict]:
     """根据邮箱地址获取临时邮箱"""
     db = get_db()
-    cursor = db.execute("SELECT * FROM temp_emails WHERE email = ?", (email_addr,))
+    cursor = db.execute("SELECT * FROM temp_emails WHERE email = ? COLLATE NOCASE", (email_addr,))
     row = cursor.fetchone()
     if not row:
         return None
@@ -298,6 +298,8 @@ def create_temp_email(
         domain if domain is not None else (normalized_email.split("@", 1)[1] if "@" in normalized_email else None)
     )
     normalized_source = str(source or DEFAULT_TEMP_MAIL_SOURCE).strip() or DEFAULT_TEMP_MAIL_SOURCE
+    if get_temp_email_by_address(normalized_email):
+        return False
     normalized_meta_source = meta if meta is not None else meta_json
     normalized_meta_json = serialize_temp_email_meta(
         normalized_meta_source,
@@ -337,6 +339,50 @@ def create_temp_email(
         return False
 
 
+def update_temp_email_provider_meta(
+    email_addr: str,
+    meta: Dict[str, Any],
+    *,
+    provider_name: Optional[str] = None,
+) -> bool:
+    """合并 Provider 元数据，空凭据不会覆盖既有有效值。"""
+    record = get_temp_email_by_address(email_addr)
+    if not record:
+        return False
+
+    source = str(record.get("source") or DEFAULT_TEMP_MAIL_SOURCE)
+    existing = deserialize_temp_email_meta(record.get("meta_json"), source=source)
+    incoming = deserialize_temp_email_meta(meta, source=source)
+    merged = dict(existing)
+    merged["provider_name"] = str(provider_name or incoming.get("provider_name") or existing.get("provider_name") or "")
+    for key in ("provider_mailbox_id", "provider_jwt", "provider_cursor"):
+        incoming_value = str(incoming.get(key) or "").strip()
+        if incoming_value:
+            merged[key] = incoming_value
+    if incoming.get("provider_labels"):
+        merged["provider_labels"] = incoming["provider_labels"]
+    merged["provider_capabilities"] = {
+        **(existing.get("provider_capabilities") or {}),
+        **(incoming.get("provider_capabilities") or {}),
+    }
+    merged["provider_debug"] = {
+        **(existing.get("provider_debug") or {}),
+        **(incoming.get("provider_debug") or {}),
+    }
+
+    db = get_db()
+    cursor = db.execute(
+        """
+        UPDATE temp_emails
+        SET meta_json = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE email = ? COLLATE NOCASE
+        """,
+        (serialize_temp_email_meta(merged, source=source), email_addr),
+    )
+    db.commit()
+    return cursor.rowcount > 0
+
+
 def add_temp_email(email_addr: str) -> bool:
     """兼容旧调用：添加用户可见临时邮箱。"""
     return create_temp_email(email_addr=email_addr)
@@ -360,8 +406,8 @@ def delete_temp_email(email_addr: str) -> bool:
     """删除临时邮箱及其所有邮件"""
     db = get_db()
     try:
-        db.execute("DELETE FROM temp_email_messages WHERE email_address = ?", (email_addr,))
-        db.execute("DELETE FROM temp_emails WHERE email = ?", (email_addr,))
+        db.execute("DELETE FROM temp_email_messages WHERE email_address = ? COLLATE NOCASE", (email_addr,))
+        db.execute("DELETE FROM temp_emails WHERE email = ? COLLATE NOCASE", (email_addr,))
         db.commit()
         return True
     except Exception:
@@ -447,7 +493,7 @@ def get_temp_email_messages(email_addr: str) -> List[Dict]:
     cursor = db.execute(
         """
         SELECT * FROM temp_email_messages
-        WHERE email_address = ?
+        WHERE email_address = ? COLLATE NOCASE
         ORDER BY timestamp DESC
         """,
         (email_addr,),
@@ -463,7 +509,7 @@ def get_temp_email_message_by_id(message_id: str, *, email_addr: Optional[str] =
         cursor = db.execute(
             """
             SELECT * FROM temp_email_messages
-            WHERE email_address = ? AND message_id = ?
+            WHERE email_address = ? COLLATE NOCASE AND message_id = ?
             LIMIT 1
             """,
             (email_addr, message_id),
@@ -488,7 +534,7 @@ def delete_temp_email_message(message_id: str, *, email_addr: Optional[str] = No
     try:
         if email_addr:
             db.execute(
-                "DELETE FROM temp_email_messages WHERE email_address = ? AND message_id = ?",
+                "DELETE FROM temp_email_messages WHERE email_address = ? COLLATE NOCASE AND message_id = ?",
                 (email_addr, message_id),
             )
         else:

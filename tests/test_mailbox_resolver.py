@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 import uuid
+from unittest.mock import MagicMock, patch
 
 from tests._import_app import clear_login_attempts, import_web_app_module
 
@@ -53,6 +54,34 @@ class MailboxResolverTests(unittest.TestCase):
         self.assertEqual(mailbox["email"], "user@resolver.test")
         self.assertEqual(mailbox["read_capability"], "graph")
 
+    def test_resolve_mailbox_is_case_insensitive_and_returns_stored_account_email(self):
+        with self.app.app_context():
+            from outlook_web.db import get_db
+            from outlook_web.services import mailbox_resolver
+
+            db = get_db()
+            db.execute(
+                """
+                INSERT INTO accounts (email, password, client_id, refresh_token, group_id, status, account_type, provider)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "StoredCase@resolver.test",
+                    "pw",
+                    "cid",
+                    "rt",
+                    1,
+                    "active",
+                    "outlook",
+                    "outlook",
+                ),
+            )
+            db.commit()
+
+            mailbox = mailbox_resolver.resolve_mailbox("storedcase@RESOLVER.TEST")
+
+        self.assertEqual(mailbox["email"], "StoredCase@resolver.test")
+
     def test_resolve_mailbox_supports_plus_alias_lookup(self):
         with self.app.app_context():
             from outlook_web.db import get_db
@@ -99,6 +128,45 @@ class MailboxResolverTests(unittest.TestCase):
         self.assertEqual(mailbox["kind"], "temp")
         self.assertEqual(mailbox["email"], "temp@resolver.test")
         self.assertEqual(mailbox["read_capability"], "temp_provider")
+
+    def test_resolve_temp_mailbox_preserves_plus_address_and_ignores_case(self):
+        with self.app.app_context():
+            from outlook_web.repositories import temp_emails as temp_emails_repo
+            from outlook_web.services import mailbox_resolver
+
+            temp_emails_repo.create_temp_email(
+                email_addr="User+Flow@resolver.test",
+                mailbox_type="user",
+                visible_in_ui=True,
+                source="custom_domain_temp_mail",
+            )
+
+            mailbox = mailbox_resolver.resolve_mailbox("user+flow@RESOLVER.TEST")
+
+        self.assertEqual(mailbox["kind"], "temp")
+        self.assertEqual(mailbox["email"], "User+Flow@resolver.test")
+
+    def test_resolve_unknown_managed_domain_uses_exact_remote_discovery(self):
+        with self.app.app_context():
+            from outlook_web.services import mailbox_resolver
+
+            fake_service = MagicMock()
+            fake_service.is_managed_email.return_value = True
+            fake_service.discover_user_mailbox.return_value = {
+                "kind": "temp",
+                "email": "remote@managed.test",
+                "provider_name": "cloudflare_temp_mail",
+                "mailbox_type": "user",
+                "visible_in_ui": True,
+                "status": "active",
+                "read_capability": "temp_provider",
+                "meta": {"provider_jwt": "jwt"},
+            }
+            with patch.object(mailbox_resolver, "_temp_mail_service", return_value=fake_service):
+                mailbox = mailbox_resolver.resolve_mailbox("REMOTE@managed.test")
+
+        self.assertEqual(mailbox["email"], "remote@managed.test")
+        fake_service.discover_user_mailbox.assert_called_once_with("REMOTE@managed.test")
 
     def test_resolve_mailbox_conflict_raises_mailbox_conflict_error(self):
         with self.app.app_context():

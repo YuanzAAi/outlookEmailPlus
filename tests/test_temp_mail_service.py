@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from tests._import_app import clear_login_attempts, import_web_app_module
 
@@ -9,6 +10,7 @@ class _FakeTempMailProvider:
     def __init__(self):
         self.generated = []
         self.list_payload = []
+        self.list_calls = 0
         self.detail_payload = {}
         self.list_exception = None
         self.detail_exception = None
@@ -36,6 +38,7 @@ class _FakeTempMailProvider:
         return {"success": True, "email": email_addr}
 
     def list_messages(self, email_addr):
+        self.list_calls += 1
         if self.list_exception is not None:
             raise self.list_exception
         return list(self.list_payload)
@@ -52,6 +55,28 @@ class _FakeTempMailProvider:
         return self.clear_result
 
 
+class _FakeCloudflareProvider(_FakeTempMailProvider):
+    provider_name = "cloudflare_temp_mail"
+
+    def __init__(self):
+        super().__init__()
+        self.discovered = None
+        self.discover_calls = 0
+        self.remote_rows = []
+        self.remote_exception = None
+
+    def discover_mailbox(self, email_addr):
+        self.discover_calls += 1
+        return dict(self.discovered) if self.discovered else None
+
+    def list_remote_mailboxes(self, *, after_id=0, limit=200):
+        if self.remote_exception is not None:
+            raise self.remote_exception
+        rows = [row for row in self.remote_rows if int(row.get("id") or 0) > int(after_id or 0)][:limit]
+        next_cursor = max([int(after_id or 0)] + [int(row.get("id") or 0) for row in rows])
+        return {"results": rows, "next_cursor": next_cursor, "supported": True}
+
+
 class TempMailServiceTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -66,6 +91,9 @@ class TempMailServiceTests(unittest.TestCase):
             db = get_db()
             db.execute("DELETE FROM temp_email_messages WHERE email_address LIKE '%@service.test'")
             db.execute("DELETE FROM temp_emails WHERE email LIKE '%@service.test'")
+            db.execute("DELETE FROM temp_email_messages WHERE email_address LIKE '%@cf-mail.example.com'")
+            db.execute("DELETE FROM temp_emails WHERE email LIKE '%@cf-mail.example.com'")
+            db.execute("DELETE FROM settings WHERE key = 'cf_worker_address_sync_cursor'")
             db.commit()
 
     def test_generate_user_mailbox_persists_prefix_domain_and_visibility(self):
@@ -82,6 +110,122 @@ class TempMailServiceTests(unittest.TestCase):
         self.assertEqual(mailbox["domain"], "mail.service.test")
         self.assertTrue(mailbox["visible_in_ui"])
         self.assertEqual(mailbox["created_by"], "user")
+
+    def test_cloudflare_discovery_imports_exact_remote_mailbox_with_credentials(self):
+        with self.app.app_context():
+            from outlook_web.repositories import temp_emails as temp_emails_repo
+            from outlook_web.services.temp_mail_service import TempMailService
+
+            provider = _FakeCloudflareProvider()
+            provider.discovered = {
+                "success": True,
+                "email": "mixedcase@cf-mail.example.com",
+                "provider_name": "cloudflare_temp_mail",
+                "meta": {
+                    "provider_name": "cloudflare_temp_mail",
+                    "provider_mailbox_id": "42",
+                    "provider_jwt": "jwt-42",
+                },
+            }
+            service = TempMailService(provider=provider)
+
+            mailbox = service.discover_user_mailbox("MixedCase@cf-mail.example.com")
+            stored = temp_emails_repo.get_temp_email_by_address("MIXEDCASE@CF-MAIL.EXAMPLE.COM")
+
+        self.assertEqual(mailbox["email"], "mixedcase@cf-mail.example.com")
+        self.assertEqual(stored["meta_json"]["provider_jwt"], "jwt-42")
+        self.assertEqual(provider.discover_calls, 1)
+
+    def test_cloudflare_import_does_not_create_missing_remote_mailbox(self):
+        with self.app.app_context():
+            from outlook_web.services.temp_mail_service import TempMailError, TempMailService
+
+            provider = _FakeCloudflareProvider()
+            service = TempMailService(provider=provider)
+
+            with self.assertRaises(TempMailError) as ctx:
+                service.import_user_mailbox("missing@cf-mail.example.com", allow_local_fallback=True)
+
+        self.assertEqual(ctx.exception.code, "TEMP_EMAIL_NOT_FOUND")
+        self.assertEqual(provider.generated, [])
+
+    def test_cloudflare_address_sync_imports_metadata_without_reading_messages(self):
+        with self.app.app_context():
+            from outlook_web.repositories import settings as settings_repo
+            from outlook_web.repositories import temp_emails as temp_emails_repo
+            from outlook_web.services.temp_mail_service import TempMailService
+
+            provider = _FakeCloudflareProvider()
+            provider.remote_rows = [
+                {"id": 10, "name": "first@cf-mail.example.com"},
+                {"id": 11, "name": "second@cf-mail.example.com"},
+            ]
+            service = TempMailService(provider=provider)
+
+            imported = service.sync_remote_mailboxes(force=True)
+            first = temp_emails_repo.get_temp_email_by_address("FIRST@cf-mail.example.com")
+            cursor = settings_repo.get_setting("cf_worker_address_sync_cursor")
+
+        self.assertEqual(imported, 2)
+        self.assertEqual(first["meta_json"]["provider_mailbox_id"], "10")
+        self.assertEqual(cursor, "11")
+        self.assertEqual(provider.list_calls, 0)
+
+    def test_cloudflare_address_sync_logs_repeated_failure_once_per_interval(self):
+        with self.app.app_context():
+            from outlook_web.services.temp_mail_provider_custom import TempMailProviderReadError
+            from outlook_web.services.temp_mail_service import TempMailService
+
+            provider = _FakeCloudflareProvider()
+            provider.remote_exception = TempMailProviderReadError("UPSTREAM_TIMEOUT", "worker timeout")
+            service = TempMailService(provider=provider)
+
+            with patch("outlook_web.services.temp_mail_service.logger.warning") as warning_mock:
+                service.sync_remote_mailboxes(force=True)
+                service.sync_remote_mailboxes(force=True)
+
+        warning_mock.assert_called_once()
+
+    def test_cloudflare_list_fills_missing_jwt_and_coalesces_duplicate_sync(self):
+        with self.app.app_context():
+            from outlook_web.repositories import temp_emails as temp_emails_repo
+            from outlook_web.services.temp_mail_service import TempMailService
+
+            provider = _FakeCloudflareProvider()
+            provider.discovered = {
+                "success": True,
+                "email": "codes@cf-mail.example.com",
+                "provider_name": "cloudflare_temp_mail",
+                "meta": {
+                    "provider_name": "cloudflare_temp_mail",
+                    "provider_mailbox_id": "55",
+                    "provider_jwt": "jwt-55",
+                },
+            }
+            provider.list_payload = [
+                {
+                    "id": "cf_1",
+                    "from_address": "noreply@example.com",
+                    "subject": "Code",
+                    "content": "778899",
+                    "timestamp": 1711111111,
+                }
+            ]
+            temp_emails_repo.create_temp_email(
+                email_addr="codes@cf-mail.example.com",
+                source="custom_domain_temp_mail",
+                provider_name="cloudflare_temp_mail",
+                meta={"provider_name": "cloudflare_temp_mail", "provider_mailbox_id": "55"},
+            )
+            service = TempMailService(provider=provider)
+
+            first = service.list_messages("CODES@CF-MAIL.EXAMPLE.COM", sync_remote=True)
+            second = service.list_messages("codes@cf-mail.example.com", sync_remote=True)
+
+        self.assertEqual(first[0]["id"], "cf_1")
+        self.assertEqual(second[0]["id"], "cf_1")
+        self.assertEqual(provider.discover_calls, 1)
+        self.assertEqual(provider.list_calls, 1)
 
     def test_apply_and_finish_task_mailbox_records_task_fields(self):
         with self.app.app_context():
