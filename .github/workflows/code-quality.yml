@@ -7,12 +7,14 @@ on:
       - "**.py"
       - "pyproject.toml"
       - "requirements.txt"
+      - "scripts/check-changed-python-format.sh"
       - ".github/workflows/code-quality.yml"
   pull_request:
     paths:
       - "**.py"
       - "pyproject.toml"
       - "requirements.txt"
+      - "scripts/check-changed-python-format.sh"
       - ".github/workflows/code-quality.yml"
   workflow_dispatch:
 
@@ -23,6 +25,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -36,10 +40,9 @@ jobs:
           pip install flake8 black isort mypy
 
       - name: Run Black (Code Formatter Check)
-        run: black --check --diff outlook_web tests web_outlook_app.py outlook_mail_reader.py start.py
-
-      - name: Run isort (Import Sorting Check)
-        run: isort --check-only --diff --profile black outlook_web tests web_outlook_app.py outlook_mail_reader.py start.py
+        env:
+          FORMAT_BASE_SHA: ${{ github.event.before || github.event.pull_request.base.sha || '' }}
+        run: bash scripts/check-changed-python-format.sh
 
       - name: Run Flake8 (Linting)
         run: flake8 outlook_web tests web_outlook_app.py outlook_mail_reader.py start.py --count --select=E9,F63,F7,F82 --show-source --statistics

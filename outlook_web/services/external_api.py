@@ -11,6 +11,8 @@ from outlook_web.repositories import accounts as accounts_repo
 from outlook_web.repositories import external_api_keys as external_api_keys_repo
 from outlook_web.repositories import groups as groups_repo
 from outlook_web.security.auth import get_external_api_consumer
+from outlook_web.services import graph as graph_service  # noqa: F401 - 保留旧版补丁入口
+from outlook_web.services import imap as imap_service  # noqa: F401 - 保留旧版补丁入口
 from outlook_web.services import mailbox_resolver, outlook_transport
 from outlook_web.services import verification_channel_routing as verification_channel_service
 from outlook_web.services.imap_generic import get_email_detail_imap_generic_result, get_emails_imap_generic

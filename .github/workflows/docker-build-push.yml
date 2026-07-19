@@ -13,6 +13,7 @@ on:
       - 'pyproject.toml'
       - 'requirements.txt'
       - 'Dockerfile'
+      - 'scripts/**'
       - 'templates/**'
       - 'static/**'
       - '.github/workflows/docker-build-push.yml'
@@ -22,6 +23,10 @@ env:
   # Docker Hub（可选）：需要配置仓库 Secrets：DOCKERHUB_USERNAME / DOCKERHUB_TOKEN
   DOCKERHUB_IMAGE: guangshanshui/outlook-email-plus
 
+concurrency:
+  group: docker-build-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   quality-gate:
     runs-on: ubuntu-latest
@@ -29,6 +34,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -47,9 +54,9 @@ jobs:
           pip install flake8 black isort mypy bandit[toml]
 
       - name: Run formatter checks
-        run: |
-          black --check outlook_web tests web_outlook_app.py outlook_mail_reader.py start.py
-          isort --check-only --profile black outlook_web tests web_outlook_app.py outlook_mail_reader.py start.py
+        env:
+          FORMAT_BASE_SHA: ${{ github.event.before || github.event.pull_request.base.sha || '' }}
+        run: bash scripts/check-changed-python-format.sh
 
       - name: Run static analysis gate
         run: |
@@ -63,8 +70,49 @@ jobs:
       - name: Run publish gate tests
         run: python -m unittest discover -s tests -v
 
-  build-and-push:
+  image-smoke:
     needs: quality-gate
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build smoke-test image
+        run: docker build --pull -t outlook-email-plus:smoke .
+
+      - name: Verify container health
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run -d --name outlook-email-plus-smoke \
+            -e SECRET_KEY=smoke-test-secret-key-00000000000000000000000000000000 \
+            -p 127.0.0.1:5000:5000 \
+            outlook-email-plus:smoke
+          for _ in $(seq 1 40); do
+            status="$(docker inspect --format '{{.State.Health.Status}}' outlook-email-plus-smoke 2>/dev/null || true)"
+            if [ "$status" = "healthy" ]; then
+              curl --fail --silent --show-error http://127.0.0.1:5000/healthz
+              exit 0
+            fi
+            if [ "$status" = "unhealthy" ]; then
+              docker logs outlook-email-plus-smoke
+              exit 1
+            fi
+            sleep 3
+          done
+          docker logs outlook-email-plus-smoke
+          echo "container did not become healthy in time" >&2
+          exit 1
+
+      - name: Clean smoke-test resources
+        if: always()
+        run: |
+          docker rm -f outlook-email-plus-smoke 2>/dev/null || true
+          docker image rm outlook-email-plus:smoke 2>/dev/null || true
+
+  build-and-push:
+    needs: [quality-gate, image-smoke]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -82,14 +130,14 @@ jobs:
         shell: bash
         run: |
           # GHCR 要求小写
-          echo "ghcr_image=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/outlook-email-plus" >> "$GITHUB_OUTPUT"
+          echo "ghcr_image=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/outlook-email-plus-patch" >> "$GITHUB_OUTPUT"
 
           if [ -n "${{ secrets.DOCKERHUB_USERNAME }}" ] && [ -n "${{ secrets.DOCKERHUB_TOKEN }}" ]; then
             echo "dockerhub_enabled=true" >> "$GITHUB_OUTPUT"
-            echo "images=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/outlook-email-plus,${{ env.DOCKERHUB_IMAGE }}" >> "$GITHUB_OUTPUT"
+            echo "images=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/outlook-email-plus-patch,${{ env.DOCKERHUB_IMAGE }}" >> "$GITHUB_OUTPUT"
           else
             echo "dockerhub_enabled=false" >> "$GITHUB_OUTPUT"
-            echo "images=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/outlook-email-plus" >> "$GITHUB_OUTPUT"
+            echo "images=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/outlook-email-plus-patch" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Log in to GHCR
@@ -132,3 +180,60 @@ jobs:
 
       - name: Image digest
         run: echo ${{ steps.build.outputs.digest }}
+
+  report-publish-status:
+    if: always()
+    needs: [quality-gate, image-smoke, build-and-push]
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+
+    steps:
+      - name: Create, update, or close the publish failure issue
+        uses: actions/github-script@v7
+        env:
+          QUALITY_RESULT: ${{ needs.quality-gate.result }}
+          SMOKE_RESULT: ${{ needs.image-smoke.result }}
+          PUBLISH_RESULT: ${{ needs.build-and-push.result }}
+        with:
+          script: |
+            const title = '[自动发布失败] outlook-email-plus 镜像未更新';
+            const results = {
+              quality: process.env.QUALITY_RESULT,
+              smoke: process.env.SMOKE_RESULT,
+              publish: process.env.PUBLISH_RESULT,
+            };
+            const failed = Object.values(results).some((value) => value !== 'success');
+            const { owner, repo } = context.repo;
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
+              owner,
+              repo,
+              state: 'open',
+              per_page: 100,
+            });
+            const existing = issues.find((issue) => !issue.pull_request && issue.title === title);
+            const details = `Workflow: ${context.workflow}\nRun: ${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}\nCommit: ${context.sha}\nResults: ${JSON.stringify(results)}`;
+
+            if (failed) {
+              if (existing) {
+                await github.rest.issues.createComment({ owner, repo, issue_number: existing.number, body: details });
+              } else {
+                await github.rest.issues.create({
+                  owner,
+                  repo,
+                  title,
+                  body: `发布质量门、镜像健康检查或 GHCR 推送失败。生产环境应继续使用上一个健康镜像。\n\n${details}`,
+                });
+              }
+              return;
+            }
+
+            if (existing) {
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number: existing.number,
+                body: `后续发布已恢复。\n\n${details}`,
+              });
+              await github.rest.issues.update({ owner, repo, issue_number: existing.number, state: 'closed' });
+            }

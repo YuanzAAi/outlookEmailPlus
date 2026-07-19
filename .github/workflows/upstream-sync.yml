@@ -1,0 +1,170 @@
+name: Sync Upstream Safely
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+  issues: write
+
+concurrency:
+  group: upstream-sync-main
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    outputs:
+      updated: ${{ steps.detect.outputs.updated }}
+
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch upstream main
+        run: |
+          git remote add upstream https://github.com/ZeroPointSix/outlookEmailPlus.git
+          git fetch --no-tags upstream main
+
+      - name: Detect upstream changes
+        id: detect
+        shell: bash
+        run: |
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "updated=false" >> "$GITHUB_OUTPUT"
+            echo "Fork already contains upstream/main" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "updated=true" >> "$GITHUB_OUTPUT"
+            echo "Upstream changes detected: $(git rev-parse --short upstream/main)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Merge upstream into fork
+        if: steps.detect.outputs.updated == 'true'
+        run: git merge --no-ff --no-edit upstream/main
+
+      - name: Set up Python
+        if: steps.detect.outputs.updated == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install quality dependencies
+        if: steps.detect.outputs.updated == 'true'
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install coverage flake8 black isort mypy bandit[toml]
+
+      - name: Run quality gate
+        if: steps.detect.outputs.updated == 'true'
+        run: |
+          python -m compileall -q outlook_web web_outlook_app.py outlook_mail_reader.py start.py tests
+          FORMAT_BASE_SHA=HEAD^1 bash scripts/check-changed-python-format.sh
+          flake8 outlook_web tests web_outlook_app.py outlook_mail_reader.py start.py --count --select=E9,F63,F7,F82 --show-source --statistics
+          flake8 outlook_web/repositories/settings.py outlook_web/services/external_api.py outlook_web/controllers/system.py web_outlook_app.py --count --max-complexity=10 --max-line-length=127 --statistics
+          mypy --config-file pyproject.toml outlook_web/repositories/settings.py outlook_web/services/external_api.py outlook_web/controllers/system.py web_outlook_app.py
+          bandit -r outlook_web web_outlook_app.py outlook_mail_reader.py start.py -lll
+          coverage run -m unittest discover -s tests -v
+          coverage report
+
+      - name: Build and verify candidate image
+        if: steps.detect.outputs.updated == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker build --pull -t outlook-email-plus:upstream-sync .
+          docker run -d --name outlook-email-plus-upstream-sync \
+            -e SECRET_KEY=smoke-test-secret-key-00000000000000000000000000000000 \
+            -p 127.0.0.1:5000:5000 \
+            outlook-email-plus:upstream-sync
+          for _ in $(seq 1 40); do
+            status="$(docker inspect --format '{{.State.Health.Status}}' outlook-email-plus-upstream-sync 2>/dev/null || true)"
+            if [ "$status" = "healthy" ]; then
+              curl --fail --silent --show-error http://127.0.0.1:5000/healthz
+              exit 0
+            fi
+            if [ "$status" = "unhealthy" ]; then
+              docker logs outlook-email-plus-upstream-sync
+              exit 1
+            fi
+            sleep 3
+          done
+          docker logs outlook-email-plus-upstream-sync
+          echo "candidate container did not become healthy in time" >&2
+          exit 1
+
+      - name: Clean candidate resources
+        if: always() && steps.detect.outputs.updated == 'true'
+        run: |
+          docker rm -f outlook-email-plus-upstream-sync 2>/dev/null || true
+          docker image rm outlook-email-plus:upstream-sync 2>/dev/null || true
+
+      - name: Push verified merge
+        if: steps.detect.outputs.updated == 'true'
+        run: git push origin HEAD:main
+
+      - name: Trigger verified GHCR build
+        if: steps.detect.outputs.updated == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run docker-build-push.yml --ref main
+
+  report-sync-status:
+    if: always() && (needs.sync.result == 'failure' || needs.sync.outputs.updated == 'true')
+    needs: sync
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+
+    steps:
+      - name: Create, update, or close the sync failure issue
+        uses: actions/github-script@v7
+        env:
+          SYNC_RESULT: ${{ needs.sync.result }}
+        with:
+          script: |
+            const title = '[上游同步失败] 需要人工处理';
+            const failed = process.env.SYNC_RESULT !== 'success';
+            const { owner, repo } = context.repo;
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
+              owner,
+              repo,
+              state: 'open',
+              per_page: 100,
+            });
+            const existing = issues.find((issue) => !issue.pull_request && issue.title === title);
+            const details = `Workflow: ${context.workflow}\nRun: ${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}\nFork commit: ${context.sha}`;
+
+            if (failed) {
+              if (existing) {
+                await github.rest.issues.createComment({ owner, repo, issue_number: existing.number, body: details });
+              } else {
+                await github.rest.issues.create({
+                  owner,
+                  repo,
+                  title,
+                  body: `自动合并、测试、镜像健康检查或推送失败。main 与生产镜像均不会被本次失败流程替换。\n\n${details}`,
+                });
+              }
+              return;
+            }
+
+            if (existing) {
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number: existing.number,
+                body: `后续上游同步已恢复。\n\n${details}`,
+              });
+              await github.rest.issues.update({ owner, repo, issue_number: existing.number, state: 'closed' });
+            }
