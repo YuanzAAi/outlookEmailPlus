@@ -15,6 +15,7 @@ from outlook_web.services import graph as graph_service
 from outlook_web.services import imap as imap_service
 from outlook_web.services import (
     mailbox_resolver,
+    outlook_transport,
 )
 from outlook_web.services import verification_channel_routing as verification_channel_service
 from outlook_web.services.imap_generic import (
@@ -525,63 +526,37 @@ def list_messages_for_external(
         return emails, method_label
 
     proxy_url = _get_proxy_url(account)
-
-    graph_result = graph_service.get_emails_graph(
-        account.get("client_id") or "",
-        account.get("refresh_token") or "",
+    transport_result = outlook_transport.list_messages(
+        account,
         folder=folder,
         skip=skip,
         top=top,
         proxy_url=proxy_url,
     )
-    if graph_result.get("success"):
-        method_label = "Graph API"
-        emails = [_build_message_summary(email_addr, e, method=method_label) for e in (graph_result.get("emails") or [])]
+    if transport_result.get("success"):
+        new_refresh_token = str(transport_result.get("new_refresh_token") or "").strip()
+        if new_refresh_token:
+            account["refresh_token"] = new_refresh_token
+            try:
+                accounts_repo.update_refresh_token_if_changed(int(account["id"]), new_refresh_token)
+            except Exception:
+                pass
+        channel = transport_result.get("channel")
+        if channel:
+            try:
+                accounts_repo.update_preferred_verification_channel(int(account["id"]), channel)
+            except Exception:
+                pass
+        method_label = str(transport_result.get("method") or "Graph API")
+        emails = [_build_message_summary(email_addr, e, method=method_label) for e in (transport_result.get("emails") or [])]
         return emails, method_label
 
-    graph_error = graph_result.get("error")
-    if isinstance(graph_error, dict) and graph_error.get("type") in (
-        "ProxyError",
-        "ConnectionError",
-    ):
-        raise ProxyError("代理连接失败", data=graph_error)
-
-    # Graph 失败 → IMAP(New) → IMAP(Old) 回退
-    imap_new_result = imap_service.get_emails_imap_with_server(
-        email_addr,
-        account.get("client_id") or "",
-        account.get("refresh_token") or "",
-        folder,
-        skip,
-        top,
-        IMAP_SERVER_NEW,
-    )
-    if imap_new_result.get("success"):
-        method_label = "IMAP (New)"
-        emails = [_build_message_summary(email_addr, e, method=method_label) for e in (imap_new_result.get("emails") or [])]
-        return emails, method_label
-
-    imap_old_result = imap_service.get_emails_imap_with_server(
-        email_addr,
-        account.get("client_id") or "",
-        account.get("refresh_token") or "",
-        folder,
-        skip,
-        top,
-        IMAP_SERVER_OLD,
-    )
-    if imap_old_result.get("success"):
-        method_label = "IMAP (Old)"
-        emails = [_build_message_summary(email_addr, e, method=method_label) for e in (imap_old_result.get("emails") or [])]
-        return emails, method_label
+    if transport_result.get("proxy_error"):
+        raise ProxyError("代理连接失败", data=transport_result.get("error"))
 
     raise UpstreamReadFailedError(
         "Graph/IMAP 均读取失败",
-        data={
-            "graph": graph_error,
-            "imap_new": imap_new_result.get("error"),
-            "imap_old": imap_old_result.get("error"),
-        },
+        data=transport_result.get("errors") or transport_result.get("error"),
     )
 
 
@@ -716,46 +691,23 @@ def get_message_detail_for_external(  # noqa: C901
         }
 
     proxy_url = _get_proxy_url(account)
-
-    detail = graph_service.get_email_detail_graph(
-        account.get("client_id") or "",
-        account.get("refresh_token") or "",
-        message_id,
-        proxy_url,
+    transport_result = outlook_transport.get_detail(
+        account,
+        message_id=message_id,
+        folder=folder,
+        proxy_url=proxy_url,
     )
-    method_label = "Graph API"
-    graph_raw_content = None
-    if detail:
-        graph_raw_content = graph_service.get_email_raw_graph(
-            account.get("client_id") or "",
-            account.get("refresh_token") or "",
-            message_id,
-            proxy_url,
-        )
-    if not detail:
-        detail = imap_service.get_email_detail_imap_with_server(
-            email_addr,
-            account.get("client_id") or "",
-            account.get("refresh_token") or "",
-            message_id,
-            folder,
-            IMAP_SERVER_NEW,
-        )
-        method_label = "IMAP (New)"
-
-    if not detail:
-        detail = imap_service.get_email_detail_imap_with_server(
-            email_addr,
-            account.get("client_id") or "",
-            account.get("refresh_token") or "",
-            message_id,
-            folder,
-            IMAP_SERVER_OLD,
-        )
-        method_label = "IMAP (Old)"
-
-    if not detail:
+    if not transport_result.get("success"):
         raise MailNotFoundError("未找到邮件详情", data={"email": email_addr, "message_id": message_id})
+    detail = transport_result.get("detail") or {}
+    method_label = str(transport_result.get("method") or "")
+    graph_raw_content = transport_result.get("raw_content")
+    channel = transport_result.get("channel")
+    if channel:
+        try:
+            accounts_repo.update_preferred_verification_channel(int(account["id"]), channel)
+        except Exception:
+            pass
 
     created_at_raw = ""
     timestamp = 0

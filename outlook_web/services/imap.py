@@ -156,7 +156,7 @@ def get_email_body_and_type(msg) -> tuple:
     return html_text or plain_text, "html" if html_text else "text"
 
 
-def _select_folder(connection, folder: str) -> Optional[str]:
+def _select_folder(connection, folder: str, *, readonly: bool = True) -> Optional[str]:
     folder_map = {
         "inbox": ["INBOX"],
         "junk": ["Junk", "Junk Email", "Spam", "垃圾邮件"],
@@ -168,7 +168,7 @@ def _select_folder(connection, folder: str) -> Optional[str]:
     for candidate in candidates:
         for select_target in (f'"{candidate}"', candidate):
             try:
-                status, _ = connection.select(select_target, readonly=True)
+                status, _ = connection.select(select_target, readonly=readonly)
                 if status == "OK":
                     return candidate
             except Exception:
@@ -330,6 +330,7 @@ def get_emails_imap_with_server(
     skip: int = 0,
     top: int = 20,
     server: str = IMAP_SERVER_NEW,
+    include_search_body: bool = False,
 ) -> Dict[str, Any]:
     """使用 IMAP 获取邮件列表（支持分页、文件夹选择和服务器选择）"""
     token_result = get_access_token_imap_result(client_id, refresh_token)
@@ -444,15 +445,16 @@ def get_emails_imap_with_server(
             try:
                 msg = email.message_from_bytes(raw_email)
                 body_preview = get_email_body(msg)
-                emails_data.append(
-                    {
-                        "id": msg_id_str,
-                        "subject": decode_header_value(msg.get("Subject", "无主题")),
-                        "from": decode_header_value(msg.get("From", "未知发件人")),
-                        "date": msg.get("Date", "未知时间"),
-                        "body_preview": (body_preview[:200] + "..." if len(body_preview) > 200 else body_preview),
-                    }
-                )
+                item = {
+                    "id": msg_id_str,
+                    "subject": decode_header_value(msg.get("Subject", "无主题")),
+                    "from": decode_header_value(msg.get("From", "未知发件人")),
+                    "date": msg.get("Date", "未知时间"),
+                    "body_preview": (body_preview[:200] + "..." if len(body_preview) > 200 else body_preview),
+                }
+                if include_search_body:
+                    item["_search_body"] = body_preview
+                emails_data.append(item)
             except Exception as fetch_err:
                 _LOGGER.debug(
                     "[PERF] imap_fetch | account=%s | msg_id=%s | 解析失败: %s",
@@ -760,21 +762,49 @@ def delete_emails_imap(
     refresh_token: str,
     message_ids: List[str],
     server: str,
+    folder: str = "inbox",
 ) -> Dict[str, Any]:
     """通过 IMAP 删除邮件（永久删除）"""
-    access_token = get_access_token_graph(client_id, refresh_token)
-    if not access_token:
-        return {"success": False, "error": "获取 Access Token 失败"}
+    token_result = get_access_token_imap_result(client_id, refresh_token)
+    if not token_result.get("success"):
+        return {"success": False, "error": token_result.get("error") or "获取 Access Token 失败"}
+    access_token = token_result.get("access_token")
 
+    imap = None
     try:
         auth_string = "user=%s\x01auth=Bearer %s\x01\x01" % (email_addr, access_token)
 
         imap = imaplib.IMAP4_SSL(server, IMAP_PORT)
         imap.authenticate("XOAUTH2", lambda x: auth_string.encode("utf-8"))
+        selected_folder = _select_folder(imap, folder, readonly=False)
+        if not selected_folder:
+            return {"success": False, "error": "无法访问目标文件夹"}
 
-        imap.select("INBOX")
-
-        # Graph message id 与 IMAP UID 不兼容：保留原行为（暂不支持）
-        return {"success": False, "error": "IMAP 删除暂不支持 (ID 格式不兼容)"}
+        success_count = 0
+        errors = []
+        for message_id in message_ids:
+            uid = str(message_id or "").strip()
+            if not uid.isdigit():
+                errors.append(f"{uid}: IMAP UID 无效")
+                continue
+            status, _ = imap.uid("STORE", uid, "+FLAGS.SILENT", "(\\Deleted)")
+            if status == "OK":
+                success_count += 1
+            else:
+                errors.append(f"{uid}: 删除标记失败")
+        if success_count:
+            imap.expunge()
+        return {
+            "success": success_count == len(message_ids),
+            "success_count": success_count,
+            "failed_count": len(message_ids) - success_count,
+            "errors": errors,
+        }
     except Exception as e:
         return {"success": False, "error": str(e)}
+    finally:
+        if imap:
+            try:
+                imap.logout()
+            except Exception:
+                pass

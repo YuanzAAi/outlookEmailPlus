@@ -53,9 +53,10 @@ def delete_emails_with_fallback(
     message_ids: List[str],
     proxy_url: str,
     delete_emails_graph: Callable[[str, str, List[str], Optional[str]], Dict[str, Any]],
-    delete_emails_imap: Callable[[str, str, str, List[str], str], Dict[str, Any]],
+    delete_emails_imap: Callable[[str, str, str, List[str], str, str], Dict[str, Any]],
     imap_server_new: str,
     imap_server_old: str,
+    folder: str = "inbox",
 ) -> Tuple[Dict[str, Any], Optional[str]]:
     """
     删除邮件（Graph 优先，IMAP 回退）并保持对外错误聚合结构一致。
@@ -80,12 +81,12 @@ def delete_emails_with_fallback(
         "graph": graph_error or graph_errors_list or "Graph API 删除失败",
     }
 
-    imap_res = delete_emails_imap(email_addr, client_id, refresh_token, message_ids, imap_server_new)
+    imap_res = delete_emails_imap(email_addr, client_id, refresh_token, message_ids, imap_server_new, folder)
     if imap_res.get("success"):
         return imap_res, "imap_new"
     method_errors["imap_new"] = imap_res.get("error") or imap_res
 
-    imap_old_res = delete_emails_imap(email_addr, client_id, refresh_token, message_ids, imap_server_old)
+    imap_old_res = delete_emails_imap(email_addr, client_id, refresh_token, message_ids, imap_server_old, folder)
     if imap_old_res.get("success"):
         return imap_old_res, "imap_old"
     method_errors["imap_old"] = imap_old_res.get("error") or imap_old_res
