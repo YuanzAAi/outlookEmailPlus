@@ -463,6 +463,7 @@
             if (page === 'settings') loadSettings();
             if (page === 'refresh-log') loadRefreshLogPage();
             if (page === 'pool-admin' && typeof loadPoolAdmin === 'function') loadPoolAdmin(true);
+            if (page === 'mail-search' && typeof initMailSearch === 'function') initMailSearch();
             if (page === 'audit') loadAuditLogPage();
         }
 
@@ -474,6 +475,7 @@
             const titles = {
                 'dashboard': ['数据概览', '运营数据大盘'],
                 'mailbox': ['账号管理', '管理邮箱账号与查看邮件'],
+                'mail-search': ['邮件检索', '按内容检索并处理邮件'],
                 'temp-emails': ['临时邮箱', '创建和管理临时邮箱'],
                 'refresh-log': ['刷新日志', 'Token 刷新历史记录'],
                 'settings': ['系统设置', '配置系统参数'],
@@ -4016,7 +4018,7 @@ ${details}
 
         // 全局选中的账号 ID 集合（跨分组保持）
         let selectedAccountIds = new Set();
-        let batchMoveGroupContext = { scopedAccountIds: null };
+        let batchMoveGroupContext = { scopedAccountIds: null, onSuccess: null };
 
         function getActiveAccountCheckboxes() {
             const selector = mailboxViewMode === 'compact'
@@ -4697,7 +4699,8 @@ ${details}
             batchMoveGroupContext = {
                 scopedAccountIds: Array.isArray(options.scopedAccountIds) && options.scopedAccountIds.length > 0
                     ? [...options.scopedAccountIds]
-                    : null
+                    : null,
+                onSuccess: typeof options.onSuccess === 'function' ? options.onSuccess : null
             };
             document.getElementById('batchMoveGroupModal').classList.add('show');
             await loadGroupsForBatchMove();
@@ -4705,7 +4708,7 @@ ${details}
 
         function hideBatchMoveGroupModal() {
             document.getElementById('batchMoveGroupModal').classList.remove('show');
-            batchMoveGroupContext = { scopedAccountIds: null };
+            batchMoveGroupContext = { scopedAccountIds: null, onSuccess: null };
         }
 
         // 加载分组到下拉框
@@ -4739,6 +4742,8 @@ ${details}
             const accountIds = batchMoveGroupContext.scopedAccountIds
                 ? [...batchMoveGroupContext.scopedAccountIds]
                 : Array.from(selectedAccountIds);
+            const targetGroupId = parseInt(groupId);
+            const onSuccess = batchMoveGroupContext.onSuccess;
 
             if (accountIds.length === 0) return;
 
@@ -4749,7 +4754,7 @@ ${details}
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         account_ids: accountIds,
-                        group_id: parseInt(groupId)
+                        group_id: targetGroupId
                     })
                 });
 
@@ -4768,6 +4773,13 @@ ${details}
                         loadAccountsByGroup(currentGroupId, true);
                     }
                     updateBatchActionBar();
+                    if (typeof onSuccess === 'function') {
+                        try {
+                            onSuccess({ groupId: targetGroupId, accountIds: [...accountIds], response: data });
+                        } catch (callbackError) {
+                            console.error('batch move group success callback failed:', callbackError);
+                        }
+                    }
                 } else {
                     handleApiError(data, '操作失败');
                 }
