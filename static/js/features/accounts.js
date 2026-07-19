@@ -280,6 +280,35 @@
             await selectGroup(importedGroupId);
         }
 
+        function parseImportedEmailAddresses(input) {
+            const seen = new Set();
+            return String(input || '')
+                .split('\n')
+                .map(line => String(line || '').trim())
+                .filter(line => line && !line.startsWith('#'))
+                .map(line => String(line.split('----')[0] || '').trim())
+                .filter(email => {
+                    const key = email.toLowerCase();
+                    if (!email.includes('@') || seen.has(key)) return false;
+                    seen.add(key);
+                    return true;
+                });
+        }
+
+        async function probeImportedMailMethods(input, provider) {
+            if (provider !== 'outlook' && provider !== 'auto') return null;
+            const emails = parseImportedEmailAddresses(input);
+            if (!emails.length) return null;
+            const response = await fetch('/api/accounts/probe-mail-methods', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ emails })
+            });
+            const data = await response.json();
+            if (!response.ok || !data.success) return null;
+            return data.summary || null;
+        }
+
         // 添加账号
         async function addAccount() {
             const input = document.getElementById('accountInput').value.trim();
@@ -359,6 +388,18 @@
                         showToast(msg, 'success');
                     } else {
                         showToast(pickApiMessage(data, data.message, 'Import completed'), 'success');
+                    }
+
+                    try {
+                        const methodSummary = await probeImportedMailMethods(input, provider);
+                        if (methodSummary && methodSummary.probed > 0) {
+                            showToast(
+                                `读取方式识别完成：Graph ${methodSummary.graph || 0}，IMAP ${methodSummary.imap || 0}`,
+                                methodSummary.unresolved ? 'warning' : 'success'
+                            );
+                        }
+                    } catch (probeError) {
+                        console.warn('邮箱读取方式识别失败，将保留自动回退：', probeError);
                     }
                     hideAddAccountModal();
 
