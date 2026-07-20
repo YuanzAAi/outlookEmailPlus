@@ -9,6 +9,7 @@ import threading
 import time
 import uuid
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Pattern, Tuple
 
@@ -19,6 +20,7 @@ from outlook_web import config
 from outlook_web.db import get_db
 from outlook_web.repositories import accounts as accounts_repo
 from outlook_web.repositories import groups as groups_repo
+from outlook_web.repositories import temp_emails as temp_emails_repo
 from outlook_web.services import graph as graph_service
 from outlook_web.services import outlook_transport
 from outlook_web.services.imap_generic import get_email_detail_imap_generic_result, get_emails_imap_generic
@@ -33,6 +35,7 @@ GRAPH_TOKEN_TIMEOUT_SECONDS = 15
 GRAPH_REQUEST_TIMEOUT_SECONDS = 15
 VALID_FIELDS = {"subject", "sender", "preview", "body"}
 VALID_FOLDERS = {"inbox", "junkemail"}
+VALID_MAILBOX_SCOPES = {"regular", "temp", "all"}
 
 _WRITE_LOCK = threading.Lock()
 _HTTP_SESSION_LOCK = threading.Lock()
@@ -173,6 +176,10 @@ def _normalize_params(raw: Dict[str, Any]) -> Dict[str, Any]:
         except re.error as exc:
             raise MailSearchError(f"正则表达式无效：{exc}") from exc
 
+    mailbox_scope = str(raw.get("mailbox_scope") or "regular").strip().lower()
+    if mailbox_scope not in VALID_MAILBOX_SCOPES:
+        raise MailSearchError("邮箱范围参数无效")
+
     return {
         "query": query,
         "regex": is_regex,
@@ -182,6 +189,7 @@ def _normalize_params(raw: Dict[str, Any]) -> Dict[str, Any]:
         "group_id": group_id,
         "top_per_folder": top_per_folder,
         "max_accounts": max_accounts,
+        "mailbox_scope": mailbox_scope,
     }
 
 
@@ -248,6 +256,22 @@ def _load_accounts(params: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], bool]:
         account["_search_proxy_url"] = proxy_url
         accounts.append(account)
     return accounts, truncated
+
+
+def _load_temp_mailboxes(params: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], bool]:
+    records = temp_emails_repo.load_temp_emails(
+        visible_only=True,
+        mailbox_type="user",
+        status="active",
+        view="record",
+        order_by_latest_message=True,
+    )
+    account_query = str(params.get("account_query") or "").casefold()
+    if account_query:
+        records = [record for record in records if account_query in str(record.get("email") or "").casefold()]
+    max_mailboxes = int(params["max_accounts"])
+    truncated = len(records) > max_mailboxes
+    return records[:max_mailboxes], truncated
 
 
 def _compile_matcher(params: Dict[str, Any]) -> Tuple[Optional[Pattern[str]], str]:
@@ -325,6 +349,7 @@ def _normalize_message(
     if isinstance(raw_from, dict):
         raw_from = (raw_from.get("emailAddress") or {}).get("address") or ""
     return {
+        "source_type": "regular",
         "account_id": int(account["id"]),
         "email": str(account.get("email") or ""),
         "group_id": account.get("group_id"),
@@ -336,6 +361,98 @@ def _normalize_message(
         "received_at": str(item.get("receivedDateTime") or item.get("date") or item.get("created_at") or ""),
         "method": str(transport.get("method") or ""),
         "method_key": str(transport.get("method_key") or ""),
+    }
+
+
+def _temp_message_received_at(row: Dict[str, Any]) -> str:
+    try:
+        timestamp = int(row.get("timestamp") or 0)
+    except (TypeError, ValueError):
+        timestamp = 0
+    if timestamp > 0:
+        try:
+            return datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+        except (OverflowError, OSError, ValueError):
+            pass
+    return str(row.get("created_at") or "")
+
+
+def _temp_message_body(row: Dict[str, Any]) -> str:
+    text_content = str(row.get("content") or "")
+    html_content = str(row.get("html_content") or "")
+    html_text = extract_email_text({"body_html": html_content}) if html_content else ""
+    if text_content and html_text and html_text not in text_content:
+        return f"{text_content}\n{html_text}"
+    return text_content or html_text
+
+
+def _scan_temp_mailbox(
+    mailbox: Dict[str, Any],
+    params: Dict[str, Any],
+    cancel_event: Optional[threading.Event] = None,
+    *,
+    message_rows: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    email_addr = str(mailbox.get("email") or "")
+    results: List[Dict[str, Any]] = []
+    scanned_messages = 0
+    if "inbox" not in set(params["folders"]):
+        return {
+            "account_id": None,
+            "email": email_addr,
+            "results": results,
+            "scanned_messages": scanned_messages,
+            "errors": [],
+            "preference_updates": [],
+        }
+
+    regex, literal = _compile_matcher(params)
+    fields = set(params["fields"])
+    rows = message_rows
+    if rows is None:
+        rows = temp_emails_repo.get_temp_email_messages(email_addr)
+    rows = rows[: int(params["top_per_folder"])]
+    for row in rows:
+        if cancel_event and cancel_event.is_set():
+            break
+        scanned_messages += 1
+        body = _temp_message_body(row)
+        preview = re.sub(r"\s+", " ", str(row.get("content") or body)).strip()[:200]
+        message = {
+            "source_type": "temp",
+            "account_id": None,
+            "email": email_addr,
+            "group_id": None,
+            "message_id": str(row.get("message_id") or ""),
+            "folder": "inbox",
+            "from": str(row.get("from_address") or ""),
+            "subject": str(row.get("subject") or "无主题"),
+            "preview": preview,
+            "received_at": _temp_message_received_at(row),
+            "method": "Temp Mail",
+            "method_key": "temp",
+        }
+        matched_fields: List[str] = []
+        if "subject" in fields and _matches(message["subject"], regex, literal):
+            matched_fields.append("subject")
+        if "sender" in fields and _matches(message["from"], regex, literal):
+            matched_fields.append("sender")
+        if "preview" in fields and _matches(message["preview"], regex, literal):
+            matched_fields.append("preview")
+        if "body" in fields and not matched_fields and _matches(body, regex, literal):
+            matched_fields.append("body")
+        if matched_fields:
+            message["matched_fields"] = matched_fields
+            message["excerpt"] = _excerpt(body or message["preview"] or message["subject"], regex, literal)
+            results.append(message)
+
+    return {
+        "account_id": None,
+        "email": email_addr,
+        "results": results,
+        "scanned_messages": scanned_messages,
+        "errors": [],
+        "preference_updates": [],
     }
 
 
@@ -688,13 +805,64 @@ def _run_job(app: Any, job_id: str) -> None:
             payload = get_job(job_id)
             payload["status"] = "running"
             payload["updated_at"] = time.time()
-            accounts, accounts_truncated = _load_accounts(payload["params"])
-            payload["progress"]["total_accounts"] = len(accounts)
-            payload["summary"]["truncated"] = accounts_truncated
+            mailbox_scope = payload["params"].get("mailbox_scope", "regular")
+            accounts: List[Dict[str, Any]] = []
+            temp_mailboxes: List[Dict[str, Any]] = []
+            accounts_truncated = False
+            temp_mailboxes_truncated = False
+            if mailbox_scope in {"regular", "all"}:
+                accounts, accounts_truncated = _load_accounts(payload["params"])
+            if mailbox_scope in {"temp", "all"}:
+                temp_mailboxes, temp_mailboxes_truncated = _load_temp_mailboxes(payload["params"])
+            payload["progress"]["total_accounts"] = len(accounts) + len(temp_mailboxes)
+            payload["summary"]["truncated"] = accounts_truncated or temp_mailboxes_truncated
             _atomic_write(path, payload)
 
             if _is_cancel_requested(job_id):
                 payload["status"] = "cancelled"
+                payload["updated_at"] = time.time()
+                _atomic_write(path, payload)
+                return
+
+            prefetched_temp_messages: Optional[Dict[str, List[Dict[str, Any]]]] = None
+            if temp_mailboxes:
+                try:
+                    prefetched_temp_messages = temp_emails_repo.get_temp_email_messages_for_mailboxes(
+                        [str(mailbox.get("email") or "") for mailbox in temp_mailboxes],
+                        limit_per_mailbox=int(payload["params"]["top_per_folder"]),
+                    )
+                except Exception:
+                    prefetched_temp_messages = None
+
+            for mailbox in temp_mailboxes:
+                if _is_cancel_requested(job_id):
+                    cancel_event.set()
+                    payload["status"] = "cancelled"
+                    break
+                try:
+                    email_key = str(mailbox.get("email") or "").casefold()
+                    message_rows = None if prefetched_temp_messages is None else prefetched_temp_messages.get(email_key, [])
+                    mailbox_result = _scan_temp_mailbox(
+                        mailbox,
+                        payload["params"],
+                        cancel_event,
+                        message_rows=message_rows,
+                    )
+                except Exception as exc:
+                    payload["summary"]["failed_accounts"] += 1
+                    payload["progress"]["scanned_accounts"] += 1
+                    if len(payload["errors"]) < 30:
+                        payload["errors"].append({"email": mailbox.get("email"), "message": type(exc).__name__})
+                else:
+                    _merge_account_result(payload, mailbox_result)
+            payload["updated_at"] = time.time()
+            _atomic_write(path, payload)
+
+            if payload.get("status") == "cancelled":
+                return
+
+            if not accounts:
+                payload["status"] = "completed"
                 payload["updated_at"] = time.time()
                 _atomic_write(path, payload)
                 return

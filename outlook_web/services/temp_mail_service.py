@@ -625,6 +625,7 @@ class TempMailService:
             mailbox_type="user",
             status="active",
             view="record",
+            order_by_latest_message=True,
         )
         results: list[dict[str, Any]] = []
         for record in records:

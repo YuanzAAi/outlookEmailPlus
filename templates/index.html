@@ -1073,6 +1073,12 @@
                                 <label><input type="checkbox" name="mailSearchFolder" value="junkemail" checked>垃圾邮件</label>
                             </div>
                             <label class="mail-search-toggle"><input id="mailSearchRegex" type="checkbox">正则</label>
+                            <select id="mailSearchMailboxScope" class="form-control mail-search-select"
+                                    title="选择要检索的邮箱类型" onchange="syncMailSearchScopeUi()">
+                                <option value="regular" selected>普通邮箱</option>
+                                <option value="temp">临时邮箱</option>
+                                <option value="all">全部邮箱</option>
+                            </select>
                             <select id="mailSearchGroup" class="form-control mail-search-select" title="限定分组">
                                 <option value="all">全部分组</option>
                             </select>
@@ -1108,9 +1114,9 @@
                     <div id="mailSearchBatchBar" class="batch-action-bar mail-search-batch-bar" style="display:none;">
                         <span id="mailSearchSelectedCount">已选 0 封</span>
                         <div style="flex:1;"></div>
-                        <button class="btn btn-sm btn-ghost" onclick="moveSelectedMailSearchAccounts()">移动关联邮箱</button>
+                        <button id="mailSearchMoveAccounts" class="btn btn-sm btn-ghost" onclick="moveSelectedMailSearchAccounts()">移动关联邮箱</button>
                         <button class="btn btn-sm btn-danger" onclick="deleteSelectedMailSearchMessages()">删除邮件</button>
-                        <button class="btn btn-sm btn-danger" onclick="deleteSelectedMailSearchAccounts()">删除关联账号</button>
+                        <button id="mailSearchDeleteAccounts" class="btn btn-sm btn-danger" onclick="deleteSelectedMailSearchAccounts()">删除关联账号</button>
                     </div>
                 </div>
 

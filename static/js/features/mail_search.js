@@ -24,6 +24,7 @@
                 await loadGroups();
             }
             populateMailSearchGroups();
+            syncMailSearchScopeUi();
         }
 
         function populateMailSearchGroups() {
@@ -37,6 +38,16 @@
             });
             select.innerHTML = options.join('');
             if (Array.from(select.options).some(option => option.value === current)) select.value = current;
+        }
+
+        function syncMailSearchScopeUi() {
+            const scope = document.getElementById('mailSearchMailboxScope')?.value || 'regular';
+            const groupSelect = document.getElementById('mailSearchGroup');
+            if (!groupSelect) return;
+            groupSelect.disabled = scope === 'temp';
+            groupSelect.title = scope === 'temp'
+                ? '临时邮箱不使用普通邮箱分组'
+                : scope === 'all' ? '分组仅限定普通邮箱，临时邮箱仍会全部检索' : '限定普通邮箱分组';
         }
 
         function setMailSearchRunning(running) {
@@ -77,6 +88,7 @@
                 regex: Boolean(document.getElementById('mailSearchRegex')?.checked),
                 fields,
                 folders,
+                mailbox_scope: document.getElementById('mailSearchMailboxScope')?.value || 'regular',
                 group_id: groupValue,
                 account_query: String(document.getElementById('mailSearchAccount')?.value || '').trim(),
                 top_per_folder: Number(document.getElementById('mailSearchTop')?.value || 20),
@@ -187,7 +199,18 @@
 
         function mailSearchResultKey(result, index = -1) {
             const messageId = String(result?.message_id || '').trim() || `index-${index}`;
-            return `${Number(result?.account_id) || 0}:${String(result?.folder || '')}:${messageId}`;
+            const sourceType = String(result?.source_type || 'regular');
+            const email = normalizeMailSearchGroupText(result?.email);
+            return `${sourceType}:${email}:${Number(result?.account_id) || 0}:${String(result?.folder || '')}:${messageId}`;
+        }
+
+        function isTempMailSearchResult(result) {
+            return String(result?.source_type || '').toLowerCase() === 'temp'
+                || String(result?.method_key || '').toLowerCase() === 'temp';
+        }
+
+        function mailSearchSourceLabel(result) {
+            return isTempMailSearchResult(result) ? '临时邮箱' : '普通邮箱';
         }
 
         function normalizeMailSearchGroupText(value) {
@@ -198,7 +221,8 @@
             const accountMap = new Map();
             mailSearchState.results.forEach((result, index) => {
                 const normalizedEmail = normalizeMailSearchGroupText(result.email);
-                const accountKey = normalizedEmail || `account:${Number(result.account_id) || index}`;
+                const sourceType = isTempMailSearchResult(result) ? 'temp' : 'regular';
+                const accountKey = `${sourceType}:${normalizedEmail || `account:${Number(result.account_id) || index}`}`;
                 let account = accountMap.get(accountKey);
                 if (!account) {
                     account = {
@@ -386,6 +410,7 @@
                             <button class="btn-link mail-search-email" data-action="open-mailbox"
                                     data-index="${representative.index}" title="打开对应邮箱">${escapeHtml(account.email || '未知邮箱')}</button>
                             <div class="mail-search-account-meta">
+                                <span>${mailSearchSourceLabel(representative.result)}</span>
                                 <span>${subjectLabel}</span>
                                 <span>${messageLabel}</span>
                                 <span>最新 ${formatMailSearchDate(representative.result.received_at)}</span>
@@ -575,7 +600,10 @@
 
         function selectedMailSearchAccountIds() {
             return Array.from(new Set(
-                selectedMailSearchResults().map(item => Number(item.account_id)).filter(Boolean)
+                selectedMailSearchResults()
+                    .filter(item => !isTempMailSearchResult(item))
+                    .map(item => Number(item.account_id))
+                    .filter(Boolean)
             ));
         }
 
@@ -586,8 +614,12 @@
             const accountCount = selectedMailSearchAccountIds().length;
             if (bar) bar.style.display = messageCount ? 'flex' : 'none';
             if (count) count.textContent = messageCount
-                ? `已选 ${messageCount} 封 · ${accountCount} 个邮箱`
+                ? `已选 ${messageCount} 封 · ${accountCount} 个普通邮箱`
                 : '已选 0 封';
+            const moveButton = document.getElementById('mailSearchMoveAccounts');
+            const deleteAccountsButton = document.getElementById('mailSearchDeleteAccounts');
+            if (moveButton) moveButton.disabled = accountCount === 0;
+            if (deleteAccountsButton) deleteAccountsButton.disabled = accountCount === 0;
         }
 
         async function showMailSearchDetail(index) {
@@ -600,8 +632,13 @@
             if (body) body.innerHTML = '<div class="loading-overlay"><span class="spinner"></span> 获取中…</div>';
             if (modal) modal.classList.add('show');
             try {
-                const detailMethod = String(result.method_key || '').startsWith('imap_') ? 'imap' : 'graph';
-                const url = `/api/email/${encodeURIComponent(result.email)}/${encodeURIComponent(result.message_id)}?folder=${encodeURIComponent(result.folder)}&method=${detailMethod}`;
+                let url;
+                if (isTempMailSearchResult(result)) {
+                    url = `/api/temp-emails/${encodeURIComponent(result.email)}/messages/${encodeURIComponent(result.message_id)}?refresh_if_missing=0`;
+                } else {
+                    const detailMethod = String(result.method_key || '').startsWith('imap_') ? 'imap' : 'graph';
+                    url = `/api/email/${encodeURIComponent(result.email)}/${encodeURIComponent(result.message_id)}?folder=${encodeURIComponent(result.folder)}&method=${detailMethod}`;
+                }
                 const response = await fetch(url);
                 const data = await response.json();
                 if (!response.ok || !data.success) throw new Error('detail failed');
@@ -627,41 +664,71 @@
         async function openMailSearchMailbox(index) {
             const result = mailSearchState.results[index];
             if (!result) return;
+            if (isTempMailSearchResult(result)) {
+                navigate('temp-emails');
+                if (typeof selectTempEmail === 'function') selectTempEmail(result.email);
+                return;
+            }
             navigate('mailbox');
             if (result.group_id && typeof selectGroup === 'function') await selectGroup(Number(result.group_id));
             if (typeof selectAccount === 'function') selectAccount(result.email);
         }
 
         async function deleteMailSearchGroup(items) {
-            const grouped = new Map();
-            items.forEach(item => {
-                const key = `${item.email}\n${item.folder}`;
-                if (!grouped.has(key)) grouped.set(key, { email: item.email, folder: item.folder, ids: [] });
-                grouped.get(key).ids.push(item.message_id);
-            });
+            const tempItems = items.filter(isTempMailSearchResult);
+            const regularItems = items.filter(item => !isTempMailSearchResult(item));
             let successCount = 0;
+            let uncertainCount = 0;
+            const deletedKeys = new Set();
+
+            for (const item of tempItems) {
+                const response = await fetch(
+                    `/api/temp-emails/${encodeURIComponent(item.email)}/messages/${encodeURIComponent(item.message_id)}`,
+                    { method: 'DELETE' }
+                );
+                const data = await response.json();
+                if (response.ok && data.success) {
+                    successCount += 1;
+                    deletedKeys.add(mailSearchResultKey(item));
+                }
+            }
+
+            const grouped = new Map();
+            regularItems.forEach(item => {
+                const key = `${item.email}\n${item.folder}`;
+                if (!grouped.has(key)) grouped.set(key, { email: item.email, folder: item.folder, items: [] });
+                grouped.get(key).items.push(item);
+            });
             for (const group of grouped.values()) {
+                const ids = group.items.map(item => item.message_id);
                 const response = await fetch('/api/emails/delete', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(group),
+                    body: JSON.stringify({ email: group.email, folder: group.folder, ids }),
                 });
                 const data = await response.json();
-                successCount += Number(data.success_count || (data.success ? group.ids.length : 0));
+                const groupSuccessCount = Math.max(0, Math.min(ids.length, Number(data.success_count || (data.success ? ids.length : 0))));
+                successCount += groupSuccessCount;
+                if (groupSuccessCount === ids.length) {
+                    group.items.forEach(item => deletedKeys.add(mailSearchResultKey(item)));
+                } else if (groupSuccessCount > 0) {
+                    uncertainCount += groupSuccessCount;
+                }
             }
-            return successCount;
+            if (tempItems.length && typeof accountsCache !== 'undefined') delete accountsCache['temp'];
+            return { successCount, uncertainCount, deletedKeys };
         }
 
         async function deleteMailSearchMessage(index) {
             const result = mailSearchState.results[index];
             if (!result || !window.confirm(`确定删除“${result.subject || '无主题'}”吗？`)) return;
             const key = mailSearchResultKey(result, index);
-            const count = await deleteMailSearchGroup([result]);
-            if (count > 0) {
-                mailSearchState.results.splice(index, 1);
+            const outcome = await deleteMailSearchGroup([result]);
+            if (outcome.successCount > 0) {
+                if (outcome.deletedKeys.has(key)) mailSearchState.results.splice(index, 1);
                 mailSearchState.selected.delete(key);
                 renderMailSearchResults();
-                showToast('邮件已删除', 'success');
+                showToast(outcome.uncertainCount ? '邮件已删除，请重新检索确认结果' : '邮件已删除', 'success');
             } else {
                 showToast('邮件删除失败', 'error');
             }
@@ -670,13 +737,13 @@
         async function deleteSelectedMailSearchMessages() {
             const items = selectedMailSearchResults();
             if (!items.length || !window.confirm(`确定删除选中的 ${items.length} 封邮件吗？`)) return;
-            const count = await deleteMailSearchGroup(items);
-            if (count > 0) {
-                const removed = new Set(items.map(item => mailSearchResultKey(item)));
-                mailSearchState.results = mailSearchState.results.filter(item => !removed.has(mailSearchResultKey(item)));
+            const outcome = await deleteMailSearchGroup(items);
+            if (outcome.successCount > 0) {
+                mailSearchState.results = mailSearchState.results.filter(item => !outcome.deletedKeys.has(mailSearchResultKey(item)));
                 mailSearchState.selected.clear();
                 renderMailSearchResults();
-                showToast(`已删除 ${count} 封邮件`, 'success');
+                const suffix = outcome.uncertainCount ? '，部分普通邮件需重新检索确认' : '';
+                showToast(`已删除 ${outcome.successCount} 封邮件${suffix}`, outcome.uncertainCount ? 'warning' : 'success');
             } else {
                 showToast('没有邮件被删除', 'error');
             }
@@ -685,7 +752,7 @@
         async function moveSelectedMailSearchAccounts() {
             const accountIds = selectedMailSearchAccountIds();
             if (!accountIds.length) {
-                showToast('请选择要移动的关联邮箱', 'error');
+                showToast('请选择关联的普通邮箱', 'error');
                 return;
             }
             if (typeof showBatchMoveGroupModal !== 'function') {

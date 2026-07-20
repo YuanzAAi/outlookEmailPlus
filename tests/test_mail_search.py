@@ -9,6 +9,11 @@ from tests._import_app import clear_login_attempts, import_web_app_module
 
 
 class MailSearchTests(unittest.TestCase):
+    def test_mailbox_scope_defaults_to_regular_and_rejects_unknown_values(self):
+        self.assertEqual(mail_search._normalize_params({"query": "marker"})["mailbox_scope"], "regular")
+        with self.assertRaises(mail_search.MailSearchError):
+            mail_search._normalize_params({"query": "marker", "mailbox_scope": "unknown"})
+
     def test_invalid_regex_is_rejected(self):
         with self.assertRaises(mail_search.MailSearchError):
             mail_search._normalize_params({"query": "(", "regex": True})
@@ -311,6 +316,55 @@ class MailSearchTests(unittest.TestCase):
         self.assertIn("body", session.kwargs["params"]["$select"])
         self.assertEqual(session.kwargs["timeout"], 7)
 
+    @patch("outlook_web.services.mail_search.temp_emails_repo.get_temp_email_messages")
+    def test_temp_mailbox_scan_matches_cached_body_without_remote_transport(self, mock_messages):
+        mock_messages.return_value = [
+            {
+                "message_id": "temp-message-1",
+                "from_address": "sender@example.com",
+                "subject": "Welcome",
+                "content": "Your temporary access marker is Temp-7788",
+                "html_content": "",
+                "timestamp": 1784462400,
+            }
+        ]
+        params = mail_search._normalize_params(
+            {
+                "query": "Temp-7788",
+                "fields": ["body"],
+                "folders": ["inbox"],
+                "mailbox_scope": "temp",
+            }
+        )
+
+        result = mail_search._scan_temp_mailbox({"email": "local@search-temp.test"}, params)
+
+        self.assertEqual(result["scanned_messages"], 1)
+        self.assertEqual(len(result["results"]), 1)
+        self.assertEqual(result["results"][0]["source_type"], "temp")
+        self.assertIsNone(result["results"][0]["account_id"])
+        self.assertEqual(result["results"][0]["method_key"], "temp")
+
+
+class MailSearchFrontendContractTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        root = Path(__file__).resolve().parents[1]
+        cls.template = (root / "templates" / "index.html").read_text(encoding="utf-8")
+        cls.script = (root / "static" / "js" / "features" / "mail_search.js").read_text(encoding="utf-8")
+
+    def test_mailbox_scope_selector_defaults_to_regular_and_offers_all_scopes(self):
+        self.assertIn('id="mailSearchMailboxScope"', self.template)
+        self.assertIn('<option value="regular" selected>普通邮箱</option>', self.template)
+        self.assertIn('<option value="temp">临时邮箱</option>', self.template)
+        self.assertIn('<option value="all">全部邮箱</option>', self.template)
+        self.assertIn("mailbox_scope:", self.script)
+
+    def test_temp_results_keep_temp_routes_and_skip_account_level_actions(self):
+        self.assertIn("function isTempMailSearchResult(result)", self.script)
+        self.assertIn("/api/temp-emails/${encodeURIComponent(result.email)}/messages/", self.script)
+        self.assertIn(".filter(item => !isTempMailSearchResult(item))", self.script)
+
 
 class MailSearchEndpointTests(unittest.TestCase):
     @classmethod
@@ -321,9 +375,142 @@ class MailSearchEndpointTests(unittest.TestCase):
     def setUp(self):
         with self.app.app_context():
             clear_login_attempts()
+            from outlook_web.db import get_db
+
+            db = get_db()
+            db.execute("DELETE FROM temp_email_messages WHERE email_address LIKE '%@search-temp.test'")
+            db.execute("DELETE FROM temp_emails WHERE email LIKE '%@search-temp.test'")
+            db.commit()
         self.client = self.app.test_client()
         with self.client.session_transaction() as session:
             session["user_id"] = 1
+
+    def _insert_temp_message(self, email_addr: str, message_id: str, content: str) -> None:
+        with self.app.app_context():
+            from outlook_web.db import get_db
+
+            db = get_db()
+            db.execute(
+                "INSERT INTO temp_emails (email, status, mailbox_type, visible_in_ui) VALUES (?, 'active', 'user', 1)",
+                (email_addr,),
+            )
+            db.execute(
+                """
+                INSERT INTO temp_email_messages
+                (message_id, email_address, from_address, subject, content, html_content, has_html, timestamp, raw_content)
+                VALUES (?, ?, ?, ?, ?, '', 0, ?, '{}')
+                """,
+                (message_id, email_addr, "sender@example.com", "Temporary marker", content, 1784462400),
+            )
+            db.commit()
+
+    @staticmethod
+    def _queued_job(job_id: str, params: dict) -> dict:
+        return {
+            "job_id": job_id,
+            "status": "queued",
+            "params": params,
+            "progress": {"total_accounts": 0, "scanned_accounts": 0, "scanned_messages": 0},
+            "summary": {
+                "total_matches": 0,
+                "stored_results": 0,
+                "failed_accounts": 0,
+                "truncated": False,
+            },
+            "results": [],
+            "errors": [],
+            "cancel_requested": False,
+        }
+
+    def test_temp_scope_job_only_reads_local_temp_mail(self):
+        email_addr = "temp-only@search-temp.test"
+        self._insert_temp_message(email_addr, "temp-only-message", "LocalOnly-4411")
+        params = mail_search._normalize_params(
+            {
+                "query": "LocalOnly-4411",
+                "fields": ["body"],
+                "folders": ["inbox"],
+                "mailbox_scope": "temp",
+                "account_query": email_addr,
+            }
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir, patch(
+            "outlook_web.services.mail_search._job_dir", return_value=Path(temp_dir)
+        ), patch("outlook_web.services.mail_search._load_accounts") as regular_loader, patch(
+            "outlook_web.services.mail_search._get_shared_http_session"
+        ) as http_session, patch(
+            "outlook_web.services.mail_search._scan_account"
+        ) as regular_scanner, patch(
+            "outlook_web.services.mail_search.temp_emails_repo.get_temp_email_messages"
+        ) as per_mailbox_loader:
+            job_id = "c" * 32
+            mail_search._atomic_write(mail_search._job_path(job_id), self._queued_job(job_id, params))
+            mail_search._run_job(self.app, job_id)
+            result = mail_search.get_job(job_id)
+
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["progress"], {"total_accounts": 1, "scanned_accounts": 1, "scanned_messages": 1})
+        self.assertEqual(result["results"][0]["source_type"], "temp")
+        regular_loader.assert_not_called()
+        regular_scanner.assert_not_called()
+        http_session.assert_not_called()
+        per_mailbox_loader.assert_not_called()
+
+    def test_all_scope_job_merges_temp_and_regular_results(self):
+        email_addr = "all-scope@search-temp.test"
+        self._insert_temp_message(email_addr, "all-temp-message", "Shared-5522")
+        params = mail_search._normalize_params(
+            {
+                "query": "Shared-5522",
+                "fields": ["body"],
+                "folders": ["inbox"],
+                "mailbox_scope": "all",
+                "account_query": email_addr,
+            }
+        )
+        regular_account = {"id": 77, "email": "regular@example.com", "group_id": 1}
+        regular_result = {
+            "account_id": 77,
+            "email": regular_account["email"],
+            "results": [
+                {
+                    "source_type": "regular",
+                    "account_id": 77,
+                    "email": regular_account["email"],
+                    "group_id": 1,
+                    "message_id": "regular-message",
+                    "folder": "inbox",
+                    "from": "sender@example.com",
+                    "subject": "Regular marker",
+                    "preview": "Shared-5522",
+                    "received_at": "2026-07-19T00:00:00Z",
+                    "method": "Graph API",
+                    "method_key": "graph",
+                    "matched_fields": ["body"],
+                    "excerpt": "Shared-5522",
+                }
+            ],
+            "scanned_messages": 1,
+            "errors": [],
+            "preference_updates": [],
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir, patch(
+            "outlook_web.services.mail_search._job_dir", return_value=Path(temp_dir)
+        ), patch("outlook_web.services.mail_search._load_accounts", return_value=([regular_account], False)), patch(
+            "outlook_web.services.mail_search._get_shared_http_session", return_value=object()
+        ), patch(
+            "outlook_web.services.mail_search._scan_account", return_value=regular_result
+        ):
+            job_id = "d" * 32
+            mail_search._atomic_write(mail_search._job_path(job_id), self._queued_job(job_id, params))
+            mail_search._run_job(self.app, job_id)
+            result = mail_search.get_job(job_id)
+
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["progress"], {"total_accounts": 2, "scanned_accounts": 2, "scanned_messages": 2})
+        self.assertEqual({item["source_type"] for item in result["results"]}, {"regular", "temp"})
 
     def test_start_poll_and_cancel_endpoint_contracts(self):
         job = {
