@@ -59,7 +59,7 @@ class MultiMailboxSupportTests(unittest.TestCase):
 
         providers = data.get("providers") or []
         # PRD-00006 / FD-00006：providers 列表新增 "auto"（智能识别混合导入）
-        self.assertEqual(len(providers), 9)
+        self.assertEqual(len(providers), 10)
         self.assertEqual(providers[0].get("key"), "auto")
         self.assertEqual(providers[1].get("key"), "outlook")
         self.assertEqual(providers[-1].get("key"), "custom")
@@ -68,6 +68,7 @@ class MultiMailboxSupportTests(unittest.TestCase):
         self.assertIn("auto", keys)
         self.assertIn("qq", keys)
         self.assertIn("163", keys)
+        self.assertIn("icloud", keys)
 
     def test_provider_folder_candidates_contains_utf7_for_qq_junk(self):
         from outlook_web.services.providers import get_imap_folder_candidates

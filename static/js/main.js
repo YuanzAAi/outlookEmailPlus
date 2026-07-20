@@ -1196,6 +1196,20 @@
                         ];
                 }
 
+                if (normalizedProvider === 'icloud') {
+                    return language === 'en'
+                        ? [
+                            'Use an Apple ID app-specific password instead of your normal Apple ID password.',
+                            'Confirm iCloud Mail is enabled for the account and the IMAP host is imap.mail.me.com:993.',
+                            'Generate a new app-specific password if the previous one was revoked after an Apple ID security change.',
+                        ]
+                        : [
+                            '请使用 Apple ID 应用专用密码，而不是普通 Apple ID 登录密码。',
+                            '请确认账号已启用 iCloud 邮件，并使用 imap.mail.me.com:993。',
+                            '如果 Apple ID 安全设置变更导致旧密码失效，请重新生成应用专用密码。',
+                        ];
+                }
+
                 return language === 'en'
                     ? [
                         'Check the IMAP host, port, SSL/TLS, and account password settings.',

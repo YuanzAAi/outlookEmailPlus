@@ -434,6 +434,38 @@ class ExternalApiKeyScopeTests(ExternalApiBaseTest):
 
 
 class ExternalApiConsumerAuditTests(ExternalApiBaseTest):
+    @patch("outlook_web.services.external_api.get_emails_imap_generic")
+    def test_external_latest_does_not_expose_internal_search_body(self, mock_get_emails):
+        email_addr = self._insert_imap_account()
+        self._set_external_api_key("abc123")
+        mock_get_emails.return_value = {
+            "success": True,
+            "method": "IMAP (Generic)",
+            "emails": [
+                {
+                    "id": "imap-private-1",
+                    "subject": "Private body test",
+                    "from": "sender@example.com",
+                    "date": self._utc_iso(),
+                    "body_preview": "public preview",
+                    "_search_body": "internal full body",
+                    "_search_body_html": "<p>internal full body</p>",
+                }
+            ],
+        }
+
+        client = self.app.test_client()
+        resp = client.get(
+            f"/api/external/messages/latest?email={email_addr}",
+            headers=self._auth_headers(),
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json().get("data", {})
+        self.assertNotIn("_search_body", data)
+        self.assertNotIn("_search_body_html", data)
+        self.assertFalse(mock_get_emails.call_args.kwargs["include_search_body"])
+
     @patch("outlook_web.services.graph.get_emails_graph")
     def test_multi_key_request_records_consumer_metadata_and_usage(self, mock_get_emails_graph):
         email_addr = self._insert_outlook_account()
@@ -541,6 +573,39 @@ class ExternalApiConsumerAuditTests(ExternalApiBaseTest):
 
 
 class ExternalApiVerificationTests(ExternalApiBaseTest):
+    @patch("outlook_web.services.external_api.get_message_detail_for_external")
+    @patch("outlook_web.services.external_api.get_latest_message_for_external")
+    def test_generic_imap_verification_reuses_inline_body(self, mock_latest, mock_detail):
+        mock_latest.return_value = {
+            "id": "imap-inline-1",
+            "email_address": "inline@extapi.test",
+            "from_address": "noreply@example.com",
+            "subject": "Your verification code",
+            "created_at": "2026-07-20T00:00:00Z",
+            "method": "IMAP (Generic)",
+            "_search_body": "Use verification code 246810 to continue.",
+            "_search_body_html": "<p>Use verification code <strong>246810</strong> to continue.</p>",
+        }
+
+        with self.app.app_context():
+            from outlook_web.services import external_api
+
+            result, _channel, _used_ai = external_api._run_generic_verification_extract(
+                email_addr="inline@extapi.test",
+                folder="inbox",
+                from_contains="",
+                subject_contains="",
+                since_minutes=5,
+                baseline_timestamp=None,
+                resolved_policy={"code_regex": None, "code_length": "6-6"},
+                code_source="all",
+                expected_field="verification_code",
+            )
+
+        self.assertEqual(result["verification_code"], "246810")
+        self.assertTrue(mock_latest.call_args.kwargs["include_search_body"])
+        mock_detail.assert_not_called()
+
     @patch("outlook_web.services.graph.get_email_raw_graph")
     @patch("outlook_web.services.graph.get_email_detail_graph")
     @patch("outlook_web.services.graph.get_emails_graph")
@@ -1534,7 +1599,8 @@ class ExternalApiVerificationErrorTests(ExternalApiBaseTest):
         email_addr = self._insert_outlook_account()
         self._set_external_api_key("abc123")
         # time.time() 模拟: baseline=100, start=100, 第1次循环检查=100, 第2次=200(超时)
-        mock_time.side_effect = [100, 100, 100, 200]
+        time_values = iter([100, 100, 100, 200])
+        mock_time.side_effect = lambda: next(time_values, 200)
         mock_graph.return_value = {"success": True, "emails": []}
 
         client = self.app.test_client()

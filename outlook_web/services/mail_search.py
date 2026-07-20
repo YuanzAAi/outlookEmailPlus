@@ -339,7 +339,13 @@ def _normalize_message(
     }
 
 
-def _generic_imap_list(account: Dict[str, Any], folder: str, top: int) -> Dict[str, Any]:
+def _generic_imap_list(
+    account: Dict[str, Any],
+    folder: str,
+    top: int,
+    *,
+    include_search_body: bool = False,
+) -> Dict[str, Any]:
     result = get_emails_imap_generic(
         email_addr=account.get("email") or "",
         imap_password=account.get("imap_password") or "",
@@ -349,6 +355,7 @@ def _generic_imap_list(account: Dict[str, Any], folder: str, top: int) -> Dict[s
         provider=account.get("provider") or "_default",
         skip=0,
         top=top,
+        include_search_body=include_search_body,
     )
     return {
         "success": bool(result.get("success")),
@@ -566,7 +573,12 @@ def _scan_account_legacy(
         if cancel_event and cancel_event.is_set():
             break
         if str(account.get("account_type") or "outlook").strip().lower() == "imap":
-            transport = _generic_imap_list(account, folder, params["top_per_folder"])
+            transport = _generic_imap_list(
+                account,
+                folder,
+                params["top_per_folder"],
+                include_search_body="body" in set(params["fields"]),
+            )
         else:
             transport = outlook_transport.list_messages(
                 account,

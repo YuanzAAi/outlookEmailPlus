@@ -190,6 +190,7 @@ def _fetch_new_emails_imap(account: dict, since: str, folder: str = "inbox") -> 
     from datetime import datetime as dt
 
     from outlook_web.security.crypto import decrypt_data
+    from outlook_web.services.imap_generic import _create_imap_connection
 
     host = account.get("imap_host", "")
     port = int(account.get("imap_port", 993))
@@ -203,7 +204,7 @@ def _fetch_new_emails_imap(account: dict, since: str, folder: str = "inbox") -> 
     results: List[dict] = []
     conn = None
     try:
-        conn = imaplib.IMAP4_SSL(host, port, timeout=15)
+        conn = _create_imap_connection(host, port, timeout_seconds=15)
         try:
             conn.login(user, password)
         except imaplib.IMAP4.error as exc:

@@ -21,6 +21,13 @@ MAIL_PROVIDERS: Dict[str, Dict[str, Any]] = {
         "account_type": "imap",
         "note": "需开启 IMAP，并使用应用专用密码（非登录密码）",
     },
+    "icloud": {
+        "label": "iCloud",
+        "imap_host": "imap.mail.me.com",
+        "imap_port": 993,
+        "account_type": "imap",
+        "note": "需为 Apple ID 生成应用专用密码（非 Apple ID 登录密码）",
+    },
     "qq": {
         "label": "QQ 邮箱",
         "imap_host": "imap.qq.com",
@@ -70,6 +77,10 @@ DOMAIN_PROVIDER_MAP: Dict[str, str] = {
     # Gmail
     "gmail.com": "gmail",
     "googlemail.com": "gmail",
+    # iCloud
+    "icloud.com": "icloud",
+    "me.com": "icloud",
+    "mac.com": "icloud",
     # QQ
     "qq.com": "qq",
     "foxmail.com": "qq",
@@ -81,6 +92,16 @@ DOMAIN_PROVIDER_MAP: Dict[str, str] = {
     "yahoo.com": "yahoo",
     "yahoo.co.jp": "yahoo",
     "yahoo.co.uk": "yahoo",
+    "ymail.com": "yahoo",
+    "rocketmail.com": "yahoo",
+    "yahoo.ca": "yahoo",
+    "yahoo.com.au": "yahoo",
+    "yahoo.de": "yahoo",
+    "yahoo.fr": "yahoo",
+    "yahoo.it": "yahoo",
+    "yahoo.es": "yahoo",
+    "yahoo.in": "yahoo",
+    "yahoo.co.in": "yahoo",
     # 阿里云
     "aliyun.com": "aliyun",
     "alimail.com": "aliyun",
@@ -95,6 +116,7 @@ DOMAIN_PROVIDER_MAP: Dict[str, str] = {
 PROVIDER_GROUP_NAME: Dict[str, str] = {
     "outlook": "Outlook",
     "gmail": "Gmail",
+    "icloud": "iCloud",
     "qq": "QQ邮箱",
     "163": "163邮箱",
     "126": "126邮箱",
@@ -123,6 +145,11 @@ PROVIDER_FOLDER_MAP: Dict[str, Dict[str, List[str]]] = {
         "inbox": ["INBOX"],
         "junkemail": ["[Gmail]/Spam", "[Gmail]/垃圾邮件"],
         "deleteditems": ["[Gmail]/Trash", "[Gmail]/已删除邮件"],
+    },
+    "icloud": {
+        "inbox": ["INBOX"],
+        "junkemail": ["Junk", "Junk E-mail"],
+        "deleteditems": ["Deleted Messages", "Trash"],
     },
     "qq": {
         "inbox": ["INBOX"],
@@ -165,10 +192,25 @@ def get_imap_folder_candidates(provider: str, folder: str) -> List[str]:
 PROVIDER_FAMILY_DOMAINS: Dict[str, List[str]] = {
     "outlook": ["outlook.com", "hotmail.com", "live.com", "live.cn"],
     "gmail": ["gmail.com", "googlemail.com"],
+    "icloud": ["icloud.com", "me.com", "mac.com"],
     "qq": ["qq.com", "foxmail.com"],
     "163": ["163.com"],
     "126": ["126.com"],
-    "yahoo": ["yahoo.com", "yahoo.co.jp", "yahoo.co.uk"],
+    "yahoo": [
+        "yahoo.com",
+        "yahoo.co.jp",
+        "yahoo.co.uk",
+        "ymail.com",
+        "rocketmail.com",
+        "yahoo.ca",
+        "yahoo.com.au",
+        "yahoo.de",
+        "yahoo.fr",
+        "yahoo.it",
+        "yahoo.es",
+        "yahoo.in",
+        "yahoo.co.in",
+    ],
     "aliyun": ["aliyun.com", "alimail.com"],
 }
 
@@ -221,7 +263,7 @@ def get_provider_list() -> List[Dict[str, Any]]:
             "note": "自动识别每行的账号类型，支持混合文件一键导入",
         }
     ]
-    order = ["outlook", "gmail", "qq", "163", "126", "yahoo", "aliyun", "custom"]
+    order = ["outlook", "gmail", "icloud", "qq", "163", "126", "yahoo", "aliyun", "custom"]
     for key in order:
         if key not in MAIL_PROVIDERS:
             continue

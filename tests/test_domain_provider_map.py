@@ -16,6 +16,13 @@ class TestDomainProviderMap(unittest.TestCase):
         self.assertEqual(infer_provider_from_email("user@qq.com"), "qq")
         self.assertEqual(infer_provider_from_email("user@foxmail.com"), "qq")
 
+    def test_infer_icloud(self):
+        from outlook_web.services.providers import infer_provider_from_email
+
+        self.assertEqual(infer_provider_from_email("user@icloud.com"), "icloud")
+        self.assertEqual(infer_provider_from_email("user@me.com"), "icloud")
+        self.assertEqual(infer_provider_from_email("user@mac.com"), "icloud")
+
     def test_infer_163(self):
         from outlook_web.services.providers import infer_provider_from_email
 
@@ -31,6 +38,9 @@ class TestDomainProviderMap(unittest.TestCase):
 
         self.assertEqual(infer_provider_from_email("user@yahoo.com"), "yahoo")
         self.assertEqual(infer_provider_from_email("user@yahoo.co.jp"), "yahoo")
+        self.assertEqual(infer_provider_from_email("user@ymail.com"), "yahoo")
+        self.assertEqual(infer_provider_from_email("user@rocketmail.com"), "yahoo")
+        self.assertEqual(infer_provider_from_email("user@yahoo.com.au"), "yahoo")
 
     def test_infer_aliyun(self):
         from outlook_web.services.providers import infer_provider_from_email
@@ -65,6 +75,7 @@ class TestDomainProviderMap(unittest.TestCase):
         self.assertEqual(KNOWN_PROVIDER_KEYS, set(MAIL_PROVIDERS.keys()))
         self.assertIn("outlook", KNOWN_PROVIDER_KEYS)
         self.assertIn("gmail", KNOWN_PROVIDER_KEYS)
+        self.assertIn("icloud", KNOWN_PROVIDER_KEYS)
         self.assertIn("custom", KNOWN_PROVIDER_KEYS)
 
     def test_provider_group_name(self):
@@ -101,6 +112,8 @@ class TestDomainProviderMap(unittest.TestCase):
         self.assertTrue(provider_supports_email_domain("outlook", "outlook.com"))
         self.assertTrue(provider_supports_email_domain("outlook", "hotmail.com"))
         self.assertTrue(provider_supports_email_domain("gmail", "gmail.com"))
+        self.assertTrue(provider_supports_email_domain("icloud", "icloud.com"))
+        self.assertTrue(provider_supports_email_domain("icloud", "me.com"))
         self.assertTrue(provider_supports_email_domain("qq", "qq.com"))
         self.assertTrue(provider_supports_email_domain("qq", "foxmail.com"))
         self.assertFalse(provider_supports_email_domain("gmail", "outlook.com"))
@@ -130,6 +143,9 @@ class TestDomainProviderMap(unittest.TestCase):
         self.assertIn("hotmail.com", outlook_domains)
         gmail_domains = get_provider_domains("gmail")
         self.assertIn("gmail.com", gmail_domains)
+        icloud_domains = get_provider_domains("icloud")
+        self.assertIn("icloud.com", icloud_domains)
+        self.assertIn("mac.com", icloud_domains)
         unknown_domains = get_provider_domains("nonexistent")
         self.assertEqual(unknown_domains, [])
 

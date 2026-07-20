@@ -772,7 +772,7 @@ class PoolServiceTests(unittest.TestCase):
         finally:
             conn.close()
 
-    def _make_account(self, pool_status="available"):
+    def _make_account(self, pool_status="available", *, provider="outlook", account_type="outlook"):
         import secrets
 
         conn = self.create_conn()
@@ -780,10 +780,12 @@ class PoolServiceTests(unittest.TestCase):
             email = f"svc_test_{secrets.token_hex(4)}@example.com"
             conn.execute(
                 """
-                INSERT INTO accounts (email, client_id, refresh_token, status, pool_status)
-                VALUES (?, 'test_client', 'test_token', 'active', ?)
+                INSERT INTO accounts (
+                    email, client_id, refresh_token, status, pool_status, provider, account_type
+                )
+                VALUES (?, 'test_client', 'test_token', 'active', ?, ?, ?)
                 """,
-                (email, pool_status),
+                (email, pool_status, provider, account_type),
             )
             conn.commit()
             row = conn.execute("SELECT id FROM accounts WHERE email = ?", (email,)).fetchone()
@@ -823,6 +825,20 @@ class PoolServiceTests(unittest.TestCase):
             )
         self.assertEqual(ctx.exception.http_status, 400)
         self.assertEqual(ctx.exception.error_code, "invalid_provider")
+
+    def test_claim_random_accepts_registered_imap_providers(self):
+        providers = ("gmail", "icloud", "qq", "163", "126", "yahoo", "aliyun", "custom")
+        for provider in providers:
+            self._make_account(provider=provider, account_type="imap")
+
+        for provider in providers:
+            with self.subTest(provider=provider):
+                result = self.pool_service.claim_random(
+                    caller_id="bot",
+                    task_id=f"claim_{provider}",
+                    provider=provider,
+                )
+                self.assertEqual(result["provider"], provider)
 
     def test_complete_claim_invalid_result(self):
         account_id = self._make_account()

@@ -144,6 +144,14 @@ def _normalize_imap_auth_error_message(raw_message: str, *, provider: str, imap_
     provider_key = (provider or "").strip().lower()
     if provider_key == "gmail":
         return "IMAP 认证失败：Gmail 通常需要“应用专用密码”（非登录密码），并在 Gmail 设置中开启 IMAP"
+    if provider_key == "icloud":
+        return "IMAP 认证失败：iCloud 需要 Apple ID 应用专用密码（非 Apple ID 登录密码）"
+    if provider_key == "qq":
+        return "IMAP 认证失败：QQ 邮箱需要开启 IMAP 服务并使用授权码（非 QQ 密码）"
+    if provider_key in {"163", "126"}:
+        return "IMAP 认证失败：网易邮箱需要开启 IMAP 服务并使用客户端授权密码"
+    if provider_key == "yahoo":
+        return "IMAP 认证失败：Yahoo 邮箱需要在账号安全设置中生成应用密码"
     lowered = message.lower()
     if _is_outlook_imap_target(provider, imap_host) and "basicauthblocked" in lowered:
         return "IMAP 认证失败：Outlook.com 已阻止 Basic Auth（账号密码直连），请改用 Outlook OAuth 导入（client_id + refresh_token）"
@@ -171,9 +179,11 @@ def _resolve_imap_folder(
 def _create_imap_connection(
     imap_host: str,
     imap_port: int,
+    timeout_seconds: int = 15,
 ) -> imaplib.IMAP4_SSL:
     host = (imap_host or "").strip()
     port = int(imap_port) if imap_port else 993
+    timeout = max(1, int(timeout_seconds or 15))
     if not host:
         raise ValueError("IMAP host 不能为空")
 
@@ -181,10 +191,10 @@ def _create_imap_connection(
 
     # 优先使用 imaplib 的 timeout 参数（低风险；旧版本 Python 可能不支持）
     try:
-        mail = imaplib.IMAP4_SSL(host, port, timeout=30)
+        mail = imaplib.IMAP4_SSL(host, port, timeout=timeout)
     except TypeError:
         old_timeout = socket.getdefaulttimeout()
-        socket.setdefaulttimeout(30)
+        socket.setdefaulttimeout(timeout)
         try:
             mail = imaplib.IMAP4_SSL(host, port)
         finally:
@@ -204,6 +214,67 @@ def _create_imap_connection(
     return mail
 
 
+def _extract_fetch_payload(item: Any) -> Tuple[Optional[bytes], Optional[bytes]]:
+    if not isinstance(item, tuple) or len(item) < 2:
+        return None, None
+    first, second = item[0], item[1]
+    if isinstance(first, (bytes, bytearray)) and isinstance(second, (bytes, bytearray)):
+        return bytes(first), bytes(second)
+    if isinstance(first, tuple) and len(first) >= 2:
+        nested_header, nested_raw = first[0], first[1]
+        if isinstance(nested_header, (bytes, bytearray)) and isinstance(nested_raw, (bytes, bytearray)):
+            return bytes(nested_header), bytes(nested_raw)
+    return None, None
+
+
+def _parse_uid_fetch_response(fetch_data: Any) -> Dict[str, Tuple[bytes, str]]:
+    parsed: Dict[str, Tuple[bytes, str]] = {}
+    for item in fetch_data or []:
+        header, raw_email = _extract_fetch_payload(item)
+        if not header or not raw_email:
+            continue
+        uid_match = re.search(rb"\bUID\s+(\d+)\b", header)
+        if not uid_match:
+            continue
+        uid_text = uid_match.group(1).decode("ascii", errors="ignore")
+        if uid_text:
+            parsed[uid_text] = (raw_email, _extract_flags_from_fetch(item))
+    return parsed
+
+
+def _build_message_list_item(
+    uid_text: str,
+    raw_email: bytes,
+    flags_text: str,
+    *,
+    include_search_body: bool,
+) -> Dict[str, Any]:
+    msg = email.message_from_bytes(raw_email)
+    subject = decode_header_value(msg.get("Subject", "无主题"))
+    from_text = decode_header_value(msg.get("From", "未知发件人"))
+    date_text = msg.get("Date", "未知时间")
+    body_text, body_html = _extract_text_and_html(msg)
+    searchable_body = body_text or _strip_html(body_html)
+    preview = searchable_body[:200]
+    if len(searchable_body) > 200:
+        preview += "..."
+
+    item: Dict[str, Any] = {
+        "id": uid_text,
+        "subject": subject,
+        "from": from_text,
+        "date": date_text,
+        "is_read": "\\Seen" in (flags_text or ""),
+        "has_attachments": _has_attachments(msg),
+        "body_preview": preview,
+    }
+    if include_search_body:
+        item["_search_body"] = searchable_body
+        if body_html:
+            item["_search_body_html"] = body_html
+    return item
+
+
 def get_emails_imap_generic(
     email_addr: str,
     imap_password: str,
@@ -213,6 +284,7 @@ def get_emails_imap_generic(
     provider: str = "_default",
     skip: int = 0,
     top: int = 20,
+    include_search_body: bool = False,
 ) -> Dict[str, Any]:
     """
     标准 IMAP 邮件列表（LOGIN 认证）。
@@ -310,47 +382,44 @@ def get_emails_imap_generic(
 
         paged_uids = uids[start_idx:end_idx][::-1]
 
+        batch_messages: Dict[str, Tuple[bytes, str]] = {}
+        try:
+            uid_set = b",".join(paged_uids)
+            f_status, f_data = mail.uid("FETCH", uid_set, "(UID FLAGS RFC822)")
+            if f_status == "OK":
+                batch_messages = _parse_uid_fetch_response(f_data)
+        except Exception as exc:
+            _LOGGER.debug("imap_batch_fetch_failed email=%s provider=%s err=%s", email_addr, provider, exc)
+
         emails_data: List[Dict[str, Any]] = []
         for uid in paged_uids:
             try:
-                f_status, f_data = mail.uid("FETCH", uid, "(FLAGS RFC822)")
-                if f_status != "OK" or not f_data:
-                    continue
-
-                # 兼容不同 IMAP 服务器返回结构
-                raw_email = None
-                flags_text = ""
-                for item in f_data:
-                    if not item:
+                uid_text = uid.decode("ascii", errors="ignore") if isinstance(uid, (bytes, bytearray)) else str(uid)
+                fetched = batch_messages.get(uid_text)
+                if fetched is None:
+                    f_status, f_data = mail.uid("FETCH", uid, "(FLAGS RFC822)")
+                    if f_status != "OK" or not f_data:
                         continue
-                    if isinstance(item, tuple) and len(item) >= 2:
-                        flags_text = _extract_flags_from_fetch(item)
-                        raw_email = item[1]
-                        break
-
-                if not raw_email:
-                    continue
-
-                msg = email.message_from_bytes(raw_email)
-                subject = decode_header_value(msg.get("Subject", "无主题"))
-                from_text = decode_header_value(msg.get("From", "未知发件人"))
-                date_text = msg.get("Date", "未知时间")
-
-                body_text, body_html = _extract_text_and_html(msg)
-                preview = (body_text or _strip_html(body_html))[:200]
-                if (body_text or body_html) and len(body_text or _strip_html(body_html)) > 200:
-                    preview = preview + "..."
+                    raw_email = None
+                    flags_text = ""
+                    for item in f_data:
+                        header, candidate = _extract_fetch_payload(item)
+                        if header and candidate:
+                            raw_email = candidate
+                            flags_text = _extract_flags_from_fetch(item)
+                            break
+                    if raw_email is None:
+                        continue
+                else:
+                    raw_email, flags_text = fetched
 
                 emails_data.append(
-                    {
-                        "id": uid.decode("utf-8", errors="ignore") if isinstance(uid, (bytes, bytearray)) else str(uid),
-                        "subject": subject,
-                        "from": from_text,
-                        "date": date_text,
-                        "is_read": "\\Seen" in (flags_text or ""),
-                        "has_attachments": _has_attachments(msg),
-                        "body_preview": preview,
-                    }
+                    _build_message_list_item(
+                        uid_text,
+                        raw_email,
+                        flags_text,
+                        include_search_body=include_search_body,
+                    )
                 )
             except Exception:
                 continue

@@ -374,7 +374,7 @@
                         const s = data.summary;
                         if (s.by_provider && Object.keys(s.by_provider).length > 0) {
                             msg += `\n\n--- ${translateAppTextLocal('按类型统计')} ---`;
-                            const provNames = {outlook:'Outlook',gmail:'Gmail',qq:'QQ邮箱','163':'163邮箱','126':'126邮箱',yahoo:'Yahoo',aliyun:'阿里云邮箱',custom:'自定义IMAP',temp_mail:'临时邮箱',gptmail:'临时邮箱'};
+                            const provNames = {outlook:'Outlook',gmail:'Gmail',icloud:'iCloud',qq:'QQ邮箱','163':'163邮箱','126':'126邮箱',yahoo:'Yahoo',aliyun:'阿里云邮箱',custom:'自定义IMAP',temp_mail:'临时邮箱',gptmail:'临时邮箱'};
                             for (const [prov, stats] of Object.entries(s.by_provider)) {
                                 const name = provNames[prov] || prov;
                                 msg += `\n${translateAppTextLocal(name)}: ${translateAppTextLocal('成功')} ${stats.imported || 0}`;

@@ -124,6 +124,47 @@ class MailSearchTests(unittest.TestCase):
         self.assertTrue(mock_list.call_args.kwargs["include_search_body"])
         mock_detail.assert_not_called()
 
+    @patch("outlook_web.services.mail_search.get_email_detail_imap_generic_result")
+    @patch("outlook_web.services.mail_search.get_emails_imap_generic")
+    def test_generic_imap_search_reuses_full_body_from_list(self, mock_list, mock_detail):
+        mock_list.return_value = {
+            "success": True,
+            "method": "IMAP (Generic)",
+            "emails": [
+                {
+                    "id": "uid-2",
+                    "subject": "Welcome",
+                    "from": "sender@example.com",
+                    "body_preview": "No visible match",
+                    "_search_body": "The complete generic IMAP body contains Generic-8822",
+                    "date": "2026-07-19T00:00:00Z",
+                }
+            ],
+        }
+        account = {
+            "id": 12,
+            "email": "generic@example.com",
+            "imap_password": "app-password",
+            "imap_host": "imap.example.com",
+            "imap_port": 993,
+            "account_type": "imap",
+            "provider": "custom",
+        }
+        params = mail_search._normalize_params(
+            {
+                "query": "Generic-8822",
+                "fields": ["body"],
+                "folders": ["inbox"],
+            }
+        )
+
+        result = mail_search._scan_account(account, params)
+
+        self.assertEqual(len(result["results"]), 1)
+        self.assertEqual(result["results"][0]["matched_fields"], ["body"])
+        self.assertTrue(mock_list.call_args.kwargs["include_search_body"])
+        mock_detail.assert_not_called()
+
     @patch("outlook_web.services.mail_search.graph_service.get_access_token_graph_result")
     def test_terminal_graph_auth_failure_skips_legacy_fallback(self, mock_token):
         mock_token.return_value = {

@@ -167,6 +167,45 @@ class TestHtmlToPlain(unittest.TestCase):
         self.assertNotIn("  ", result)
 
 
+class TestGenericImapFetch(unittest.TestCase):
+    def test_notification_fetch_reuses_shared_imap_connection(self):
+        from outlook_web.services.telegram_push import _fetch_new_emails_imap
+
+        connection = MagicMock()
+        connection.select.return_value = ("OK", [b"0"])
+        connection.search.return_value = ("OK", [b""])
+        account = {
+            "email": "user@163.com",
+            "provider": "163",
+            "account_type": "imap",
+            "imap_host": "imap.163.com",
+            "imap_port": 993,
+            "imap_password": "client-auth-password",
+        }
+
+        with patch(
+            "outlook_web.services.imap_generic._create_imap_connection",
+            return_value=connection,
+        ) as create_connection:
+            result = _fetch_new_emails_imap(
+                account,
+                "2026-07-20T00:00:00",
+                folder="inbox",
+            )
+
+        self.assertEqual(result, [])
+        create_connection.assert_called_once_with(
+            "imap.163.com",
+            993,
+            timeout_seconds=15,
+        )
+        connection.login.assert_called_once_with(
+            "user@163.com",
+            "client-auth-password",
+        )
+        connection.logout.assert_called_once()
+
+
 # ===========================================================================
 # T-08：HTML 转义
 # ===========================================================================
@@ -470,7 +509,6 @@ class TestRunTelegramPushJob(unittest.TestCase):
             with patch("outlook_web.services.telegram_push._fetch_new_emails_imap") as mock_fetch, patch(
                 "outlook_web.services.telegram_push._fetch_new_emails_graph"
             ) as mock_graph, patch("outlook_web.services.telegram_push._send_telegram_message") as mock_send:
-
                 mock_fetch.return_value = [self._make_email(), self._make_email()]
                 mock_graph.return_value = []
                 self._run_job()
@@ -502,7 +540,6 @@ class TestRunTelegramPushJob(unittest.TestCase):
             with patch("outlook_web.services.telegram_push._fetch_new_emails_imap", return_value=emails), patch(
                 "outlook_web.services.telegram_push._send_telegram_message", return_value=True
             ) as mock_send, patch("outlook_web.services.telegram_push.TELEGRAM_PUSH_DELAY_SEC", 0):
-
                 self._run_job()
 
                 self.assertEqual(mock_send.call_count, 2)
@@ -979,9 +1016,7 @@ class TestImapTimezoneAndCursor(unittest.TestCase):
             received_dt = received_dt.astimezone(tz.utc)
         received_iso = received_dt.strftime("%Y-%m-%dT%H:%M:%S")
 
-        self.assertTrue(
-            received_iso <= cursor_utc, f"CST 17:00 (UTC 09:00) 应在游标 09:30 之前被过滤，但 received_iso={received_iso}"
-        )
+        self.assertTrue(received_iso <= cursor_utc, f"CST 17:00 (UTC 09:00) 应在游标 09:30 之前被过滤，但 received_iso={received_iso}")
 
     def test_cst_email_after_cursor_passes_filter(self):
         """CST 邮件转 UTC 后若在游标之后应通过"""

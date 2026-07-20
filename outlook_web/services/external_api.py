@@ -227,7 +227,13 @@ def ensure_external_email_scope(
     mailbox_resolver.ensure_mailbox_can_read(mailbox, consumer=consumer, allow_finished=allow_finished)
 
 
-def _build_message_summary(email_addr: str, item: Dict[str, Any], *, method: str) -> Dict[str, Any]:
+def _build_message_summary(
+    email_addr: str,
+    item: Dict[str, Any],
+    *,
+    method: str,
+    include_search_body: bool = False,
+) -> Dict[str, Any]:
     raw_from = item.get("from")
     if isinstance(raw_from, dict):
         from_address = (raw_from.get("emailAddress") or {}).get("address") or ""
@@ -249,7 +255,7 @@ def _build_message_summary(email_addr: str, item: Dict[str, Any], *, method: str
 
     is_read = bool(item.get("isRead") if "isRead" in item else item.get("is_read") or item.get("isRead") or False)
 
-    return {
+    summary = {
         "id": str(item.get("id") or ""),
         "email_address": email_addr,
         "from_address": from_address,
@@ -261,6 +267,11 @@ def _build_message_summary(email_addr: str, item: Dict[str, Any], *, method: str
         "is_read": is_read,
         "method": method,
     }
+    if include_search_body and "_search_body" in item:
+        summary["_search_body"] = str(item.get("_search_body") or "")
+    if include_search_body and "_search_body_html" in item:
+        summary["_search_body_html"] = str(item.get("_search_body_html") or "")
+    return summary
 
 
 def _get_proxy_url(account: Dict[str, Any]) -> str:
@@ -491,6 +502,7 @@ def list_messages_for_external(  # noqa: C901
     skip: int = 0,
     top: int = 20,
     discover_remote: bool = True,
+    include_search_body: bool = False,
 ) -> Tuple[List[Dict[str, Any]], str]:
     mailbox = mailbox_resolver.resolve_mailbox(email_addr, discover_remote=discover_remote)
     email_addr = str(mailbox.get("email") or email_addr).strip()
@@ -525,11 +537,20 @@ def list_messages_for_external(  # noqa: C901
             provider=account.get("provider", "_default") or "_default",
             skip=skip,
             top=top,
+            include_search_body=include_search_body,
         )
         if not result.get("success"):
             raise UpstreamReadFailedError("IMAP 读取失败", data=result.get("error"))
         method_label = str(result.get("method") or "IMAP (Generic)")
-        emails = [_build_message_summary(email_addr, e, method=method_label) for e in (result.get("emails") or [])]
+        emails = [
+            _build_message_summary(
+                email_addr,
+                e,
+                method=method_label,
+                include_search_body=include_search_body,
+            )
+            for e in (result.get("emails") or [])
+        ]
         return emails, method_label
 
     proxy_url = _get_proxy_url(account)
@@ -555,7 +576,15 @@ def list_messages_for_external(  # noqa: C901
             except Exception:
                 pass
         method_label = str(transport_result.get("method") or "Graph API")
-        emails = [_build_message_summary(email_addr, e, method=method_label) for e in (transport_result.get("emails") or [])]
+        emails = [
+            _build_message_summary(
+                email_addr,
+                e,
+                method=method_label,
+                include_search_body=include_search_body,
+            )
+            for e in (transport_result.get("emails") or [])
+        ]
         return emails, method_label
 
     if transport_result.get("proxy_error"):
@@ -619,6 +648,7 @@ def get_latest_message_for_external(
     since_minutes: Optional[int] = None,
     baseline_timestamp: Optional[int] = None,
     discover_remote: bool = True,
+    include_search_body: bool = False,
 ) -> Dict[str, Any]:
     emails = list_messages_for_external(
         email_addr=email_addr,
@@ -626,6 +656,7 @@ def get_latest_message_for_external(
         skip=0,
         top=20,
         discover_remote=discover_remote,
+        include_search_body=include_search_body,
     )[0]
     filtered = filter_messages(
         emails,
@@ -1118,11 +1149,24 @@ def _run_generic_verification_extract(
         subject_contains=subject_contains,
         since_minutes=since_minutes,
         baseline_timestamp=baseline_timestamp,
+        include_search_body=True,
     )
     message_id = str(latest_summary.get("id") or "")
     method = str(latest_summary.get("method") or "")
 
-    detail = get_message_detail_for_external(email_addr=email_addr, message_id=message_id, folder=folder)
+    inline_body = latest_summary.get("_search_body")
+    if inline_body is not None:
+        detail = {
+            "email_address": latest_summary.get("email_address") or email_addr,
+            "from_address": latest_summary.get("from_address") or "",
+            "subject": latest_summary.get("subject") or "",
+            "content": str(inline_body or ""),
+            "html_content": str(latest_summary.get("_search_body_html") or ""),
+            "created_at": latest_summary.get("created_at") or "",
+            "method": method,
+        }
+    else:
+        detail = get_message_detail_for_external(email_addr=email_addr, message_id=message_id, folder=folder)
 
     email_obj = {
         "subject": detail.get("subject") or "",

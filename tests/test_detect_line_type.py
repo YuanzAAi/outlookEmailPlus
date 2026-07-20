@@ -99,6 +99,12 @@ class TestDetectLineType(unittest.TestCase):
         self.assertEqual(r["provider"], "gmail")
         self.assertEqual(r["fields"]["imap_host"], "imap.gmail.com")
 
+    def test_2_parts_icloud_inferred(self):
+        r = self._detect("user@icloud.com----app-specific-password")
+        self.assertEqual(r["type"], "imap")
+        self.assertEqual(r["provider"], "icloud")
+        self.assertEqual(r["fields"]["imap_host"], "imap.mail.me.com")
+
     def test_2_parts_outlook_requires_oauth(self):
         r = self._detect("user@outlook.com----plain-password")
         self.assertEqual(r["type"], "error")

@@ -226,6 +226,7 @@
             const labels = {
                 outlook: 'Outlook',
                 gmail: 'Gmail',
+                icloud: 'iCloud',
                 qq: 'QQ 邮箱',
                 '163': '163 邮箱',
                 '126': '126 邮箱',
