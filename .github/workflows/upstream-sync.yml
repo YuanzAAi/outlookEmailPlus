@@ -113,12 +113,6 @@ jobs:
         if: steps.detect.outputs.updated == 'true'
         run: git push origin HEAD:main
 
-      - name: Trigger verified GHCR build
-        if: steps.detect.outputs.updated == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh workflow run docker-build-push.yml --ref main
-
   report-sync-status:
     if: always() && (needs.sync.result == 'failure' || needs.sync.outputs.updated == 'true')
     needs: sync

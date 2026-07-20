@@ -130,14 +130,14 @@ jobs:
         shell: bash
         run: |
           # GHCR 要求小写
-          echo "ghcr_image=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/outlook-email-plus-patch" >> "$GITHUB_OUTPUT"
+          echo "ghcr_image=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/outlook-email-plus" >> "$GITHUB_OUTPUT"
 
           if [ -n "${{ secrets.DOCKERHUB_USERNAME }}" ] && [ -n "${{ secrets.DOCKERHUB_TOKEN }}" ]; then
             echo "dockerhub_enabled=true" >> "$GITHUB_OUTPUT"
-            echo "images=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/outlook-email-plus-patch,${{ env.DOCKERHUB_IMAGE }}" >> "$GITHUB_OUTPUT"
+            echo "images=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/outlook-email-plus,${{ env.DOCKERHUB_IMAGE }}" >> "$GITHUB_OUTPUT"
           else
             echo "dockerhub_enabled=false" >> "$GITHUB_OUTPUT"
-            echo "images=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/outlook-email-plus-patch" >> "$GITHUB_OUTPUT"
+            echo "images=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/outlook-email-plus" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Log in to GHCR
