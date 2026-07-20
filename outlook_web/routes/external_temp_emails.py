@@ -25,6 +25,26 @@ def create_blueprint(csrf_exempt: Optional[Callable] = None) -> Blueprint:
             external_temp_emails_controller.api_external_finish_temp_email,
             ["POST"],
         ),
+        (
+            "/api/external/temp-emails/<path:email_addr>/send",
+            external_temp_emails_controller.api_external_send_temp_email,
+            ["POST"],
+        ),
+        (
+            "/api/external/temp-emails/<path:email_addr>/sent",
+            external_temp_emails_controller.api_external_get_temp_email_sent_messages,
+            ["GET"],
+        ),
+        (
+            "/api/external/temp-emails/<path:email_addr>/sent/<path:message_id>",
+            external_temp_emails_controller.api_external_delete_temp_email_sent_message,
+            ["DELETE"],
+        ),
+        (
+            "/api/external/temp-emails/<path:email_addr>/sent",
+            external_temp_emails_controller.api_external_clear_temp_email_sent_messages,
+            ["DELETE"],
+        ),
     ]
 
     for path, handler, methods in handlers:

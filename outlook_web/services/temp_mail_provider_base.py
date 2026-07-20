@@ -64,6 +64,43 @@ class TempMailProviderBase(ABC):
         """可选能力：增量列出远程地址元数据。"""
         return {"results": [], "next_cursor": int(after_id or 0), "supported": False}
 
+    def get_capabilities(self, mailbox: dict[str, Any] | None = None) -> dict[str, bool]:
+        """返回可选能力；旧 Provider 默认不支持发信和发件箱。"""
+        return {
+            "send_message": False,
+            "list_sent_messages": False,
+            "delete_sent_message": False,
+            "clear_sent_messages": False,
+        }
+
+    def send_message(
+        self,
+        mailbox: dict[str, Any],
+        *,
+        to_email: str,
+        subject: str,
+        content: str,
+        is_html: bool = False,
+        from_name: str = "",
+        to_name: str = "",
+    ) -> dict[str, Any]:
+        raise NotImplementedError
+
+    def list_sent_messages(
+        self,
+        mailbox: dict[str, Any],
+        *,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        raise NotImplementedError
+
+    def delete_sent_message(self, mailbox: dict[str, Any], message_id: str) -> bool:
+        raise NotImplementedError
+
+    def clear_sent_messages(self, mailbox: dict[str, Any]) -> bool:
+        raise NotImplementedError
+
     @abstractmethod
     def delete_mailbox(self, mailbox: dict[str, Any]) -> bool:
         raise NotImplementedError

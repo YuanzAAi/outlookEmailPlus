@@ -264,6 +264,7 @@
         // CSS 配套: .workspace.workspace-temp-emails.detail-focus 规则(平板+移动端)
         function setTempDetailFocus(active) {
             const workspace = document.querySelector('.workspace.workspace-temp-emails');
+            const accountPanel = document.getElementById('tempEmailPanel');
             const messagePanel = document.getElementById('tempEmailMessagePanel');
             const detailPanel = document.getElementById('tempEmailDetailSection');
             if (!workspace) return;
@@ -272,12 +273,15 @@
             workspace.classList.toggle('detail-focus', shouldFocus);
 
             if (shouldFocus) {
+                if (accountPanel) accountPanel.style.display = 'none';
                 if (messagePanel) messagePanel.style.display = 'none';
                 if (detailPanel) detailPanel.style.display = 'flex';
             } else if (isNarrowWorkspaceViewport()) {
+                if (accountPanel) accountPanel.style.display = '';
                 if (messagePanel) messagePanel.style.display = '';
                 if (detailPanel) detailPanel.style.display = 'none';
             } else {
+                if (accountPanel) accountPanel.style.display = '';
                 if (messagePanel) messagePanel.style.display = '';
                 if (detailPanel) detailPanel.style.display = '';
             }

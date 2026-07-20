@@ -8,6 +8,7 @@ from flask import jsonify, request
 from outlook_web.audit import log_audit
 from outlook_web.db import get_db
 from outlook_web.errors import build_error_response
+from outlook_web.repositories import settings as settings_repo
 from outlook_web.security.auth import login_required
 from outlook_web.services.temp_email_content import (
     build_inline_resource_map,
@@ -29,6 +30,17 @@ def _parse_bool_flag(value: Any, default: bool = False) -> bool:
     if isinstance(value, (int, float)):
         return bool(value)
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _parse_sent_pagination() -> tuple[int, int]:
+    try:
+        limit = int(request.args.get("limit") or 100)
+        offset = int(request.args.get("offset") or 0)
+    except (TypeError, ValueError) as exc:
+        raise TempMailError("INVALID_PARAM", "分页参数无效", status=400) from exc
+    if limit < 1 or limit > 100 or offset < 0:
+        raise TempMailError("INVALID_PARAM", "分页参数无效", status=400)
+    return limit, offset
 
 
 _TEMP_VERIFICATION_CODE_SOURCES = {"subject", "content", "html", "all"}
@@ -69,7 +81,13 @@ def _should_refresh_temp_email_detail(msg: dict[str, Any] | None) -> bool:
 def api_get_temp_emails() -> Any:
     """获取所有临时邮箱"""
     emails = temp_mail_service.list_user_mailboxes()
-    return jsonify({"success": True, "emails": emails})
+    return jsonify(
+        {
+            "success": True,
+            "emails": emails,
+            "provider_name": settings_repo.get_temp_mail_runtime_provider_name(),
+        }
+    )
 
 
 @login_required
@@ -336,6 +354,73 @@ def api_clear_temp_email_messages(email_addr: str) -> Any:
             status=500,
             message_en="Failed to clear messages",
         )
+
+
+@login_required
+def api_send_temp_email_message(email_addr: str) -> Any:
+    body = request.get_json(silent=True) or {}
+    try:
+        result = temp_mail_service.send_message(
+            email_addr,
+            to_email=str(body.get("to_email") or body.get("to") or "").strip(),
+            to_name=str(body.get("to_name") or "").strip(),
+            from_name=str(body.get("from_name") or "").strip(),
+            subject=str(body.get("subject") or ""),
+            content=str(body.get("content") or body.get("body") or ""),
+            is_html=_parse_bool_flag(body.get("is_html"), default=False),
+        )
+        log_audit(
+            "send",
+            "temp_email_message",
+            email_addr,
+            f"临时邮箱发信（to={str(body.get('to_email') or body.get('to') or '').strip()}）",
+        )
+        return jsonify({"success": True, "data": result, "message": "邮件已发送", "message_en": "Message sent"})
+    except TempMailError as exc:
+        return build_error_response(exc.code, exc.message, status=exc.status, message_en="Failed to send message")
+
+
+@login_required
+def api_get_temp_email_sent_messages(email_addr: str) -> Any:
+    try:
+        limit, offset = _parse_sent_pagination()
+        result = temp_mail_service.list_sent_messages(email_addr, limit=limit, offset=offset)
+        return jsonify(
+            {
+                "success": True,
+                "sent_items": result["items"],
+                "count": result["count"],
+                "limit": limit,
+                "offset": offset,
+            }
+        )
+    except TempMailError as exc:
+        return build_error_response(exc.code, exc.message, status=exc.status, message_en="Failed to fetch sent items")
+
+
+@login_required
+def api_delete_temp_email_sent_message(email_addr: str, message_id: str) -> Any:
+    try:
+        temp_mail_service.delete_sent_message(email_addr, message_id)
+        log_audit(
+            "delete",
+            "temp_email_sent_message",
+            message_id,
+            f"删除临时邮箱发件记录（email={email_addr}）",
+        )
+        return jsonify({"success": True, "message": "发件记录已删除", "message_en": "Sent item deleted"})
+    except TempMailError as exc:
+        return build_error_response(exc.code, exc.message, status=exc.status, message_en="Failed to delete sent item")
+
+
+@login_required
+def api_clear_temp_email_sent_messages(email_addr: str) -> Any:
+    try:
+        temp_mail_service.clear_sent_messages(email_addr)
+        log_audit("delete", "temp_email_sent_messages", email_addr, "清空临时邮箱发件箱")
+        return jsonify({"success": True, "message": "发件箱已清空", "message_en": "Sent items cleared"})
+    except TempMailError as exc:
+        return build_error_response(exc.code, exc.message, status=exc.status, message_en="Failed to clear sent items")
 
 
 @login_required

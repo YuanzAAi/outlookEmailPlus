@@ -9,6 +9,9 @@
         // - selectTempEmail 主动 stopAllPolls，避免轮询继续跑 /api/emails 导致报错与串号。
         let tempEmailMessagesRequestSeq = 0;
         let tempEmailDetailRequestSeq = 0;
+        let tempEmailSentRequestSeq = 0;
+        let tempEmailViewMode = 'inbox';
+        let tempEmailSentItems = [];
 
         function getTempEmailOptionsProviderName(providerName = null) {
             const explicitProvider = String(providerName || '').trim();
@@ -157,17 +160,94 @@
             }
         }
 
+        function getCurrentTempMailboxInfo() {
+            const target = String(currentAccount || '').trim().toLowerCase();
+            const mailboxes = Array.isArray(accountsCache['temp']) ? accountsCache['temp'] : [];
+            return mailboxes.find(item => String(item?.email || '').trim().toLowerCase() === target) || null;
+        }
+
+        function currentTempMailboxSupports(capability) {
+            const mailbox = getCurrentTempMailboxInfo();
+            return Boolean(mailbox && mailbox.capabilities && mailbox.capabilities[capability]);
+        }
+
+        function configureTempEmailDetailToolbar(mode) {
+            const inboxMode = mode === 'inbox';
+            const sentMode = mode === 'sent';
+            const composeMode = mode === 'compose';
+            const visibility = {
+                tempEmailDetailBackBtn: inboxMode || sentMode || composeMode,
+                tempEmailFullscreenBtn: inboxMode || sentMode,
+                tempEmailVerificationBtn: inboxMode,
+                tempEmailTrustLabel: inboxMode,
+                tempEmailInboxDeleteBtn: inboxMode,
+                tempEmailSentDeleteBtn: sentMode && currentTempMailboxSupports('delete_sent_message')
+            };
+            Object.entries(visibility).forEach(([id, visible]) => {
+                const element = document.getElementById(id);
+                if (element) element.style.display = visible ? '' : 'none';
+            });
+            const title = document.getElementById('tempEmailDetailTitle');
+            if (title) {
+                title.textContent = mode === 'sent'
+                    ? translateAppTextLocal('已发送详情')
+                    : mode === 'compose'
+                        ? translateAppTextLocal('写信')
+                        : translateAppTextLocal('邮件详情');
+            }
+        }
+
+        function handleTempEmailDetailBack() {
+            if (tempEmailViewMode === 'compose') {
+                switchTempEmailView('inbox');
+                return;
+            }
+            showEmailList();
+        }
+
+        function updateTempEmailViewControls() {
+            const hasMailbox = Boolean(currentAccount && isTempEmailGroup);
+            const actions = document.getElementById('tempEmailViewActions');
+            if (actions) actions.style.display = hasMailbox ? 'flex' : 'none';
+
+            const inboxTab = document.getElementById('tempEmailInboxTab');
+            const sentTab = document.getElementById('tempEmailSentTab');
+            const composeBtn = document.getElementById('tempEmailComposeBtn');
+            const refreshBtn = document.getElementById('tempEmailRefreshBtn');
+            const clearSentBtn = document.getElementById('tempEmailClearSentBtn');
+            if (inboxTab) inboxTab.classList.toggle('active', tempEmailViewMode === 'inbox');
+            if (sentTab) {
+                sentTab.classList.toggle('active', tempEmailViewMode === 'sent');
+                sentTab.disabled = !hasMailbox || !currentTempMailboxSupports('list_sent_messages');
+            }
+            if (composeBtn) composeBtn.disabled = !hasMailbox || !currentTempMailboxSupports('send_message');
+            if (refreshBtn) refreshBtn.style.display = hasMailbox && tempEmailViewMode !== 'compose' ? '' : 'none';
+            if (clearSentBtn) {
+                clearSentBtn.style.display = hasMailbox && tempEmailViewMode === 'sent' && currentTempMailboxSupports('clear_sent_messages')
+                    ? ''
+                    : 'none';
+            }
+        }
+
+        function syncTempEmailProviderSelect(mailboxes, runtimeProvider = '') {
+            const providerSelect = document.getElementById('tempEmailProviderSelect');
+            const firstProvider = Array.isArray(mailboxes) && mailboxes.length
+                ? String(mailboxes[0]?.provider_name || '').trim()
+                : '';
+            const targetProvider = String(runtimeProvider || firstProvider || '').trim();
+            if (providerSelect && targetProvider && Array.from(providerSelect.options).some(option => option.value === targetProvider)) {
+                providerSelect.value = targetProvider;
+            }
+            loadTempEmailOptions(false, targetProvider || providerSelect?.value || '');
+        }
+
         // 加载临时邮箱列表
         async function loadTempEmails(forceRefresh = false) {
             const container = document.getElementById('accountList');
             const pageContainer = document.getElementById('tempEmailContainer');
 
-            const providerSelect = document.getElementById('tempEmailProviderSelect');
-            if (providerSelect) {
-                loadTempEmailOptions(forceRefresh, providerSelect.value);
-            }
-
             if (!forceRefresh && accountsCache['temp']) {
+                syncTempEmailProviderSelect(accountsCache['temp']);
                 renderTempEmailList(accountsCache['temp']);
                 return;
             }
@@ -182,6 +262,7 @@
 
                 if (data.success) {
                     accountsCache['temp'] = data.emails;
+                    syncTempEmailProviderSelect(data.emails, data.provider_name);
                     renderTempEmailList(data.emails);
 
                     const group = groups.find(g => g.name === '临时邮箱');
@@ -307,6 +388,9 @@
             isTempEmailGroup = true;
             currentEmailDetail = null;
             isTrustedMode = false;
+            tempEmailViewMode = 'inbox';
+            tempEmailSentItems = [];
+            tempEmailSentRequestSeq++;
 
             // Update mailbox page bar (if visible)
             const bar = document.getElementById('currentAccountBar');
@@ -318,7 +402,7 @@
             document.querySelectorAll('.account-card').forEach(item => {
                 item.classList.remove('active');
                 const emailEl = item.querySelector('.account-email');
-                if (emailEl && emailEl.textContent.includes(email)) {
+                if (emailEl && emailEl.textContent.trim().toLowerCase() === String(email).trim().toLowerCase()) {
                     item.classList.add('active');
                 }
             });
@@ -328,6 +412,8 @@
             if (tempName) tempName.textContent = email;
             const tempRefreshBtn = document.getElementById('tempEmailRefreshBtn');
             if (tempRefreshBtn) tempRefreshBtn.style.display = '';
+            updateTempEmailViewControls();
+            configureTempEmailDetailToolbar('inbox');
 
             // Hide folder tabs (temp emails don't support folders)
             const folderTabs = document.getElementById('folderTabs');
@@ -336,7 +422,7 @@
             // Show loading in message area (prefer temp-emails page container)
             const tempMsgList = document.getElementById('tempEmailMessageList');
             const emailList = document.getElementById('emailList');
-            const loadingHTML = `<div class="empty-state"><span class="empty-icon">📬</span><p>${translateAppTextLocal('点击"获取邮件"按钮获取邮件')}</p></div>`;
+            const loadingHTML = '<div class="loading-overlay"><span class="spinner"></span></div>';
 
             if (tempMsgList) tempMsgList.innerHTML = loadingHTML;
             if (emailList) {
@@ -359,6 +445,164 @@
 
             // Auto-fetch messages
             loadTempEmailMessages(email);
+        }
+
+        function switchTempEmailView(mode) {
+            const normalizedMode = mode === 'sent' ? 'sent' : 'inbox';
+            if (!currentAccount || !isTempEmailGroup) {
+                showToast(translateAppTextLocal('请先选择一个临时邮箱'), 'warning');
+                return;
+            }
+            if (normalizedMode === 'sent' && !currentTempMailboxSupports('list_sent_messages')) {
+                showToast(translateAppTextLocal('当前临时邮箱不支持发件箱'), 'warning');
+                return;
+            }
+
+            tempEmailViewMode = normalizedMode;
+            tempEmailMessagesRequestSeq++;
+            tempEmailDetailRequestSeq++;
+            tempEmailSentRequestSeq++;
+            currentEmailDetail = null;
+            updateTempEmailViewControls();
+            configureTempEmailDetailToolbar(normalizedMode);
+            if (typeof resetEmailDetailState === 'function') {
+                resetEmailDetailState({ source: 'temp' });
+            }
+            if (typeof setTempDetailFocus === 'function') {
+                setTempDetailFocus(false);
+            }
+            if (normalizedMode === 'sent') {
+                loadTempEmailSentMessages(currentAccount);
+            } else {
+                loadTempEmailMessages(currentAccount);
+            }
+        }
+
+        function refreshCurrentTempEmailView() {
+            if (!currentAccount || !isTempEmailGroup) return;
+            if (tempEmailViewMode === 'sent') {
+                loadTempEmailSentMessages(currentAccount);
+            } else if (tempEmailViewMode === 'inbox') {
+                loadTempEmailMessages(currentAccount);
+            }
+        }
+
+        function openTempEmailCompose() {
+            if (!currentAccount || !isTempEmailGroup) {
+                showToast(translateAppTextLocal('请先选择一个临时邮箱'), 'warning');
+                return;
+            }
+            if (!currentTempMailboxSupports('send_message')) {
+                showToast(translateAppTextLocal('当前临时邮箱域名未启用发信'), 'warning');
+                return;
+            }
+
+            tempEmailViewMode = 'compose';
+            tempEmailMessagesRequestSeq++;
+            tempEmailDetailRequestSeq++;
+            tempEmailSentRequestSeq++;
+            currentEmailDetail = null;
+            updateTempEmailViewControls();
+            configureTempEmailDetailToolbar('compose');
+            if (typeof showEmailDetailContainer === 'function') {
+                showEmailDetailContainer({ source: 'temp' });
+            }
+            if (typeof setTempDetailFocus === 'function') {
+                setTempDetailFocus(true);
+            }
+            if (typeof setEmailDetailToolbarVisibility === 'function') {
+                setEmailDetailToolbarVisibility(true, { source: 'temp' });
+            }
+
+            const list = document.getElementById('tempEmailMessageList');
+            if (list) {
+                list.innerHTML = `<div class="empty-state"><span class="empty-icon">✉</span><p>${translateAppTextLocal('正在写信')}</p></div>`;
+            }
+            const detail = document.getElementById('tempEmailDetail');
+            if (!detail) return;
+            detail.innerHTML = `
+                <form class="temp-mail-compose" onsubmit="sendTempEmailMessage(event)">
+                    <div class="temp-mail-compose-grid">
+                        <div class="form-group">
+                            <label class="form-label" for="tempComposeFrom">${translateAppTextLocal('发件邮箱')}</label>
+                            <input class="form-input" id="tempComposeFrom" value="${escapeHtml(currentAccount)}" readonly>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label" for="tempComposeFromName">${translateAppTextLocal('发件人名称')}</label>
+                            <input class="form-input" id="tempComposeFromName" maxlength="200">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label" for="tempComposeTo">${translateAppTextLocal('收件邮箱')}</label>
+                            <input class="form-input" id="tempComposeTo" type="email" maxlength="320" required autocomplete="off">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label" for="tempComposeToName">${translateAppTextLocal('收件人名称')}</label>
+                            <input class="form-input" id="tempComposeToName" maxlength="200">
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label" for="tempComposeSubject">${translateAppTextLocal('主题')}</label>
+                        <input class="form-input" id="tempComposeSubject" maxlength="500" required>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label" for="tempComposeFormat">${translateAppTextLocal('正文格式')}</label>
+                        <select class="form-input" id="tempComposeFormat">
+                            <option value="text">${translateAppTextLocal('纯文本')}</option>
+                            <option value="html">HTML</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label" for="tempComposeContent">${translateAppTextLocal('正文')}</label>
+                        <textarea class="form-input" id="tempComposeContent" maxlength="500000" required></textarea>
+                    </div>
+                    <div class="temp-mail-compose-actions">
+                        <button type="button" class="btn btn-ghost" onclick="switchTempEmailView('inbox')">${translateAppTextLocal('取消')}</button>
+                        <button type="submit" class="btn btn-primary" id="tempComposeSendBtn">${translateAppTextLocal('发送')}</button>
+                    </div>
+                </form>
+            `;
+            const toInput = document.getElementById('tempComposeTo');
+            if (toInput) toInput.focus();
+        }
+
+        async function sendTempEmailMessage(event) {
+            event.preventDefault();
+            if (!currentAccount || tempEmailViewMode !== 'compose') return;
+            const sendButton = document.getElementById('tempComposeSendBtn');
+            const payload = {
+                from_name: String(document.getElementById('tempComposeFromName')?.value || '').trim(),
+                to_email: String(document.getElementById('tempComposeTo')?.value || '').trim(),
+                to_name: String(document.getElementById('tempComposeToName')?.value || '').trim(),
+                subject: String(document.getElementById('tempComposeSubject')?.value || '').trim(),
+                content: String(document.getElementById('tempComposeContent')?.value || ''),
+                is_html: document.getElementById('tempComposeFormat')?.value === 'html'
+            };
+            if (sendButton) {
+                sendButton.disabled = true;
+                sendButton.textContent = translateAppTextLocal('发送中...');
+            }
+            try {
+                const mailboxEmail = String(currentAccount || '').trim();
+                const response = await fetch(`/api/temp-emails/${encodeURIComponent(mailboxEmail)}/send`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const data = await response.json();
+                if (!response.ok || !data.success) {
+                    handleApiError(data, '发送失败');
+                    return;
+                }
+                showToast(translateAppTextLocal('邮件已发送'), 'success');
+                switchTempEmailView('sent');
+            } catch (error) {
+                showToast(translateAppTextLocal('发送失败'), 'error');
+            } finally {
+                if (sendButton && document.body.contains(sendButton)) {
+                    sendButton.disabled = false;
+                    sendButton.textContent = translateAppTextLocal('发送');
+                }
+            }
         }
 
         // 清空临时邮箱的所有邮件
@@ -428,6 +672,11 @@
                         currentEmails = [];
                         currentEmailDetail = null;
                         isTrustedMode = false;
+                        tempEmailViewMode = 'inbox';
+                        tempEmailSentItems = [];
+                        tempEmailMessagesRequestSeq++;
+                        tempEmailDetailRequestSeq++;
+                        tempEmailSentRequestSeq++;
                         const currentAccountBar = document.getElementById('currentAccountBar');
                         if (currentAccountBar) currentAccountBar.style.display = 'none';
                         const emptyMailboxHTML = `
@@ -450,6 +699,8 @@
                         if (tempName) tempName.textContent = translateAppTextLocal('选择一个临时邮箱');
                         const tempRefreshBtn = document.getElementById('tempEmailRefreshBtn');
                         if (tempRefreshBtn) tempRefreshBtn.style.display = 'none';
+                        updateTempEmailViewControls();
+                        configureTempEmailDetailToolbar('inbox');
                         if (typeof resetEmailDetailState === 'function') {
                             resetEmailDetailState({ source: 'temp' });
                         }
@@ -488,7 +739,7 @@
             const refreshBtn = document.getElementById('tempEmailRefreshBtn');
             if (refreshBtn) {
                 refreshBtn.disabled = true;
-                refreshBtn.textContent = translateAppTextLocal('获取中...');
+                refreshBtn.textContent = '…';
             }
 
             try {
@@ -496,7 +747,7 @@
                 const data = await response.json();
 
                 // 丢弃旧请求：用户已切换到其它邮箱或新请求已发起
-                if (requestSeq !== tempEmailMessagesRequestSeq || currentAccount !== targetEmail) {
+                if (requestSeq !== tempEmailMessagesRequestSeq || currentAccount !== targetEmail || tempEmailViewMode !== 'inbox') {
                     return;
                 }
 
@@ -528,7 +779,7 @@
                     if (tempContainer) tempContainer.innerHTML = errHTML;
                 }
             } catch (error) {
-                if (requestSeq !== tempEmailMessagesRequestSeq || currentAccount !== targetEmail) {
+                if (requestSeq !== tempEmailMessagesRequestSeq || currentAccount !== targetEmail || tempEmailViewMode !== 'inbox') {
                     return;
                 }
                 const errHTML = '<div class="empty-state"><span class="empty-icon">⚠️</span><p>网络错误，请重试</p></div>';
@@ -539,9 +790,145 @@
                     // 仅当前最新请求结束时才恢复按钮状态，避免旧请求提前解锁。
                     if (requestSeq === tempEmailMessagesRequestSeq) {
                         refreshBtn.disabled = false;
-                        refreshBtn.textContent = translateAppTextLocal('🔄 获取邮件');
+                        refreshBtn.textContent = '↻';
+                        refreshBtn.title = translateAppTextLocal('刷新');
                     }
                 }
+            }
+        }
+
+        async function loadTempEmailSentMessages(email) {
+            const container = document.getElementById('tempEmailMessageList');
+            const requestSeq = ++tempEmailSentRequestSeq;
+            const targetEmail = String(email || '').trim();
+            const refreshBtn = document.getElementById('tempEmailRefreshBtn');
+            currentEmailDetail = null;
+            if (typeof resetEmailDetailState === 'function') {
+                resetEmailDetailState({ source: 'temp' });
+            }
+            configureTempEmailDetailToolbar('sent');
+            if (container) container.innerHTML = '<div class="loading-overlay"><span class="spinner"></span></div>';
+            if (refreshBtn) {
+                refreshBtn.disabled = true;
+                refreshBtn.textContent = '…';
+            }
+
+            try {
+                const response = await fetch(`/api/temp-emails/${encodeURIComponent(targetEmail)}/sent?limit=100&offset=0`);
+                const data = await response.json();
+                if (requestSeq !== tempEmailSentRequestSeq || currentAccount !== targetEmail || tempEmailViewMode !== 'sent') {
+                    return;
+                }
+                if (!response.ok || !data.success) {
+                    handleApiError(data, '加载发件箱失败');
+                    if (container) {
+                        container.innerHTML = `<div class="empty-state"><span class="empty-icon">⚠️</span><p>${window.resolveApiErrorMessage ? window.resolveApiErrorMessage(data.error || data, '加载失败', 'Load failed') : translateAppTextLocal('加载失败')}</p></div>`;
+                    }
+                    return;
+                }
+                tempEmailSentItems = Array.isArray(data.sent_items) ? data.sent_items : [];
+                renderTempEmailSentMessageList(container, tempEmailSentItems);
+            } catch (error) {
+                if (requestSeq !== tempEmailSentRequestSeq || currentAccount !== targetEmail || tempEmailViewMode !== 'sent') {
+                    return;
+                }
+                if (container) {
+                    container.innerHTML = `<div class="empty-state"><span class="empty-icon">⚠️</span><p>${translateAppTextLocal('网络错误，请重试')}</p></div>`;
+                }
+            } finally {
+                if (refreshBtn && requestSeq === tempEmailSentRequestSeq) {
+                    refreshBtn.disabled = false;
+                    refreshBtn.textContent = '↻';
+                    refreshBtn.title = translateAppTextLocal('刷新');
+                }
+            }
+        }
+
+        function renderTempEmailSentMessageList(container, items) {
+            if (!container) return;
+            if (!items || items.length === 0) {
+                container.innerHTML = `<div class="empty-state"><span class="empty-icon">✉</span><p>${translateAppTextLocal('暂无已发送邮件')}</p></div>`;
+                return;
+            }
+            container.innerHTML = items.map((item, index) => `
+                <div class="email-item" onclick="showTempEmailSentDetail(${index})">
+                    <div class="email-subject">${escapeHtml(item.subject || translateAppTextLocal('无主题'))}</div>
+                    <div class="email-from">${escapeHtml(item.to || item.to_email || translateAppTextLocal('未知收件人'))}</div>
+                    <div class="email-preview">${escapeHtml(String(item.content || '').substring(0, 80))}</div>
+                    <div class="email-date">${escapeHtml(item.created_at || '')}</div>
+                </div>
+            `).join('');
+        }
+
+        function showTempEmailSentDetail(index) {
+            if (tempEmailViewMode !== 'sent') return;
+            const item = tempEmailSentItems[index];
+            if (!item) return;
+            document.querySelectorAll('#tempEmailMessageList .email-item').forEach((element, itemIndex) => {
+                element.classList.toggle('active', itemIndex === index);
+            });
+            currentEmailDetail = {
+                id: item.id,
+                from: item.from || currentAccount,
+                to: item.to || item.to_email || '',
+                subject: item.subject || translateAppTextLocal('无主题'),
+                body: item.content || '',
+                body_type: item.body_type || (item.is_html ? 'html' : 'text'),
+                date: item.created_at || '',
+                timestamp: item.timestamp || 0
+            };
+            if (typeof showEmailDetailContainer === 'function') {
+                showEmailDetailContainer({ source: 'temp' });
+            }
+            if (typeof setTempDetailFocus === 'function') {
+                setTempDetailFocus(true);
+            }
+            configureTempEmailDetailToolbar('sent');
+            if (typeof setEmailDetailToolbarVisibility === 'function') {
+                setEmailDetailToolbarVisibility(true, { source: 'temp' });
+            }
+            renderEmailDetail(currentEmailDetail, { source: 'temp' });
+        }
+
+        async function deleteCurrentTempEmailSentMessage() {
+            if (tempEmailViewMode !== 'sent' || !currentEmailDetail?.id || !currentAccount) return;
+            if (!confirm(translateAppTextLocal('确定要删除这条发件记录吗？'))) return;
+            try {
+                const response = await fetch(
+                    `/api/temp-emails/${encodeURIComponent(currentAccount)}/sent/${encodeURIComponent(currentEmailDetail.id)}`,
+                    { method: 'DELETE' }
+                );
+                const data = await response.json();
+                if (!response.ok || !data.success) {
+                    handleApiError(data, '删除发件记录失败');
+                    return;
+                }
+                showToast(translateAppTextLocal('发件记录已删除'), 'success');
+                currentEmailDetail = null;
+                if (typeof setTempDetailFocus === 'function') setTempDetailFocus(false);
+                loadTempEmailSentMessages(currentAccount);
+            } catch (error) {
+                showToast(translateAppTextLocal('删除失败'), 'error');
+            }
+        }
+
+        async function clearTempEmailSentMessages() {
+            if (!currentAccount || tempEmailViewMode !== 'sent') return;
+            if (!confirm(`${translateAppTextLocal('确定要清空发件箱吗？')}\n${currentAccount}`)) return;
+            try {
+                const response = await fetch(`/api/temp-emails/${encodeURIComponent(currentAccount)}/sent`, { method: 'DELETE' });
+                const data = await response.json();
+                if (!response.ok || !data.success) {
+                    handleApiError(data, '清空发件箱失败');
+                    return;
+                }
+                showToast(translateAppTextLocal('发件箱已清空'), 'success');
+                currentEmailDetail = null;
+                tempEmailSentItems = [];
+                if (typeof setTempDetailFocus === 'function') setTempDetailFocus(false);
+                loadTempEmailSentMessages(currentAccount);
+            } catch (error) {
+                showToast(translateAppTextLocal('清空失败'), 'error');
             }
         }
 
@@ -569,6 +956,7 @@
 
         // 获取临时邮件详情
         async function getTempEmailDetail(messageId, index) {
+            if (tempEmailViewMode !== 'inbox') return;
             document.querySelectorAll('#tempEmailMessageList .email-item').forEach((item, i) => {
                 item.classList.toggle('active', i === index);
             });
@@ -582,6 +970,7 @@
             if (typeof setEmailDetailToolbarVisibility === 'function') {
                 setEmailDetailToolbarVisibility(true, { source: 'temp' });
             }
+            configureTempEmailDetailToolbar('inbox');
 
             const refs = typeof getEmailDetailRefs === 'function'
                 ? getEmailDetailRefs({ source: 'temp' })
@@ -603,7 +992,7 @@
                 const data = await response.json();
 
                 // 丢弃旧请求：用户已切换到其它邮箱或新详情请求已发起
-                if (requestSeq !== tempEmailDetailRequestSeq || String(currentAccount || '').trim() !== mailboxEmail) {
+                if (requestSeq !== tempEmailDetailRequestSeq || String(currentAccount || '').trim() !== mailboxEmail || tempEmailViewMode !== 'inbox') {
                     return;
                 }
 
@@ -621,7 +1010,7 @@
                     }
                 }
             } catch (error) {
-                if (requestSeq !== tempEmailDetailRequestSeq || String(currentAccount || '').trim() !== mailboxEmail) {
+                if (requestSeq !== tempEmailDetailRequestSeq || String(currentAccount || '').trim() !== mailboxEmail || tempEmailViewMode !== 'inbox') {
                     return;
                 }
                 if (container) {

@@ -62,6 +62,26 @@ def create_blueprint(csrf_exempt=None) -> Blueprint:
             temp_emails_controller.api_refresh_temp_email_messages,
             ["POST"],
         ),
+        (
+            "/api/temp-emails/<path:email_addr>/send",
+            temp_emails_controller.api_send_temp_email_message,
+            ["POST"],
+        ),
+        (
+            "/api/temp-emails/<path:email_addr>/sent",
+            temp_emails_controller.api_get_temp_email_sent_messages,
+            ["GET"],
+        ),
+        (
+            "/api/temp-emails/<path:email_addr>/sent/<path:message_id>",
+            temp_emails_controller.api_delete_temp_email_sent_message,
+            ["DELETE"],
+        ),
+        (
+            "/api/temp-emails/<path:email_addr>/sent",
+            temp_emails_controller.api_clear_temp_email_sent_messages,
+            ["DELETE"],
+        ),
     ]
 
     # 注册路由，如果提供了 csrf_exempt 则应用到所有路由

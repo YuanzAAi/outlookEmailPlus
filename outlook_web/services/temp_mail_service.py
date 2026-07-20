@@ -7,6 +7,7 @@ import secrets
 import threading
 import time
 from datetime import datetime, timezone
+from email.utils import parseaddr
 from typing import Any
 
 from outlook_web.repositories import settings as settings_repo
@@ -460,7 +461,12 @@ class TempMailService:
         finally:
             self._remote_sync_lock.release()
 
-    def _ensure_provider_credentials(self, mailbox: dict[str, Any]) -> dict[str, Any]:
+    def _ensure_provider_credentials(
+        self,
+        mailbox: dict[str, Any],
+        *,
+        require_address_id: bool = False,
+    ) -> dict[str, Any]:
         provider = self._get_provider(mailbox=mailbox, purpose="runtime")
         if self._provider_name(provider) != settings_repo.CLOUDFLARE_TEMP_MAIL_PROVIDER:
             return mailbox
@@ -470,7 +476,9 @@ class TempMailService:
                 meta = json.loads(meta)
             except Exception:
                 meta = {}
-        if str(meta.get("provider_jwt") or "").strip():
+        has_jwt = bool(str(meta.get("provider_jwt") or "").strip())
+        has_address_id = bool(str(meta.get("provider_mailbox_id") or "").strip())
+        if has_jwt and (not require_address_id or has_address_id):
             return mailbox
         discovered = self.discover_user_mailbox(str(mailbox.get("email") or ""), provider=provider)
         if not discovered:
@@ -612,12 +620,60 @@ class TempMailService:
 
     def list_user_mailboxes(self) -> list[dict[str, Any]]:
         self.sync_remote_mailboxes(force=False)
-        return temp_emails_repo.load_temp_emails(
+        records = temp_emails_repo.load_temp_emails(
             visible_only=True,
             mailbox_type="user",
             status="active",
-            view="public",
+            view="record",
         )
+        results: list[dict[str, Any]] = []
+        for record in records:
+            mailbox = temp_emails_repo.build_temp_mailbox_descriptor(record)
+            public = temp_emails_repo.build_temp_mailbox_public_dto(record)
+            public["capabilities"] = self.get_mailbox_capabilities(mailbox)
+            results.append(public)
+        return results
+
+    def get_mailbox_capabilities(self, email_or_mailbox: str | dict[str, Any]) -> dict[str, bool]:
+        mailbox = self._get_mailbox_descriptor(email_or_mailbox)
+        stored = dict((mailbox.get("meta") or {}).get("provider_capabilities") or {})
+        try:
+            provider = self._get_provider(mailbox=mailbox)
+            resolver = getattr(provider, "get_capabilities", None)
+            declared = resolver(mailbox) if callable(resolver) else {}
+            if isinstance(declared, dict):
+                stored.update({str(key): bool(value) for key, value in declared.items()})
+        except Exception:
+            pass
+        return {
+            "delete_mailbox": bool(stored.get("delete_mailbox")),
+            "delete_message": bool(stored.get("delete_message", True)),
+            "clear_messages": bool(stored.get("clear_messages", True)),
+            "send_message": bool(stored.get("send_message")),
+            "list_sent_messages": bool(stored.get("list_sent_messages")),
+            "delete_sent_message": bool(stored.get("delete_sent_message")),
+            "clear_sent_messages": bool(stored.get("clear_sent_messages")),
+        }
+
+    def _provider_for_capability(
+        self,
+        email_or_mailbox: str | dict[str, Any],
+        capability: str,
+        *,
+        ensure_credentials: bool = False,
+    ) -> tuple[dict[str, Any], Any]:
+        mailbox = self._get_mailbox_descriptor(email_or_mailbox)
+        if ensure_credentials:
+            mailbox = self._ensure_provider_credentials(mailbox, require_address_id=True)
+        capabilities = self.get_mailbox_capabilities(mailbox)
+        if not capabilities.get(capability):
+            raise TempMailError(
+                "TEMP_EMAIL_CAPABILITY_UNSUPPORTED",
+                "当前临时邮箱 Provider 不支持此操作",
+                status=400,
+                data={"email": mailbox.get("email"), "capability": capability},
+            )
+        return mailbox, self._get_provider(mailbox=mailbox)
 
     def get_mailbox(self, email_addr: str, *, view: str = "record") -> dict[str, Any]:
         record = temp_emails_repo.get_temp_email_by_address(email_addr, view=view)
@@ -953,6 +1009,117 @@ class TempMailService:
         db = get_db()
         db.execute("DELETE FROM temp_email_messages WHERE email_address = ?", (email_addr,))
         db.commit()
+        return True
+
+    def send_message(
+        self,
+        email_or_mailbox: str | dict[str, Any],
+        *,
+        to_email: str,
+        subject: str,
+        content: str,
+        is_html: bool = False,
+        from_name: str = "",
+        to_name: str = "",
+    ) -> dict[str, Any]:
+        normalized_to = parseaddr(str(to_email or "").strip())[1]
+        normalized_subject = str(subject or "").strip()
+        normalized_content = str(content or "")
+        if not normalized_to or "@" not in normalized_to:
+            raise TempMailError("INVALID_PARAM", "收件邮箱地址无效", status=400)
+        if not normalized_subject:
+            raise TempMailError("INVALID_PARAM", "邮件主题不能为空", status=400)
+        if not normalized_content.strip():
+            raise TempMailError("INVALID_PARAM", "邮件正文不能为空", status=400)
+        if len(normalized_to) > 320 or len(normalized_subject) > 500 or len(normalized_content) > 500_000:
+            raise TempMailError("INVALID_PARAM", "邮件字段长度超过限制", status=400)
+
+        mailbox, provider = self._provider_for_capability(email_or_mailbox, "send_message")
+        try:
+            result = provider.send_message(
+                mailbox,
+                to_email=normalized_to,
+                subject=normalized_subject,
+                content=normalized_content,
+                is_html=bool(is_html),
+                from_name=str(from_name or "").strip()[:200],
+                to_name=str(to_name or "").strip()[:200],
+            )
+        except TempMailProviderReadError as exc:
+            raise self._provider_read_failed(exc, mailbox=mailbox, operation="send_message") from exc
+        except NotImplementedError as exc:
+            raise TempMailError(
+                "TEMP_EMAIL_CAPABILITY_UNSUPPORTED",
+                "当前临时邮箱 Provider 不支持发信",
+                status=400,
+            ) from exc
+        if not isinstance(result, dict) or not result.get("success"):
+            raise TempMailError("TEMP_EMAIL_SEND_FAILED", "邮件发送失败", status=502)
+        return result
+
+    def list_sent_messages(
+        self,
+        email_or_mailbox: str | dict[str, Any],
+        *,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        mailbox, provider = self._provider_for_capability(email_or_mailbox, "list_sent_messages")
+        try:
+            result = provider.list_sent_messages(
+                mailbox,
+                limit=max(1, min(int(limit), 100)),
+                offset=max(0, int(offset)),
+            )
+        except TempMailProviderReadError as exc:
+            raise self._provider_read_failed(exc, mailbox=mailbox, operation="list_sent_messages") from exc
+        except NotImplementedError as exc:
+            raise TempMailError(
+                "TEMP_EMAIL_CAPABILITY_UNSUPPORTED",
+                "当前临时邮箱 Provider 不支持发件箱",
+                status=400,
+            ) from exc
+        if not isinstance(result, dict) or not isinstance(result.get("items"), list):
+            raise TempMailError("UPSTREAM_BAD_PAYLOAD", "发件箱返回格式错误", status=502)
+        return {"items": result["items"], "count": int(result.get("count") or 0)}
+
+    def delete_sent_message(self, email_or_mailbox: str | dict[str, Any], message_id: str) -> bool:
+        normalized_id = str(message_id or "").strip()
+        if not normalized_id:
+            raise TempMailError("INVALID_PARAM", "发件记录 ID 不能为空", status=400)
+        mailbox, provider = self._provider_for_capability(email_or_mailbox, "delete_sent_message")
+        try:
+            deleted = provider.delete_sent_message(mailbox, normalized_id)
+        except TempMailProviderReadError as exc:
+            raise self._provider_read_failed(exc, mailbox=mailbox, operation="delete_sent_message") from exc
+        except NotImplementedError as exc:
+            raise TempMailError(
+                "TEMP_EMAIL_CAPABILITY_UNSUPPORTED",
+                "当前临时邮箱 Provider 不支持删除发件记录",
+                status=400,
+            ) from exc
+        if not deleted:
+            raise TempMailError("TEMP_EMAIL_SENT_MESSAGE_DELETE_FAILED", "删除发件记录失败", status=502)
+        return True
+
+    def clear_sent_messages(self, email_or_mailbox: str | dict[str, Any]) -> bool:
+        mailbox, provider = self._provider_for_capability(
+            email_or_mailbox,
+            "clear_sent_messages",
+            ensure_credentials=True,
+        )
+        try:
+            cleared = provider.clear_sent_messages(mailbox)
+        except TempMailProviderReadError as exc:
+            raise self._provider_read_failed(exc, mailbox=mailbox, operation="clear_sent_messages") from exc
+        except NotImplementedError as exc:
+            raise TempMailError(
+                "TEMP_EMAIL_CAPABILITY_UNSUPPORTED",
+                "当前临时邮箱 Provider 不支持清空发件箱",
+                status=400,
+            ) from exc
+        if not cleared:
+            raise TempMailError("TEMP_EMAIL_SENT_MESSAGES_CLEAR_FAILED", "清空发件箱失败", status=502)
         return True
 
     def extract_verification(

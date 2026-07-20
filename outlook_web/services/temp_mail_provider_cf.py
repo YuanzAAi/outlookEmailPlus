@@ -305,6 +305,29 @@ class CloudflareTempMailProvider(TempMailProviderBase):
             return str(meta.get("provider_jwt") or "").strip()
         return ""
 
+    def _get_address_id(self, mailbox: dict[str, Any] | str) -> str:
+        if not isinstance(mailbox, dict):
+            return ""
+        meta = mailbox.get("meta") or {}
+        if isinstance(meta, str):
+            try:
+                meta = json.loads(meta)
+            except Exception:
+                meta = {}
+        return str(meta.get("provider_mailbox_id") or "").strip()
+
+    def get_capabilities(self, mailbox: dict[str, Any] | None = None) -> dict[str, bool]:
+        email_addr = self._coerce_email(mailbox or {})
+        domain = email_addr.rsplit("@", 1)[1].casefold() if "@" in email_addr else ""
+        default_domain = str(settings_repo.get_cf_worker_default_domain() or "").strip().casefold()
+        can_send = bool(domain and default_domain and domain == default_domain)
+        return {
+            "send_message": can_send,
+            "list_sent_messages": True,
+            "delete_sent_message": True,
+            "clear_sent_messages": True,
+        }
+
     def _build_meta(self, *, jwt: str = "", address_id: str = "") -> dict[str, Any]:
         return {
             "provider_name": self.provider_name,
@@ -316,6 +339,10 @@ class CloudflareTempMailProvider(TempMailProviderBase):
                 "delete_mailbox": True,
                 "delete_message": True,
                 "clear_messages": True,
+                "send_message": True,
+                "list_sent_messages": True,
+                "delete_sent_message": True,
+                "clear_sent_messages": True,
             },
             "provider_debug": {"bridge": "cloudflare_worker"},
         }
@@ -583,6 +610,7 @@ class CloudflareTempMailProvider(TempMailProviderBase):
             "provider_name": self.provider_name,
             "provider_label": "cloudflare_temp_mail",
             "api_base_url": self._base_url(),
+            "capabilities": self.get_capabilities(),
         }
 
     def create_mailbox(self, *, prefix: str | None = None, domain: str | None = None) -> dict[str, Any]:
@@ -988,6 +1016,173 @@ class CloudflareTempMailProvider(TempMailProviderBase):
             return resp.ok
         except requests.RequestException as exc:
             logger.warning("[cf_provider] clear_messages failed err=%s", exc)
+            return False
+
+    def send_message(
+        self,
+        mailbox: dict[str, Any],
+        *,
+        to_email: str,
+        subject: str,
+        content: str,
+        is_html: bool = False,
+        from_name: str = "",
+        to_name: str = "",
+    ) -> dict[str, Any]:
+        email_addr = self._coerce_email(mailbox)
+        if not self.get_capabilities(mailbox).get("send_message"):
+            raise CloudflareTempMailProviderError(
+                "TEMP_EMAIL_SEND_UNSUPPORTED",
+                "当前临时邮箱域名未启用发信",
+                data={"email": email_addr},
+            )
+        resp = self._read_request(
+            "POST",
+            "/admin/send_mail",
+            operation="发送邮件",
+            headers=self._admin_headers(),
+            json={
+                "from_name": str(from_name or "").strip(),
+                "from_mail": email_addr,
+                "to_name": str(to_name or "").strip(),
+                "to_mail": str(to_email or "").strip(),
+                "subject": str(subject or "").strip(),
+                "content": str(content or ""),
+                "is_html": bool(is_html),
+            },
+        )
+        if not resp.ok:
+            self._raise_http_error(resp, operation="发送邮件")
+        try:
+            data = resp.json() or {}
+        except Exception as exc:
+            raise CloudflareTempMailProviderError(
+                "UPSTREAM_BAD_PAYLOAD",
+                "CF Worker 发信返回非 JSON 响应",
+            ) from exc
+        return {"success": True, "status": str(data.get("status") or "ok")}
+
+    def list_sent_messages(
+        self,
+        mailbox: dict[str, Any],
+        *,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        email_addr = self._coerce_email(mailbox)
+        resp = self._read_request(
+            "GET",
+            "/admin/sendbox",
+            operation="读取发件箱",
+            headers=self._admin_headers(),
+            params={"address": email_addr, "limit": max(1, min(int(limit), 100)), "offset": max(0, int(offset))},
+        )
+        if not resp.ok:
+            self._raise_http_error(resp, operation="读取发件箱")
+        try:
+            data = resp.json() or {}
+        except Exception as exc:
+            raise CloudflareTempMailProviderError(
+                "UPSTREAM_BAD_PAYLOAD",
+                "CF Worker 发件箱返回非 JSON 响应",
+            ) from exc
+        rows = data.get("results") or []
+        if not isinstance(rows, list):
+            raise CloudflareTempMailProviderError(
+                "UPSTREAM_BAD_PAYLOAD",
+                "CF Worker 发件箱字段格式错误",
+            )
+        return {
+            "items": [self._normalize_cf_sent_message(row) for row in rows if isinstance(row, dict)],
+            "count": _safe_int(data.get("count"), len(rows)),
+        }
+
+    def _normalize_cf_sent_message(self, row: dict[str, Any]) -> dict[str, Any]:
+        raw_value = row.get("raw")
+        if isinstance(raw_value, dict):
+            payload = dict(raw_value)
+        else:
+            try:
+                parsed = json.loads(str(raw_value or "{}"))
+                payload = parsed if isinstance(parsed, dict) else {}
+            except Exception:
+                payload = {}
+
+        if str(payload.get("version") or "").lower() == "v2":
+            to_email = str(payload.get("to_mail") or "").strip()
+            to_name = str(payload.get("to_name") or "").strip()
+            subject = str(payload.get("subject") or "")
+            content = str(payload.get("content") or "")
+            is_html = bool(payload.get("is_html"))
+        else:
+            recipients = payload.get("personalizations") or []
+            recipient_values: list[str] = []
+            for personalization in recipients if isinstance(recipients, list) else []:
+                for recipient in (personalization or {}).get("to") or []:
+                    if isinstance(recipient, dict) and recipient.get("email"):
+                        recipient_values.append(str(recipient["email"]))
+            content_rows = payload.get("content") or []
+            first_content = content_rows[0] if isinstance(content_rows, list) and content_rows else {}
+            to_email = ", ".join(recipient_values)
+            to_name = ""
+            subject = str(payload.get("subject") or "")
+            content = str((first_content or {}).get("value") or "")
+            is_html = str((first_content or {}).get("type") or "").lower() != "text/plain"
+
+        created_at = str(row.get("created_at") or "")
+        raw_id = str(row.get("id") or "").strip()
+        return {
+            "id": f"cf_sent_{raw_id}" if raw_id else "",
+            "from": str(row.get("address") or "").strip(),
+            "to": f"{to_name} <{to_email}>" if to_name else to_email,
+            "to_email": to_email,
+            "to_name": to_name,
+            "subject": subject,
+            "content": content,
+            "is_html": is_html,
+            "body_type": "html" if is_html else "text",
+            "created_at": created_at,
+            "timestamp": _iso_to_timestamp(created_at) if created_at else 0,
+        }
+
+    def delete_sent_message(self, mailbox: dict[str, Any], message_id: str) -> bool:
+        raw_id = str(message_id or "")
+        if raw_id.startswith("cf_sent_"):
+            raw_id = raw_id[len("cf_sent_") :]
+        if not raw_id:
+            return False
+        try:
+            resp = self._request(
+                "DELETE",
+                f"/admin/sendbox/{raw_id}",
+                headers=self._admin_headers(),
+                params={"address": self._coerce_email(mailbox)},
+            )
+            if not resp.ok:
+                return False
+            try:
+                data = resp.json() or {}
+            except Exception:
+                return True
+            return bool(data.get("success", True)) and data.get("deleted", True) is not False
+        except requests.RequestException as exc:
+            logger.warning("[cf_provider] delete_sent_message failed id=%s err=%s", message_id, exc)
+            return False
+
+    def clear_sent_messages(self, mailbox: dict[str, Any]) -> bool:
+        address_id = self._get_address_id(mailbox)
+        if not address_id:
+            logger.warning("[cf_provider] clear_sent_messages: no address_id for %s", self._coerce_email(mailbox))
+            return False
+        try:
+            resp = self._request(
+                "DELETE",
+                f"/admin/clear_sent_items/{address_id}",
+                headers=self._admin_headers(),
+            )
+            return resp.ok
+        except requests.RequestException as exc:
+            logger.warning("[cf_provider] clear_sent_messages failed err=%s", exc)
             return False
 
     def get_cf_worker_domains(self) -> dict[str, Any]:

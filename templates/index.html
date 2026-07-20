@@ -390,9 +390,15 @@
                     <div class="workspace-panel emails-column" id="tempEmailMessagePanel">
                         <div class="column-header">
                             <span class="column-title" id="tempEmailCurrentName" onclick="copyTempEmailCurrent()" title="点击复制邮箱地址" style="cursor:pointer;">选择一个临时邮箱</span>
-                            <div style="display:flex;gap:4px;">
-                                <button class="btn btn-sm btn-ghost" id="tempEmailRefreshBtn" onclick="if(currentAccount && isTempEmailGroup) loadTempEmailMessages(currentAccount)" style="display:none;">🔄 获取邮件</button>
+                        </div>
+                        <div class="temp-mail-header-actions" id="tempEmailViewActions" style="display:none;">
+                            <div class="temp-mail-view-tabs" role="tablist" aria-label="临时邮箱视图">
+                                <button type="button" class="temp-mail-view-tab active" id="tempEmailInboxTab" onclick="switchTempEmailView('inbox')">收件箱</button>
+                                <button type="button" class="temp-mail-view-tab" id="tempEmailSentTab" onclick="switchTempEmailView('sent')">已发送</button>
                             </div>
+                            <button class="btn-icon temp-mail-compose-trigger" id="tempEmailComposeBtn" onclick="openTempEmailCompose()" title="写信" aria-label="写信">✉</button>
+                            <button class="btn-icon" id="tempEmailRefreshBtn" onclick="refreshCurrentTempEmailView()" title="刷新" aria-label="刷新">↻</button>
+                            <button class="btn-icon" id="tempEmailClearSentBtn" onclick="clearTempEmailSentMessages()" title="清空发件箱" aria-label="清空发件箱" style="display:none;">🧹</button>
                         </div>
                         <div class="column-body" id="tempEmailMessageList">
                             <div class="empty-state">
@@ -403,18 +409,19 @@
                     </div>
                     <div class="workspace-panel emails-column" id="tempEmailDetailSection" style="display:none;border-left:1px solid var(--border);">
                         <div class="column-header">
-                            <span class="column-title">邮件详情</span>
+                            <span class="column-title" id="tempEmailDetailTitle">邮件详情</span>
                         </div>
                         <div class="email-detail-toolbar" id="tempEmailDetailToolbar" style="display:none;">
-                            <button class="btn btn-sm btn-ghost" onclick="showEmailList()">← 返回</button>
-                            <button class="btn btn-sm btn-ghost" onclick="openFullscreenEmail()">🔍 全屏查看</button>
-                            <button class="btn btn-sm btn-accent" onclick="extractVerificationFromDetail(this)" title="从邮件正文提取验证码/链接" style="font-size:0.72rem;padding:2px 8px;">🔑 验证码</button>
-                            <label style="display:flex;align-items:center;gap:4px;font-size:0.78rem;margin-left:8px;cursor:pointer;">
+                            <button class="btn btn-sm btn-ghost" id="tempEmailDetailBackBtn" onclick="handleTempEmailDetailBack()">← 返回</button>
+                            <button class="btn btn-sm btn-ghost" id="tempEmailFullscreenBtn" onclick="openFullscreenEmail()">🔍 全屏查看</button>
+                            <button class="btn btn-sm btn-accent" id="tempEmailVerificationBtn" onclick="extractVerificationFromDetail(this)" title="从邮件正文提取验证码/链接" style="font-size:0.72rem;padding:2px 8px;">🔑 验证码</button>
+                            <label id="tempEmailTrustLabel" style="display:flex;align-items:center;gap:4px;font-size:0.78rem;margin-left:8px;cursor:pointer;">
                                 <input type="checkbox" id="tempEmailTrustCheckbox" onchange="toggleTrustMode(this)">
                                 <span style="user-select:none;">信任此邮件</span>
                             </label>
                             <div style="flex:1;"></div>
-                            <button class="btn btn-sm btn-danger" onclick="confirmDeleteCurrentEmail()">🗑️ 删除</button>
+                            <button class="btn btn-sm btn-danger" id="tempEmailInboxDeleteBtn" onclick="confirmDeleteCurrentEmail()">🗑️ 删除</button>
+                            <button class="btn btn-sm btn-danger" id="tempEmailSentDeleteBtn" onclick="deleteCurrentTempEmailSentMessage()" style="display:none;">🗑️ 删除</button>
                         </div>
                         <div class="email-detail-container" id="tempEmailDetail">
                             <div class="empty-state">

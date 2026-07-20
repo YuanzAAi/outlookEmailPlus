@@ -29,6 +29,10 @@ DEFAULT_PROVIDER_CAPABILITIES = {
     "delete_mailbox": False,
     "delete_message": True,
     "clear_messages": True,
+    "send_message": False,
+    "list_sent_messages": False,
+    "delete_sent_message": False,
+    "clear_sent_messages": False,
 }
 
 
@@ -130,6 +134,24 @@ def deserialize_temp_email_meta(raw_meta: Any, *, source: str | None = None) -> 
             "clear_messages": bool(
                 provider_capabilities.get("clear_messages", DEFAULT_PROVIDER_CAPABILITIES["clear_messages"])
             ),
+            "send_message": bool(
+                provider_capabilities.get("send_message", DEFAULT_PROVIDER_CAPABILITIES["send_message"])
+            ),
+            "list_sent_messages": bool(
+                provider_capabilities.get(
+                    "list_sent_messages", DEFAULT_PROVIDER_CAPABILITIES["list_sent_messages"]
+                )
+            ),
+            "delete_sent_message": bool(
+                provider_capabilities.get(
+                    "delete_sent_message", DEFAULT_PROVIDER_CAPABILITIES["delete_sent_message"]
+                )
+            ),
+            "clear_sent_messages": bool(
+                provider_capabilities.get(
+                    "clear_sent_messages", DEFAULT_PROVIDER_CAPABILITIES["clear_sent_messages"]
+                )
+            ),
         },
         "provider_debug": provider_debug,
     }
@@ -202,6 +224,8 @@ def build_temp_mailbox_public_dto(record: Dict[str, Any]) -> Dict[str, Any]:
         "status": descriptor["status"],
         "created_at": descriptor["created_at"],
         "task_token": descriptor["task_token"],
+        "provider_name": descriptor["provider_name"],
+        "capabilities": dict((descriptor.get("meta") or {}).get("provider_capabilities") or {}),
     }
 
 

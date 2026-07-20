@@ -755,6 +755,70 @@ class CloudflareTempMailProviderTests(unittest.TestCase):
 
         self.assertIn("message_id", result)
 
+    def test_send_capability_is_limited_to_default_domain(self):
+        with self.app.app_context():
+            provider = self._make_provider()
+            enabled = provider.get_capabilities(self._make_mailbox("sender@cf-mail.example.com"))
+            disabled = provider.get_capabilities(self._make_mailbox("sender@cf-alt.example.com"))
+
+        self.assertTrue(enabled["send_message"])
+        self.assertFalse(disabled["send_message"])
+        self.assertTrue(disabled["list_sent_messages"])
+
+    def test_send_message_uses_admin_endpoint_and_fixed_from_address(self):
+        with self.app.app_context():
+            provider = self._make_provider()
+            response = MagicMock(ok=True)
+            response.json.return_value = {"status": "ok"}
+            with patch.object(provider, "_read_request", return_value=response) as request_mock:
+                result = provider.send_message(
+                    self._make_mailbox("sender@cf-mail.example.com"),
+                    to_email="target@example.com",
+                    subject="Hello",
+                    content="World",
+                )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(request_mock.call_args.args[:2], ("POST", "/admin/send_mail"))
+        payload = request_mock.call_args.kwargs["json"]
+        self.assertEqual(payload["from_mail"], "sender@cf-mail.example.com")
+        self.assertEqual(payload["to_mail"], "target@example.com")
+
+    def test_list_sent_messages_normalizes_v2_payload(self):
+        with self.app.app_context():
+            provider = self._make_provider()
+            response = MagicMock(ok=True)
+            response.json.return_value = {
+                "results": [
+                    {
+                        "id": 42,
+                        "address": "sender@cf-mail.example.com",
+                        "created_at": "2026-07-20T03:00:00Z",
+                        "raw": '{"version":"v2","to_mail":"target@example.com","subject":"Hello","content":"World","is_html":false}',
+                    }
+                ],
+                "count": 1,
+            }
+            with patch.object(provider, "_read_request", return_value=response):
+                result = provider.list_sent_messages(self._make_mailbox())
+
+        self.assertEqual(result["count"], 1)
+        self.assertEqual(result["items"][0]["id"], "cf_sent_42")
+        self.assertEqual(result["items"][0]["to"], "target@example.com")
+        self.assertEqual(result["items"][0]["body_type"], "text")
+
+    def test_delete_sent_message_scopes_delete_to_mailbox_address(self):
+        with self.app.app_context():
+            provider = self._make_provider()
+            response = MagicMock(ok=True)
+            response.json.return_value = {"success": True, "deleted": True}
+            with patch.object(provider, "_request", return_value=response) as request_mock:
+                deleted = provider.delete_sent_message(self._make_mailbox(), "cf_sent_42")
+
+        self.assertTrue(deleted)
+        self.assertEqual(request_mock.call_args.args[:2], ("DELETE", "/admin/sendbox/42"))
+        self.assertEqual(request_mock.call_args.kwargs["params"]["address"], "test@cf-mail.example.com")
+
 
 # ---------------------------------------------------------------------------
 # Factory 路由测试

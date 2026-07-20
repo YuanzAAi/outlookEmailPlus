@@ -278,6 +278,72 @@ class TempMailTargetContractTests(unittest.TestCase):
         self.assertEqual(data["data"]["task_token"], "tmptask_demo")
         self.assertEqual(data["data"]["status"], "finished")
 
+    def test_temp_email_send_and_sent_items_endpoints_use_service_contract(self):
+        client = self.app.test_client()
+        self._login(client)
+
+        with patch(
+            "outlook_web.controllers.temp_emails.temp_mail_service.send_message",
+            return_value={"success": True, "status": "ok"},
+        ) as send_mock:
+            send_resp = client.post(
+                "/api/temp-emails/sender@test.example/send",
+                json={
+                    "to_email": "target@example.com",
+                    "subject": "Hello",
+                    "content": "World",
+                    "is_html": False,
+                },
+            )
+
+        self.assertEqual(send_resp.status_code, 200)
+        self.assertTrue(send_resp.get_json()["success"])
+        self.assertEqual(send_mock.call_args.kwargs["to_email"], "target@example.com")
+
+        with patch(
+            "outlook_web.controllers.temp_emails.temp_mail_service.list_sent_messages",
+            return_value={"items": [{"id": "cf_sent_1", "subject": "Hello"}], "count": 1},
+        ):
+            sent_resp = client.get("/api/temp-emails/sender@test.example/sent?limit=20&offset=0")
+
+        self.assertEqual(sent_resp.status_code, 200)
+        sent_data = sent_resp.get_json()
+        self.assertEqual(sent_data["count"], 1)
+        self.assertEqual(sent_data["sent_items"][0]["id"], "cf_sent_1")
+
+    def test_external_temp_email_send_requires_api_key_and_respects_mailbox_scope(self):
+        email_addr = "external-sender@test.example"
+        with self.app.app_context():
+            from outlook_web.repositories import temp_emails as temp_emails_repo
+
+            temp_emails_repo.create_temp_email(
+                email_addr=email_addr,
+                mailbox_type="user",
+                visible_in_ui=True,
+                source="custom_domain_temp_mail",
+                meta={"provider_name": "custom_domain_temp_mail"},
+            )
+
+        client = self.app.test_client()
+        payload = {"to_email": "target@example.com", "subject": "Hello", "content": "World"}
+        missing_key_resp = client.post(f"/api/external/temp-emails/{email_addr}/send", json=payload)
+        self.assertEqual(missing_key_resp.status_code, 401)
+
+        with patch(
+            "outlook_web.controllers.external_temp_emails.temp_mail_service.send_message",
+            return_value={"success": True, "status": "ok"},
+        ) as send_mock:
+            send_resp = client.post(
+                f"/api/external/temp-emails/{email_addr}/send",
+                headers={"X-API-Key": "contract-key"},
+                json=payload,
+            )
+
+        self.assertEqual(send_resp.status_code, 200)
+        self.assertTrue(send_resp.get_json()["success"])
+        self.assertEqual(send_mock.call_args.args[0]["kind"], "temp")
+        self.assertEqual(send_mock.call_args.kwargs["to_email"], "target@example.com")
+
     def test_settings_get_returns_temp_mail_contract_fields(self):
         with self.app.app_context():
             from outlook_web.repositories import settings as settings_repo
@@ -448,6 +514,26 @@ class TempMailTargetContractTests(unittest.TestCase):
         self.assertIn("tempEmailOptionsStatus", self._get_text(client, "/"))
         self.assertIn("域名配置加载失败", js)
         self.assertIn("status: 'error'", js)
+
+    def test_temp_email_frontend_exposes_send_and_sent_item_controls(self):
+        client = self.app.test_client()
+        self._login(client)
+        index_html = self._get_text(client, "/")
+        temp_js = self._get_text(client, "/static/js/features/temp_emails.js")
+
+        for element_id in (
+            "tempEmailInboxTab",
+            "tempEmailSentTab",
+            "tempEmailComposeBtn",
+            "tempEmailClearSentBtn",
+            "tempEmailSentDeleteBtn",
+        ):
+            self.assertIn(f'id="{element_id}"', index_html)
+        self.assertIn("function switchTempEmailView(mode)", temp_js)
+        self.assertIn("function openTempEmailCompose()", temp_js)
+        self.assertIn("async function loadTempEmailSentMessages(email)", temp_js)
+        self.assertIn("/sent?limit=100&offset=0", temp_js)
+        self.assertIn("tempEmailViewMode !== 'inbox'", temp_js)
 
     def test_settings_page_does_not_expose_legacy_gptmail_field_name(self):
         client = self.app.test_client()

@@ -6,10 +6,16 @@ from tests._import_app import clear_login_attempts, import_web_app_module
 
 
 class _MailboxFirstProvider:
+    provider_name = "custom_domain_temp_mail"
+
     def __init__(self):
         self.create_calls = []
         self.list_calls = []
         self.delete_mailbox_calls = []
+        self.send_calls = []
+        self.sent_list_calls = []
+        self.deleted_sent_ids = []
+        self.clear_sent_calls = []
 
     def get_options(self):
         return {
@@ -67,6 +73,42 @@ class _MailboxFirstProvider:
         return True
 
     def clear_messages(self, mailbox):
+        return True
+
+    def get_capabilities(self, mailbox=None):
+        return {
+            "send_message": True,
+            "list_sent_messages": True,
+            "delete_sent_message": True,
+            "clear_sent_messages": True,
+        }
+
+    def send_message(self, mailbox, **payload):
+        self.send_calls.append((mailbox, payload))
+        return {"success": True, "status": "ok"}
+
+    def list_sent_messages(self, mailbox, *, limit=100, offset=0):
+        self.sent_list_calls.append((mailbox, limit, offset))
+        return {
+            "items": [
+                {
+                    "id": "sent-1",
+                    "from": mailbox["email"],
+                    "to": "target@example.com",
+                    "subject": "Hello",
+                    "content": "World",
+                    "body_type": "text",
+                }
+            ],
+            "count": 1,
+        }
+
+    def delete_sent_message(self, mailbox, message_id):
+        self.deleted_sent_ids.append((mailbox["email"], message_id))
+        return True
+
+    def clear_sent_messages(self, mailbox):
+        self.clear_sent_calls.append(mailbox["email"])
         return True
 
 
@@ -145,3 +187,34 @@ class TempMailServicePlatformTests(unittest.TestCase):
 
         self.assertIsNone(record)
         self.assertEqual(provider.delete_mailbox_calls, [])
+
+    def test_service_dispatches_send_and_sent_item_operations(self):
+        provider = _MailboxFirstProvider()
+        with self.app.app_context():
+            from outlook_web.repositories import temp_emails as temp_emails_repo
+            from outlook_web.services.temp_mail_service import TempMailService
+
+            temp_emails_repo.create_temp_email(
+                email_addr="sender@service-platform.test",
+                mailbox_type="user",
+                visible_in_ui=True,
+                meta={"provider_name": "custom_domain_temp_mail"},
+            )
+            service = TempMailService(provider_factory=lambda provider_name=None: provider)
+            send_result = service.send_message(
+                "sender@service-platform.test",
+                to_email="Target <target@example.com>",
+                subject=" Hello ",
+                content="World",
+            )
+            sent_result = service.list_sent_messages("sender@service-platform.test", limit=20, offset=0)
+            service.delete_sent_message("sender@service-platform.test", "sent-1")
+            service.clear_sent_messages("sender@service-platform.test")
+
+        self.assertTrue(send_result["success"])
+        self.assertEqual(provider.send_calls[0][1]["to_email"], "target@example.com")
+        self.assertEqual(provider.send_calls[0][1]["subject"], "Hello")
+        self.assertEqual(sent_result["count"], 1)
+        self.assertEqual(provider.sent_list_calls[0][1:], (20, 0))
+        self.assertEqual(provider.deleted_sent_ids, [("sender@service-platform.test", "sent-1")])
+        self.assertEqual(provider.clear_sent_calls, ["sender@service-platform.test"])

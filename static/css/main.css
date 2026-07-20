@@ -982,6 +982,42 @@ textarea.form-input {
 }
 .email-detail-toolbar .btn { font-size: 0.78rem; }
 
+.temp-mail-header-actions {
+  display: flex; align-items: center; justify-content: flex-end; gap: 4px; min-width: 0;
+  min-height: 40px; padding: 4px 10px; border-bottom: 1px solid var(--border-light); background: var(--bg-card);
+}
+#tempEmailCurrentName {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: ltr;
+}
+.temp-mail-view-tabs {
+  display: inline-grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+  border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden;
+  min-width: 112px; height: 30px; flex-shrink: 0;
+}
+.temp-mail-view-tab {
+  border: 0; border-right: 1px solid var(--border); background: var(--bg); color: var(--text-muted);
+  padding: 0 8px; font-size: 0.72rem; cursor: pointer; white-space: nowrap;
+}
+.temp-mail-view-tab:last-child { border-right: 0; }
+.temp-mail-view-tab:hover { background: var(--border-light); color: var(--text); }
+.temp-mail-view-tab.active { background: var(--clr-primary); color: #fff; }
+.temp-mail-view-tab:disabled { opacity: 0.45; cursor: not-allowed; }
+.temp-mail-compose-trigger { color: var(--clr-primary); }
+.temp-mail-compose {
+  width: min(100%, 760px); margin: 0 auto; padding: 1.25rem; min-width: 0;
+}
+.temp-mail-compose-grid { display: grid; grid-template-columns: minmax(0, 1fr); }
+.temp-mail-compose-actions { display: flex; justify-content: flex-end; gap: 8px; align-items: center; }
+.temp-mail-compose textarea.form-input { min-height: 240px; font-family: var(--font-mono); resize: vertical; }
+.temp-mail-compose .form-input[readonly] { color: var(--text-muted); background: var(--border-light); }
+
+@media (max-width: 760px) {
+  .temp-mail-header-actions { gap: 2px; }
+  .temp-mail-view-tabs { min-width: 104px; }
+  .temp-mail-view-tab { padding: 0 6px; }
+  .temp-mail-compose { padding: 1rem; }
+}
+
 /* 验证码高亮框 */
 .verification-code-box {
   margin: 0.8rem 1.3rem; padding: 1rem 1.2rem;
@@ -1418,7 +1454,7 @@ tr:hover td { background: rgba(184,92,56,0.04); }
 
   /* 旧 mailbox-layout 移动端兼容（已弃用） */
   .mailbox-layout { flex-direction: column; height: auto; }
-  
+
   /* 新 workspace 移动端响应式 */
   .workspace.workspace-mailbox,
   .workspace.workspace-temp-emails {
