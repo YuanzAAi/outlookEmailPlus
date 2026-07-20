@@ -14,10 +14,7 @@ import requests
 
 from outlook_web.repositories import notification_state as notification_state_repo
 from outlook_web.services import notification_dispatch
-from outlook_web.services.providers import (
-    get_imap_folder_candidates,
-    infer_provider_from_email,
-)
+from outlook_web.services.providers import get_imap_folder_candidates, infer_provider_from_email
 
 logger = logging.getLogger(__name__)
 
@@ -140,13 +137,6 @@ def _resolve_imap_folder(account: dict, folder: str) -> list[str]:
     return resolved or ["INBOX"]
 
 
-def _should_fetch_account_via_graph(account: dict) -> bool:
-    account_type = str(account.get("account_type") or "").strip().lower()
-    if account_type:
-        return account_type == "outlook"
-    return str(account.get("provider") or "").strip().lower() == "outlook"
-
-
 def _call_fetcher_with_folder(fetcher, account: dict, since: str, folder: str) -> List[dict]:
     try:
         return fetcher(account, since, folder=folder)
@@ -191,6 +181,7 @@ def _fetch_new_emails_imap(account: dict, since: str, folder: str = "inbox") -> 
 
     from outlook_web.security.crypto import decrypt_data
     from outlook_web.services.imap_generic import _create_imap_connection
+    from outlook_web.services.imap_generic import _resolve_imap_folder as _select_imap_folder
 
     host = account.get("imap_host", "")
     port = int(account.get("imap_port", 993))
@@ -213,25 +204,20 @@ def _fetch_new_emails_imap(account: dict, since: str, folder: str = "inbox") -> 
             if (account.get("provider") or "").strip().lower() == "outlook" and "basicauthblocked" in lowered:
                 raise RuntimeError("Outlook.com 已阻止 Basic Auth（账号密码直连）；请将该账号改为 Outlook OAuth 导入") from exc
             raise
-        selected = False
-        last_select_error = None
-        for folder_name in _resolve_imap_folder(account, folder):
-            try:
-                status, _ = conn.select(folder_name, readonly=True)
-                if status == "OK":
-                    selected = True
-                    break
-                last_select_error = f"select {folder_name} status={status}"
-            except Exception as exc:
-                last_select_error = str(exc)
-                continue
-        if not selected:
+        folder_candidates = _resolve_imap_folder(account, folder)
+        selected_folder = _select_imap_folder(
+            conn,
+            folder_candidates,
+            logical_folder=folder,
+            readonly=True,
+        )
+        if not selected_folder:
             logger.warning(
-                "[telegram_push] folder select failed email=%s provider=%s folder=%s err=%s",
+                "[telegram_push] folder select failed email=%s provider=%s folder=%s candidates=%s",
                 user,
                 account.get("provider"),
                 folder,
-                last_select_error or "unknown",
+                folder_candidates,
             )
             return results
 
@@ -570,10 +556,7 @@ def run_telegram_push_job(app) -> None:
 
     with app.app_context():
         from outlook_web.db import get_db
-        from outlook_web.repositories.accounts import (
-            get_telegram_push_accounts,
-            update_telegram_cursor,
-        )
+        from outlook_web.repositories.accounts import get_telegram_push_accounts, update_telegram_cursor
         from outlook_web.repositories.settings import get_setting
         from outlook_web.security.crypto import decrypt_data, is_encrypted
 

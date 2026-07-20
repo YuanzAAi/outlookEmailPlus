@@ -434,24 +434,22 @@ class ExternalApiKeyScopeTests(ExternalApiBaseTest):
 
 
 class ExternalApiConsumerAuditTests(ExternalApiBaseTest):
-    @patch("outlook_web.services.external_api.get_emails_imap_generic")
-    def test_external_latest_does_not_expose_internal_search_body(self, mock_get_emails):
+    @patch("outlook_web.services.external_api.get_latest_matching_email_imap_generic")
+    def test_external_latest_does_not_expose_internal_search_body(self, mock_get_latest):
         email_addr = self._insert_imap_account()
         self._set_external_api_key("abc123")
-        mock_get_emails.return_value = {
+        mock_get_latest.return_value = {
             "success": True,
             "method": "IMAP (Generic)",
-            "emails": [
-                {
-                    "id": "imap-private-1",
-                    "subject": "Private body test",
-                    "from": "sender@example.com",
-                    "date": self._utc_iso(),
-                    "body_preview": "public preview",
-                    "_search_body": "internal full body",
-                    "_search_body_html": "<p>internal full body</p>",
-                }
-            ],
+            "email": {
+                "id": "imap-private-1",
+                "subject": "Private body test",
+                "from": "sender@example.com",
+                "date": self._utc_iso(),
+                "body_preview": "public preview",
+                "_search_body": "internal full body",
+                "_search_body_html": "<p>internal full body</p>",
+            },
         }
 
         client = self.app.test_client()
@@ -464,7 +462,7 @@ class ExternalApiConsumerAuditTests(ExternalApiBaseTest):
         data = resp.get_json().get("data", {})
         self.assertNotIn("_search_body", data)
         self.assertNotIn("_search_body_html", data)
-        self.assertFalse(mock_get_emails.call_args.kwargs["include_search_body"])
+        self.assertEqual(mock_get_latest.call_count, 1)
 
     @patch("outlook_web.services.graph.get_emails_graph")
     def test_multi_key_request_records_consumer_metadata_and_usage(self, mock_get_emails_graph):

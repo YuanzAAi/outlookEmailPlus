@@ -5,7 +5,9 @@ from unittest.mock import patch
 from outlook_web.services.imap_generic import (
     _create_imap_connection,
     _normalize_imap_auth_error_message,
+    _resolve_imap_folder,
     get_emails_imap_generic,
+    get_latest_matching_email_imap_generic,
 )
 
 
@@ -83,6 +85,40 @@ class _PartialBatchImap(_FakeImapBase):
             ),
             b")",
         ]
+
+
+class _SpecialUseImap:
+    def __init__(self):
+        self.select_calls = []
+
+    def select(self, folder, readonly=True):
+        self.select_calls.append((folder, readonly))
+        if folder == b"&V4NXPpCuTvY-":
+            return "OK", [b"1"]
+        return "NO", [b"missing"]
+
+    def list(self):
+        return "OK", [
+            b'(\\HasNoChildren \\Trash) "/" "Deleted Messages"',
+            b'(\\HasNoChildren \\Junk) "/" &V4NXPpCuTvY-',
+        ]
+
+
+class _LatestImap(_FakeImapBase):
+    def __init__(self):
+        super().__init__()
+        self.messages = {
+            b"401": _message_bytes("Older target", "Code 401401"),
+            b"402": _message_bytes("Target verification", "Code 402402"),
+            b"403": _message_bytes("Newest unrelated", "Code 403403"),
+        }
+
+    def uid(self, command, message_set, query):
+        if command == "SEARCH":
+            return "OK", [b"401 402 403"]
+        self.fetch_calls.append((message_set, query))
+        raw = self.messages[message_set]
+        return "OK", [(b"1 (UID " + message_set + b" FLAGS () RFC822 {100}", raw), b")"]
 
 
 class GenericImapBatchTests(unittest.TestCase):
@@ -166,6 +202,51 @@ class GenericImapBatchTests(unittest.TestCase):
         self.assertTrue(result["success"])
         self.assertEqual([item["id"] for item in result["emails"]], ["302", "301"])
         self.assertEqual([call[0] for call in fake_mail.fetch_calls], [b"302,301", b"301"])
+
+    def test_special_use_folder_discovery_uses_server_mailbox_token(self):
+        fake_mail = _SpecialUseImap()
+
+        selected = _resolve_imap_folder(
+            fake_mail,
+            ["Missing Junk Folder"],
+            logical_folder="junkemail",
+        )
+
+        self.assertEqual(selected, b"&V4NXPpCuTvY-")
+        self.assertEqual(fake_mail.select_calls[-1], (b"&V4NXPpCuTvY-", True))
+
+    def test_latest_generic_imap_fetches_only_newest_message_without_filters(self):
+        fake_mail = _LatestImap()
+        with patch("outlook_web.services.imap_generic._create_imap_connection", return_value=fake_mail):
+            result = get_latest_matching_email_imap_generic(
+                email_addr="user@gmail.com",
+                imap_password="app-password",
+                imap_host="imap.gmail.com",
+                provider="gmail",
+            )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["email"]["id"], "403")
+        self.assertEqual(result["checked"], 1)
+        self.assertEqual([call[0] for call in fake_mail.fetch_calls], [b"403"])
+        self.assertIn("403403", result["email"]["_search_body"])
+        self.assertTrue(fake_mail.logged_out)
+
+    def test_latest_generic_imap_walks_back_until_subject_matches(self):
+        fake_mail = _LatestImap()
+        with patch("outlook_web.services.imap_generic._create_imap_connection", return_value=fake_mail):
+            result = get_latest_matching_email_imap_generic(
+                email_addr="user@163.com",
+                imap_password="auth-code",
+                imap_host="imap.163.com",
+                provider="163",
+                subject_contains="verification",
+            )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["email"]["id"], "402")
+        self.assertEqual(result["checked"], 2)
+        self.assertEqual([call[0] for call in fake_mail.fetch_calls], [b"403", b"402"])
 
 
 if __name__ == "__main__":

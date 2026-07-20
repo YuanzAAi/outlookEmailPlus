@@ -20,7 +20,11 @@ from outlook_web.services import graph as graph_service
 from outlook_web.services import imap as imap_service
 from outlook_web.services import outlook_transport
 from outlook_web.services import verification_channel_routing as verification_channel_service
-from outlook_web.services.imap_generic import get_email_detail_imap_generic_result, get_emails_imap_generic
+from outlook_web.services.imap_generic import (
+    get_email_detail_imap_generic_result,
+    get_emails_imap_generic,
+    get_latest_matching_email_imap_generic,
+)
 from outlook_web.services.mailbox_resolver import normalize_alias_email
 
 _LOGGER = logging.getLogger("outlook_web.controllers.emails")
@@ -912,11 +916,18 @@ def _api_extract_verification_impl(email_addr: str) -> Any:
         if decrypt_error_response:
             return decrypt_error_response
 
+    external_imap_functions = None
     try:
         # 委托 external_api.get_verification_result 统一处理，复用日志埋点和渠道路由逻辑
         if account_type == "imap":
+            external_imap_functions = (
+                external_api_service.get_emails_imap_generic,
+                external_api_service.get_email_detail_imap_generic_result,
+                external_api_service.get_latest_matching_email_imap_generic,
+            )
             external_api_service.get_emails_imap_generic = get_emails_imap_generic
             external_api_service.get_email_detail_imap_generic_result = get_email_detail_imap_generic_result
+            external_api_service.get_latest_matching_email_imap_generic = get_latest_matching_email_imap_generic
 
         data = external_api_service.get_verification_result(
             email_addr=email_addr,
@@ -976,6 +987,13 @@ def _api_extract_verification_impl(email_addr: str) -> Any:
     except Exception as e:
         error_payload = build_error_payload("EXTRACT_ERROR", "提取失败", "ExtractError", 500, str(e))
         return jsonify({"success": False, "error": error_payload}), 500
+    finally:
+        if external_imap_functions is not None:
+            (
+                external_api_service.get_emails_imap_generic,
+                external_api_service.get_email_detail_imap_generic_result,
+                external_api_service.get_latest_matching_email_imap_generic,
+            ) = external_imap_functions
 
 
 # ==================== External Emails API ====================

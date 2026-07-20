@@ -15,7 +15,11 @@ from outlook_web.services import graph as graph_service  # noqa: F401 - 保留�
 from outlook_web.services import imap as imap_service  # noqa: F401 - 保留旧版补丁入口
 from outlook_web.services import mailbox_resolver, outlook_transport
 from outlook_web.services import verification_channel_routing as verification_channel_service
-from outlook_web.services.imap_generic import get_email_detail_imap_generic_result, get_emails_imap_generic
+from outlook_web.services.imap_generic import (
+    get_email_detail_imap_generic_result,
+    get_emails_imap_generic,
+    get_latest_matching_email_imap_generic,
+)
 from outlook_web.services.temp_mail_service import TempMailError, get_temp_mail_service
 from outlook_web.services.verification_extract_log import resolve_extract_log_outcome, write_verification_extract_log
 from outlook_web.services.verification_extractor import (
@@ -26,6 +30,8 @@ from outlook_web.services.verification_extractor import (
     get_verification_ai_runtime_config,
     is_verification_ai_config_complete,
 )
+
+_DEFAULT_GET_EMAILS_IMAP_GENERIC = get_emails_imap_generic
 
 # Outlook IMAP 回退服务器（保持与内部接口一致）
 IMAP_SERVER_NEW = "outlook.live.com"
@@ -650,6 +656,52 @@ def get_latest_message_for_external(
     discover_remote: bool = True,
     include_search_body: bool = False,
 ) -> Dict[str, Any]:
+    local_account = accounts_repo.get_account_by_email(email_addr)
+    if local_account:
+        account_type = str(local_account.get("account_type") or "outlook").strip().lower()
+        if account_type == "imap" and get_emails_imap_generic is _DEFAULT_GET_EMAILS_IMAP_GENERIC:
+            mailbox = mailbox_resolver.resolve_mailbox(email_addr, discover_remote=discover_remote)
+            resolved_email = str(mailbox.get("email") or email_addr).strip()
+            mailbox_meta = mailbox_resolver.ensure_mailbox_can_read(
+                mailbox,
+                consumer=get_current_external_api_consumer(),
+            )
+            result = get_latest_matching_email_imap_generic(
+                email_addr=resolved_email,
+                imap_password=mailbox_meta.get("imap_password", "") or "",
+                imap_host=mailbox_meta.get("imap_host", "") or "",
+                imap_port=mailbox_meta.get("imap_port", 993) or 993,
+                folder=folder,
+                provider=mailbox_meta.get("provider", "_default") or "_default",
+                from_contains=from_contains,
+                subject_contains=subject_contains,
+                since_minutes=since_minutes,
+                baseline_timestamp=baseline_timestamp,
+                max_candidates=20,
+            )
+            if not result.get("success"):
+                raise UpstreamReadFailedError("IMAP 读取失败", data=result.get("error"))
+            item = result.get("email")
+            if not item:
+                raise MailNotFoundError("未找到匹配邮件", data={"email": resolved_email})
+            method_label = str(result.get("method") or "IMAP (Generic)")
+            summary = _build_message_summary(
+                resolved_email,
+                item,
+                method=method_label,
+                include_search_body=include_search_body,
+            )
+            filtered = filter_messages(
+                [summary],
+                from_contains=from_contains,
+                subject_contains=subject_contains,
+                since_minutes=since_minutes,
+                baseline_timestamp=baseline_timestamp,
+            )
+            if not filtered:
+                raise MailNotFoundError("未找到匹配邮件", data={"email": resolved_email})
+            return filtered[0]
+
     emails = list_messages_for_external(
         email_addr=email_addr,
         folder=folder,

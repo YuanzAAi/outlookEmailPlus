@@ -5,7 +5,9 @@ import imaplib
 import logging
 import re
 import socket
+from datetime import datetime, timedelta, timezone
 from email.header import decode_header
+from email.utils import parsedate_to_datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from outlook_web.errors import build_error_payload, sanitize_error_details
@@ -122,8 +124,18 @@ def _extract_flags_from_fetch(fetch_item: Any) -> str:
         return ""
 
 
-def _quote_if_needed(folder_name: str) -> List[str]:
-    name = (folder_name or "").strip()
+def _quote_if_needed(folder_name: Any) -> List[Any]:
+    if isinstance(folder_name, (bytes, bytearray)):
+        name = bytes(folder_name).strip()
+        if not name:
+            return []
+        if name.startswith(b'"') and name.endswith(b'"'):
+            return [name]
+        if b" " in name:
+            return [name, b'"' + name.replace(b'"', b'\\"') + b'"']
+        return [name]
+
+    name = str(folder_name or "").strip()
     if not name:
         return []
     if name.startswith('"') and name.endswith('"'):
@@ -131,6 +143,42 @@ def _quote_if_needed(folder_name: str) -> List[str]:
     if " " in name:
         return [name, f'"{name}"']
     return [name]
+
+
+_LIST_RESPONSE_RE = re.compile(
+    rb'^\((?P<flags>[^)]*)\)\s+(?:NIL|"(?:\\.|[^"])*")\s+(?P<mailbox>.+)$',
+    re.IGNORECASE,
+)
+
+
+def _discover_special_use_folder(mail: imaplib.IMAP4_SSL, logical_folder: str) -> Optional[bytes]:
+    target_flag = {
+        "inbox": b"\\inbox",
+        "junkemail": b"\\junk",
+        "deleteditems": b"\\trash",
+    }.get(str(logical_folder or "").strip().lower())
+    if not target_flag:
+        return None
+
+    try:
+        status, rows = mail.list()
+    except Exception as exc:
+        _LOGGER.debug("imap_list_special_use_failed folder=%s err=%s", logical_folder, exc)
+        return None
+    if status != "OK":
+        return None
+
+    for row in rows or []:
+        if not isinstance(row, (bytes, bytearray)):
+            continue
+        match = _LIST_RESPONSE_RE.match(bytes(row).strip())
+        if not match:
+            continue
+        flags = {flag.lower() for flag in match.group("flags").split()}
+        mailbox = match.group("mailbox").strip()
+        if target_flag in flags and mailbox and not mailbox.startswith(b"{"):
+            return mailbox
+    return None
 
 
 def _is_outlook_imap_target(provider: str, imap_host: str) -> bool:
@@ -160,18 +208,33 @@ def _normalize_imap_auth_error_message(raw_message: str, *, provider: str, imap_
 
 def _resolve_imap_folder(
     mail: imaplib.IMAP4_SSL,
-    candidates: List[str],
-) -> Optional[str]:
-    """按优先级 SELECT 文件夹，返回第一个成功的文件夹名。"""
+    candidates: List[Any],
+    *,
+    logical_folder: str = "",
+    readonly: bool = True,
+) -> Optional[Any]:
+    """按候选名和 SPECIAL-USE 标记 SELECT 文件夹。"""
     for folder_name in candidates or []:
         for try_name in _quote_if_needed(folder_name):
             try:
-                status, resp = mail.select(try_name, readonly=True)
+                status, resp = mail.select(try_name, readonly=readonly)
                 _LOGGER.debug("imap_select try=%s status=%s resp=%s", try_name, status, resp)
                 if status == "OK":
                     return try_name
             except Exception as exc:
                 _LOGGER.debug("imap_select_exception try=%s err=%s", try_name, exc)
+                continue
+
+    discovered = _discover_special_use_folder(mail, logical_folder)
+    if discovered:
+        for try_name in _quote_if_needed(discovered):
+            try:
+                status, resp = mail.select(try_name, readonly=readonly)
+                _LOGGER.debug("imap_select_special_use try=%s status=%s resp=%s", try_name, status, resp)
+                if status == "OK":
+                    return try_name
+            except Exception as exc:
+                _LOGGER.debug("imap_select_special_use_exception try=%s err=%s", try_name, exc)
                 continue
     return None
 
@@ -275,6 +338,57 @@ def _build_message_list_item(
     return item
 
 
+def _parse_message_datetime(value: Any) -> Optional[datetime]:
+    raw_value = str(value or "").strip()
+    if not raw_value:
+        return None
+    try:
+        parsed = parsedate_to_datetime(raw_value)
+    except (TypeError, ValueError, OverflowError):
+        try:
+            parsed = datetime.fromisoformat(raw_value.replace("Z", "+00:00"))
+        except (TypeError, ValueError, OverflowError):
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _message_matches_latest_filters(
+    item: Dict[str, Any],
+    *,
+    from_contains: str,
+    subject_contains: str,
+    since_minutes: Optional[int],
+    baseline_timestamp: Optional[int],
+) -> bool:
+    from_filter = str(from_contains or "").strip().casefold()
+    subject_filter = str(subject_contains or "").strip().casefold()
+    if from_filter and from_filter not in str(item.get("from") or "").casefold():
+        return False
+    if subject_filter and subject_filter not in str(item.get("subject") or "").casefold():
+        return False
+
+    received_at = _parse_message_datetime(item.get("date"))
+    if since_minutes is not None:
+        try:
+            minutes = int(since_minutes)
+        except (TypeError, ValueError):
+            minutes = 0
+        if minutes > 0 and received_at is not None:
+            if received_at < datetime.now(timezone.utc) - timedelta(minutes=minutes):
+                return False
+
+    try:
+        baseline = int(baseline_timestamp or 0)
+    except (TypeError, ValueError):
+        baseline = 0
+    if baseline > 0:
+        if received_at is None or int(received_at.timestamp()) < baseline:
+            return False
+    return True
+
+
 def get_emails_imap_generic(
     email_addr: str,
     imap_password: str,
@@ -334,7 +448,7 @@ def get_emails_imap_generic(
             }
 
         candidates = get_imap_folder_candidates(provider, folder)
-        selected = _resolve_imap_folder(mail, candidates)
+        selected = _resolve_imap_folder(mail, candidates, logical_folder=folder)
         if not selected:
             _LOGGER.warning(
                 "imap_folder_not_found email=%s provider=%s folder=%s candidates=%s",
@@ -461,6 +575,148 @@ def get_emails_imap_generic(
                 pass
 
 
+def get_latest_matching_email_imap_generic(
+    email_addr: str,
+    imap_password: str,
+    imap_host: str,
+    imap_port: int = 993,
+    folder: str = "inbox",
+    provider: str = "_default",
+    from_contains: str = "",
+    subject_contains: str = "",
+    since_minutes: Optional[int] = None,
+    baseline_timestamp: Optional[int] = None,
+    max_candidates: int = 20,
+) -> Dict[str, Any]:
+    """在单个 IMAP 会话中从最新 UID 向前查找首封匹配邮件。"""
+    mail = None
+    try:
+        candidate_limit = max(1, min(int(max_candidates or 20), 50))
+        mail = _create_imap_connection(imap_host, imap_port)
+        try:
+            mail.login(email_addr, imap_password)
+            _LOGGER.info("imap_latest_login_ok email=%s provider=%s", email_addr, provider)
+        except imaplib.IMAP4.error as exc:
+            message = _normalize_imap_auth_error_message(str(exc), provider=provider, imap_host=imap_host)
+            return {
+                "success": False,
+                "error": build_error_payload(
+                    "IMAP_AUTH_FAILED",
+                    message,
+                    "IMAPAuthError",
+                    401,
+                    "",
+                ),
+                "error_code": "IMAP_AUTH_FAILED",
+            }
+
+        candidates = get_imap_folder_candidates(provider, folder)
+        selected = _resolve_imap_folder(mail, candidates, logical_folder=folder)
+        if not selected:
+            return {
+                "success": False,
+                "error": build_error_payload(
+                    "IMAP_FOLDER_NOT_FOUND",
+                    "IMAP 文件夹不存在或无权限访问",
+                    "IMAPFolderError",
+                    400,
+                    {"provider": provider, "folder": folder, "candidates": candidates},
+                ),
+                "error_code": "IMAP_FOLDER_NOT_FOUND",
+            }
+
+        status, data = mail.uid("SEARCH", None, "ALL")
+        if status != "OK":
+            return {
+                "success": False,
+                "error": build_error_payload(
+                    "IMAP_SEARCH_FAILED",
+                    "IMAP 搜索邮件失败",
+                    "IMAPSearchError",
+                    502,
+                    f"status={status}",
+                ),
+                "error_code": "IMAP_SEARCH_FAILED",
+            }
+
+        uid_bytes = data[0] if data else b""
+        uids = uid_bytes.split() if uid_bytes else []
+        checked = 0
+        for uid in reversed(uids[-candidate_limit:]):
+            checked += 1
+            fetch_status, fetch_data = mail.uid("FETCH", uid, "(UID FLAGS RFC822)")
+            if fetch_status != "OK" or not fetch_data:
+                continue
+
+            uid_text = uid.decode("ascii", errors="ignore") if isinstance(uid, (bytes, bytearray)) else str(uid)
+            raw_email = None
+            flags_text = ""
+            for fetch_item in fetch_data:
+                header, candidate = _extract_fetch_payload(fetch_item)
+                if header and candidate:
+                    raw_email = candidate
+                    flags_text = _extract_flags_from_fetch(fetch_item)
+                    uid_match = re.search(rb"\bUID\s+(\d+)\b", header)
+                    if uid_match:
+                        uid_text = uid_match.group(1).decode("ascii", errors="ignore") or uid_text
+                    break
+            if raw_email is None:
+                continue
+
+            item = _build_message_list_item(
+                uid_text,
+                raw_email,
+                flags_text,
+                include_search_body=True,
+            )
+            if _message_matches_latest_filters(
+                item,
+                from_contains=from_contains,
+                subject_contains=subject_contains,
+                since_minutes=since_minutes,
+                baseline_timestamp=baseline_timestamp,
+            ):
+                return {
+                    "success": True,
+                    "email": item,
+                    "method": "IMAP (Generic)",
+                    "checked": checked,
+                }
+
+        return {
+            "success": True,
+            "email": None,
+            "method": "IMAP (Generic)",
+            "checked": checked,
+        }
+    except Exception as exc:
+        _LOGGER.warning(
+            "imap_latest_failed provider=%s host=%s port=%s email=%s err=%s",
+            (provider or "").strip().lower(),
+            (imap_host or "").strip(),
+            imap_port,
+            (email_addr or "").strip(),
+            sanitize_error_details(str(exc)),
+        )
+        return {
+            "success": False,
+            "error": build_error_payload(
+                "IMAP_CONNECT_FAILED",
+                sanitize_error_details(str(exc)) or "IMAP 连接失败",
+                "IMAPConnectError",
+                502,
+                "",
+            ),
+            "error_code": "IMAP_CONNECT_FAILED",
+        }
+    finally:
+        if mail:
+            try:
+                mail.logout()
+            except Exception:
+                pass
+
+
 def get_email_detail_imap_generic_result(
     email_addr: str,
     imap_password: str,
@@ -505,7 +761,7 @@ def get_email_detail_imap_generic_result(
             }
 
         candidates = get_imap_folder_candidates(provider, folder)
-        selected = _resolve_imap_folder(mail, candidates)
+        selected = _resolve_imap_folder(mail, candidates, logical_folder=folder)
         if not selected:
             _LOGGER.warning("imap_detail_folder_not_found email=%s folder=%s", email_addr, folder)
             return {
