@@ -39,7 +39,7 @@ def normalize_alias_email(email_addr: str | None) -> str | None:
     return f"{local}@{domain}"
 
 
-def resolve_mailbox(email_addr: str) -> dict[str, Any]:
+def resolve_mailbox(email_addr: str, *, discover_remote: bool = True) -> dict[str, Any]:
     external_api_service = _external_api_service()
     requested_email = str(email_addr or "").strip()
     if not requested_email or "@" not in requested_email:
@@ -49,7 +49,7 @@ def resolve_mailbox(email_addr: str) -> dict[str, Any]:
     # BUG-04: accounts 与 temp_emails 同邮箱命中时，必须显式冲突（避免安全边界被绕开）
     account = accounts_repo.get_account_by_email(account_lookup_email)
     temp_mailbox = temp_emails_repo.get_temp_email_by_address(requested_email, view="descriptor")
-    if not temp_mailbox:
+    if not temp_mailbox and discover_remote:
         service = _temp_mail_service()
         if service.is_managed_email(requested_email):
             try:

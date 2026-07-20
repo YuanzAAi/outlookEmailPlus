@@ -183,9 +183,18 @@ def get_current_external_api_consumer() -> Dict[str, Any]:
     return get_external_api_consumer() or {}
 
 
-def ensure_external_email_access(email_addr: str, *, allow_finished: bool = False) -> None:
-    ensure_external_email_scope(email_addr, allow_finished=allow_finished)
-    mailbox = mailbox_resolver.resolve_mailbox(email_addr)
+def ensure_external_email_access(
+    email_addr: str,
+    *,
+    allow_finished: bool = False,
+    discover_remote: bool = True,
+) -> None:
+    ensure_external_email_scope(
+        email_addr,
+        allow_finished=allow_finished,
+        discover_remote=discover_remote,
+    )
+    mailbox = mailbox_resolver.resolve_mailbox(email_addr, discover_remote=discover_remote)
     mailbox_resolver.ensure_mailbox_can_read(
         mailbox,
         consumer=get_current_external_api_consumer(),
@@ -193,8 +202,13 @@ def ensure_external_email_access(email_addr: str, *, allow_finished: bool = Fals
     )
 
 
-def ensure_external_email_scope(email_addr: str, *, allow_finished: bool = False) -> None:
-    mailbox = mailbox_resolver.resolve_mailbox(email_addr)
+def ensure_external_email_scope(
+    email_addr: str,
+    *,
+    allow_finished: bool = False,
+    discover_remote: bool = True,
+) -> None:
+    mailbox = mailbox_resolver.resolve_mailbox(email_addr, discover_remote=discover_remote)
     consumer = get_current_external_api_consumer()
     if mailbox.get("kind") == "account":
         allowed_emails = [str(item or "").strip().lower() for item in (consumer.get("allowed_emails") or [])]
@@ -476,8 +490,9 @@ def list_messages_for_external(  # noqa: C901
     folder: str = "inbox",
     skip: int = 0,
     top: int = 20,
+    discover_remote: bool = True,
 ) -> Tuple[List[Dict[str, Any]], str]:
-    mailbox = mailbox_resolver.resolve_mailbox(email_addr)
+    mailbox = mailbox_resolver.resolve_mailbox(email_addr, discover_remote=discover_remote)
     email_addr = str(mailbox.get("email") or email_addr).strip()
     mailbox_meta = mailbox_resolver.ensure_mailbox_can_read(mailbox, consumer=get_current_external_api_consumer())
     folder = (folder or "inbox").strip().lower() or "inbox"
@@ -487,7 +502,7 @@ def list_messages_for_external(  # noqa: C901
     if mailbox.get("kind") == "temp":
         service = get_temp_mail_service()
         try:
-            messages = service.list_messages(mailbox, sync_remote=True)
+            messages = service.list_messages(mailbox, sync_remote=discover_remote)
         except TempMailError as exc:
             raise UpstreamReadFailedError(
                 "临时邮箱上游读取失败" if exc.code == "TEMP_EMAIL_UPSTREAM_READ_FAILED" else exc.message,
@@ -603,8 +618,15 @@ def get_latest_message_for_external(
     subject_contains: str = "",
     since_minutes: Optional[int] = None,
     baseline_timestamp: Optional[int] = None,
+    discover_remote: bool = True,
 ) -> Dict[str, Any]:
-    emails = list_messages_for_external(email_addr=email_addr, folder=folder, skip=0, top=20)[0]
+    emails = list_messages_for_external(
+        email_addr=email_addr,
+        folder=folder,
+        skip=0,
+        top=20,
+        discover_remote=discover_remote,
+    )[0]
     filtered = filter_messages(
         emails,
         from_contains=from_contains,
@@ -1577,6 +1599,7 @@ def resolve_external_mail_scope(
     claim_token: Optional[str],
     *,
     allow_finished: bool = False,
+    discover_remote: bool = True,
 ) -> tuple[str, Optional[int]]:
     """
     根据 email_addr 或 claim_token 确定目标邮箱地址和 baseline_timestamp。
@@ -1609,7 +1632,11 @@ def resolve_external_mail_scope(
     if not email_addr or "@" not in (email_addr or ""):
         raise InvalidParamError("email 参数无效")
 
-    ensure_external_email_access(email_addr, allow_finished=allow_finished)
+    ensure_external_email_access(
+        email_addr,
+        allow_finished=allow_finished,
+        discover_remote=discover_remote,
+    )
     return email_addr, baseline
 
 

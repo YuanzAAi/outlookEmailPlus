@@ -173,12 +173,14 @@ class ExternalApiBaseTest(unittest.TestCase):
             from outlook_web.db import get_db
 
             db = get_db()
-            rows = db.execute("""
+            rows = db.execute(
+                """
                 SELECT action, resource_id, details
                 FROM audit_logs
                 WHERE resource_type = 'external_api'
                 ORDER BY id ASC
-                """).fetchall()
+                """
+            ).fetchall()
         return [dict(row) for row in rows]
 
     def _external_consumer_usage_rows(self):
@@ -186,11 +188,13 @@ class ExternalApiBaseTest(unittest.TestCase):
             from outlook_web.db import get_db
 
             db = get_db()
-            rows = db.execute("""
+            rows = db.execute(
+                """
                 SELECT consumer_key, consumer_name, endpoint, total_count, success_count, error_count
                 FROM external_api_consumer_usage_daily
                 ORDER BY id ASC
-                """).fetchall()
+                """
+            ).fetchall()
         return [dict(row) for row in rows]
 
 
@@ -287,6 +291,38 @@ class ExternalApiMessageTests(ExternalApiBaseTest):
         data = resp.get_json()
         self.assertTrue(data.get("success"))
         self.assertEqual(data.get("data", {}).get("id"), "msg-new")
+
+    @patch("outlook_web.services.external_api.get_latest_message_for_external")
+    def test_external_latest_message_can_disable_remote_discovery(self, mock_get_latest):
+        self._set_external_api_key("abc123")
+        self._insert_outlook_account("local-only@extapi.test")
+        mock_get_latest.return_value = self._graph_email(message_id="msg-local-only")
+
+        client = self.app.test_client()
+        resp = client.get(
+            "/api/external/messages/latest?email=local-only@extapi.test&discover_remote=0",
+            headers=self._auth_headers(),
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(mock_get_latest.call_args.kwargs["discover_remote"])
+
+    @patch("outlook_web.services.external_api.mailbox_resolver.resolve_mailbox")
+    def test_external_latest_message_disables_remote_discovery_during_scope_check(self, mock_resolve):
+        from outlook_web.services import external_api
+
+        self._set_external_api_key("abc123")
+        mock_resolve.side_effect = external_api.AccountNotFoundError("账号不存在")
+
+        client = self.app.test_client()
+        resp = client.get(
+            "/api/external/messages/latest?email=missing@extapi.test&discover_remote=0",
+            headers=self._auth_headers(),
+        )
+
+        self.assertEqual(resp.status_code, 404)
+        self.assertTrue(mock_resolve.call_args_list)
+        self.assertTrue(all(call.kwargs["discover_remote"] is False for call in mock_resolve.call_args_list))
 
     def test_external_messages_returns_account_not_found(self):
         client = self.app.test_client()

@@ -184,6 +184,28 @@ class ExternalApiTempMailCompatTests(unittest.TestCase):
                 "https://verify.example/confirm",
             )
 
+    def test_latest_local_only_mode_does_not_sync_temp_mail_upstream(self):
+        email_addr = self._create_task_mailbox(email_addr="localonly@compat-temp.test")
+        client = self.app.test_client()
+        with patch("outlook_web.services.external_api.get_temp_mail_service") as get_service:
+            service = get_service.return_value
+            service.list_messages.return_value = [
+                {
+                    "id": "msg-local-only",
+                    "subject": "Local verification code",
+                    "content": "Use code 246810 to continue.",
+                    "timestamp": int(time.time()),
+                }
+            ]
+            response = client.get(
+                f"/api/external/messages/latest?email={email_addr}&discover_remote=0",
+                headers=self._headers("compat-key"),
+            )
+
+        self.assertEqual(response.status_code, 200)
+        service.list_messages.assert_called_once()
+        self.assertFalse(service.list_messages.call_args.kwargs["sync_remote"])
+
     def test_external_verification_auto_discovers_managed_cloudflare_address(self):
         with self.app.app_context():
             from outlook_web.repositories import settings as settings_repo

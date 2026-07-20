@@ -981,7 +981,23 @@ def _api_extract_verification_impl(email_addr: str) -> Any:
 # ==================== External Emails API ====================
 
 
-def _parse_external_common_args(*, default_since_minutes: int | None = None) -> dict:
+def _parse_external_bool_arg(name: str, default: bool) -> bool:
+    raw = request.args.get(name, None)
+    if raw is None or raw == "":
+        return default
+    normalized = str(raw).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise external_api_service.InvalidParamError(f"{name} 参数无效")
+
+
+def _parse_external_common_args(
+    *,
+    default_since_minutes: int | None = None,
+    discover_remote: bool = True,
+) -> dict:
     """解析 external API 通用 query 参数（按 TDD-00008 做基础校验）。
 
     PR#27 新增：支持 claim_token 参数。若提供 claim_token，则从领取上下文中
@@ -995,6 +1011,7 @@ def _parse_external_common_args(*, default_since_minutes: int | None = None) -> 
     email_addr, baseline_timestamp = external_api_service.resolve_external_mail_scope(
         email_addr if email_addr else None,
         claim_token,
+        discover_remote=discover_remote,
     )
 
     folder = (request.args.get("folder") or "inbox").strip().lower() or "inbox"
@@ -1165,7 +1182,8 @@ def api_external_get_messages() -> Any:
 @external_api_guards()
 def api_external_get_latest_message() -> Any:
     try:
-        args = _parse_external_common_args()
+        discover_remote = _parse_external_bool_arg("discover_remote", True)
+        args = _parse_external_common_args(discover_remote=discover_remote)
         latest = external_api_service.get_latest_message_for_external(
             email_addr=args["email"],
             folder=args["folder"],
@@ -1173,6 +1191,7 @@ def api_external_get_latest_message() -> Any:
             subject_contains=args["subject_contains"],
             since_minutes=args["since_minutes"],
             baseline_timestamp=args.get("baseline_timestamp"),
+            discover_remote=discover_remote,
         )
         external_api_service.record_claim_read_context(
             claim_token=args.get("claim_token"),

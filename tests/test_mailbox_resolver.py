@@ -168,6 +168,18 @@ class MailboxResolverTests(unittest.TestCase):
         self.assertEqual(mailbox["email"], "remote@managed.test")
         fake_service.discover_user_mailbox.assert_called_once_with("REMOTE@managed.test")
 
+    def test_resolve_unknown_managed_domain_skips_remote_discovery_when_disabled(self):
+        with self.app.app_context():
+            from outlook_web.services import external_api, mailbox_resolver
+
+            fake_service = MagicMock()
+            fake_service.is_managed_email.return_value = True
+            with patch.object(mailbox_resolver, "_temp_mail_service", return_value=fake_service):
+                with self.assertRaises(external_api.AccountNotFoundError):
+                    mailbox_resolver.resolve_mailbox("local-only@managed.test", discover_remote=False)
+
+        fake_service.discover_user_mailbox.assert_not_called()
+
     def test_resolve_mailbox_conflict_raises_mailbox_conflict_error(self):
         with self.app.app_context():
             from outlook_web.db import get_db
