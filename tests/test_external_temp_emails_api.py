@@ -263,3 +263,51 @@ class ExternalTempEmailsApiTests(unittest.TestCase):
 
         self.assertEqual(resp.status_code, 409)
         self.assertEqual(resp.get_json()["code"], "TASK_FINISHED")
+
+    def test_inbound_endpoint_requires_api_key_and_persists_cloudflare_message(self):
+        client = self.app.test_client()
+        payload = {
+            "email": "inbound@ext-temp.test",
+            "address_id": 71,
+            "provider_jwt": "jwt-71",
+            "message": {
+                "id": 9001,
+                "from_address": "sender@example.com",
+                "subject": "Code 445566",
+                "content": "Your verification code is 445566",
+                "created_at": "2026-07-20T00:00:00Z",
+            },
+        }
+
+        unauthorized = client.post("/api/external/temp-emails/inbound", json=payload)
+        self.assertEqual(unauthorized.status_code, 401)
+
+        with self.app.app_context():
+            from outlook_web.repositories import settings as settings_repo
+
+            settings_repo.set_setting("temp_mail_provider", "cloudflare_temp_mail")
+            settings_repo.set_setting(
+                "cf_worker_domains",
+                '[{"name":"ext-temp.test","enabled":true}]',
+            )
+
+        resp = client.post(
+            "/api/external/temp-emails/inbound",
+            headers=self._headers(),
+            json=payload,
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertTrue(data["success"])
+        self.assertEqual(data["data"]["message_id"], "cf_9001")
+        self.assertTrue(data["data"]["visible_in_ui"])
+
+        with self.app.app_context():
+            from outlook_web.repositories import temp_emails as temp_emails_repo
+
+            mailbox = temp_emails_repo.get_temp_email_by_address("inbound@ext-temp.test")
+            messages = temp_emails_repo.get_temp_email_messages("inbound@ext-temp.test")
+
+        self.assertEqual(mailbox["meta_json"]["provider_jwt"], "jwt-71")
+        self.assertEqual(messages[0]["subject"], "Code 445566")

@@ -29,6 +29,7 @@ from outlook_web.services.verification_extractor import (
 TEMP_MAIL_SOURCE = temp_emails_repo.DEFAULT_TEMP_MAIL_SOURCE
 TEMP_MAIL_METHOD = "Temp Mail"
 REMOTE_SYNC_ERROR_LOG_INTERVAL_SECONDS = 300
+INBOUND_PUSH_CACHE_TTL_SECONDS = 300
 
 logger = logging.getLogger(__name__)
 
@@ -210,6 +211,97 @@ class TempMailService:
                 "delete_message": True,
                 "clear_messages": True,
             },
+        }
+
+    @staticmethod
+    def _has_recent_inbound_push(mailbox: dict[str, Any]) -> bool:
+        provider_debug = (mailbox.get("meta") or {}).get("provider_debug") or {}
+        try:
+            pushed_at = float(provider_debug.get("last_inbound_push_at") or 0)
+        except (TypeError, ValueError):
+            return False
+        return pushed_at > 0 and time.time() - pushed_at <= INBOUND_PUSH_CACHE_TTL_SECONDS
+
+    def ingest_cloudflare_inbound(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Persist a Cloudflare-delivered message without an outbound provider request."""
+        email_addr = str(payload.get("email") or "").strip()
+        if not self.is_managed_email(email_addr):
+            raise TempMailError("TEMP_EMAIL_NOT_MANAGED", "该邮箱不属于已配置的临时邮箱域名", status=404)
+
+        address_id = str(payload.get("address_id") or "").strip()
+        provider_jwt = str(payload.get("provider_jwt") or "").strip()
+        message = payload.get("message") or {}
+        if not address_id or not provider_jwt or not isinstance(message, dict):
+            raise TempMailError("INVALID_PARAM", "入站邮件缺少地址凭据或邮件内容", status=400)
+
+        remote_message_id = str(message.get("id") or "").strip()
+        if not remote_message_id:
+            raise TempMailError("INVALID_PARAM", "入站邮件缺少消息 ID", status=400)
+        if remote_message_id.startswith("cf_"):
+            remote_message_id = remote_message_id[3:]
+
+        provider = self._get_provider(
+            provider_name=settings_repo.CLOUDFLARE_TEMP_MAIL_PROVIDER,
+            purpose="runtime",
+        )
+        provider_meta = self._provider_meta_from_remote_row(
+            provider,
+            {"id": address_id, "jwt": provider_jwt},
+        )
+        provider_debug = dict(provider_meta.get("provider_debug") or {})
+        provider_debug.update(
+            {
+                "bridge": "cloudflare_inbound_push",
+                "last_inbound_push_at": time.time(),
+                "last_inbound_message_id": remote_message_id,
+            }
+        )
+        provider_meta["provider_debug"] = provider_debug
+
+        existing = temp_emails_repo.get_temp_email_by_address(email_addr)
+        if existing:
+            canonical_email = str(existing.get("email") or email_addr)
+            temp_emails_repo.update_temp_email_provider_meta(
+                canonical_email,
+                provider_meta,
+                provider_name=settings_repo.CLOUDFLARE_TEMP_MAIL_PROVIDER,
+            )
+        else:
+            prefix, domain = email_addr.rsplit("@", 1)
+            self._create_or_load_mailbox_record(
+                email_addr=email_addr,
+                mailbox_type="user",
+                visible_in_ui=True,
+                source=TEMP_MAIL_SOURCE,
+                prefix=prefix,
+                domain=domain,
+                meta=provider_meta,
+                provider_name=settings_repo.CLOUDFLARE_TEMP_MAIL_PROVIDER,
+            )
+            canonical_email = email_addr
+
+        normalized_message = {
+            "id": f"cf_{remote_message_id}",
+            "message_id": f"cf_{remote_message_id}",
+            "raw_message_id": str(message.get("raw_message_id") or ""),
+            "from_address": str(message.get("from_address") or message.get("source") or ""),
+            "subject": str(message.get("subject") or ""),
+            "content": str(message.get("content") or ""),
+            "html_content": str(message.get("html_content") or ""),
+            "has_html": bool(message.get("has_html") or message.get("html_content")),
+            "created_at": str(message.get("created_at") or ""),
+        }
+        saved = temp_emails_repo.save_temp_email_messages(canonical_email, [normalized_message])
+        if saved != 1:
+            raise TempMailError("TEMP_EMAIL_MESSAGE_SAVE_FAILED", "入站邮件保存失败", status=500)
+        self._message_sync_at[canonical_email.casefold()] = time.monotonic()
+
+        mailbox = temp_emails_repo.get_temp_email_by_address(canonical_email, view="descriptor") or {}
+        return {
+            "email": canonical_email,
+            "message_id": normalized_message["id"],
+            "visible_in_ui": bool(mailbox.get("visible_in_ui")),
+            "mailbox_type": str(mailbox.get("mailbox_type") or ""),
         }
 
     def _log_remote_sync_error(self, exc: Exception) -> None:
@@ -775,12 +867,13 @@ class TempMailService:
     def list_messages(self, email_or_mailbox: str | dict[str, Any], *, sync_remote: bool = True) -> list[dict[str, Any]]:
         mailbox = self._get_mailbox_descriptor(email_or_mailbox)
         email_addr = str(mailbox.get("email") or "")
-        if sync_remote:
+        rows = temp_emails_repo.get_temp_email_messages(email_addr)
+        if sync_remote and not (rows and self._has_recent_inbound_push(mailbox)):
             mailbox = self._ensure_provider_credentials(mailbox)
             email_addr = str(mailbox.get("email") or email_addr)
             provider = self._get_provider(mailbox=mailbox)
             self._sync_provider_messages(provider, mailbox)
-        rows = temp_emails_repo.get_temp_email_messages(email_addr)
+            rows = temp_emails_repo.get_temp_email_messages(email_addr)
         return [_message_summary(email_addr, row) for row in rows]
 
     def get_message_detail(

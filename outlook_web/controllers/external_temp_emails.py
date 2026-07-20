@@ -116,3 +116,33 @@ def api_external_finish_temp_email(task_token: str):
             email_addr=str(mailbox.get("email") or ""),
         )
         return jsonify(external_api_service.fail("INTERNAL_ERROR", "服务内部错误")), 500
+
+
+@api_key_required
+@external_api_guards()
+def api_external_ingest_temp_email():
+    endpoint = "/api/external/temp-emails/inbound"
+    if request.content_length and request.content_length > 2_000_000:
+        return jsonify(external_api_service.fail("PAYLOAD_TOO_LARGE", "入站邮件负载过大")), 413
+
+    body = request.get_json(silent=True)
+    email_addr = str((body or {}).get("email") or "").strip()
+    if not isinstance(body, dict):
+        _audit(endpoint, "error", details={"code": "INVALID_PARAM"}, email_addr=email_addr)
+        return jsonify(external_api_service.fail("INVALID_PARAM", "请求体必须是 JSON 对象")), 400
+
+    try:
+        result = temp_mail_service.ingest_cloudflare_inbound(body)
+        _audit(
+            endpoint,
+            "ok",
+            details={"message_id": result["message_id"], "mailbox_type": result["mailbox_type"]},
+            email_addr=result["email"],
+        )
+        return jsonify(external_api_service.ok(result))
+    except TempMailError as exc:
+        _audit(endpoint, "error", details={"code": exc.code}, email_addr=email_addr)
+        return jsonify(external_api_service.fail(exc.code, exc.message, data=exc.data)), exc.status
+    except Exception as exc:
+        _audit(endpoint, "error", details={"code": "INTERNAL_ERROR", "err": type(exc).__name__}, email_addr=email_addr)
+        return jsonify(external_api_service.fail("INTERNAL_ERROR", "服务内部错误")), 500

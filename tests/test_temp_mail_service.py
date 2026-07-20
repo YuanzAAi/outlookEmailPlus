@@ -186,6 +186,105 @@ class TempMailServiceTests(unittest.TestCase):
 
         warning_mock.assert_called_once()
 
+    def test_cloudflare_inbound_push_creates_visible_mailbox_and_uses_local_message(self):
+        with self.app.app_context():
+            from outlook_web.repositories import settings as settings_repo
+            from outlook_web.repositories import temp_emails as temp_emails_repo
+            from outlook_web.services.temp_mail_service import TempMailService
+
+            settings_repo.set_setting("temp_mail_provider", "cloudflare_temp_mail")
+            settings_repo.set_setting(
+                "cf_worker_domains",
+                '[{"name":"cf-mail.example.com","enabled":true}]',
+            )
+            provider = _FakeCloudflareProvider()
+            service = TempMailService(provider=provider)
+
+            result = service.ingest_cloudflare_inbound(
+                {
+                    "email": "push@cf-mail.example.com",
+                    "address_id": 77,
+                    "provider_jwt": "jwt-77",
+                    "message": {
+                        "id": 501,
+                        "from_address": "noreply@example.com",
+                        "subject": "Your code is 778899",
+                        "content": "Verification code: 778899",
+                        "created_at": "2026-07-20T00:00:00Z",
+                    },
+                }
+            )
+            messages = service.list_messages("PUSH@CF-MAIL.EXAMPLE.COM", sync_remote=True)
+            stored = temp_emails_repo.get_temp_email_by_address("push@cf-mail.example.com")
+
+        self.assertTrue(result["visible_in_ui"])
+        self.assertEqual(result["message_id"], "cf_501")
+        self.assertEqual(stored["meta_json"]["provider_jwt"], "jwt-77")
+        self.assertEqual(messages[0]["subject"], "Your code is 778899")
+        self.assertEqual(provider.list_calls, 0)
+
+    def test_cloudflare_inbound_push_preserves_hidden_task_mailbox(self):
+        with self.app.app_context():
+            from outlook_web.repositories import settings as settings_repo
+            from outlook_web.repositories import temp_emails as temp_emails_repo
+            from outlook_web.services.temp_mail_service import TempMailService
+
+            settings_repo.set_setting("temp_mail_provider", "cloudflare_temp_mail")
+            settings_repo.set_setting(
+                "cf_worker_domains",
+                '[{"name":"cf-mail.example.com","enabled":true}]',
+            )
+            temp_emails_repo.create_temp_email(
+                email_addr="task@cf-mail.example.com",
+                mailbox_type="task",
+                visible_in_ui=False,
+                source="custom_domain_temp_mail",
+                task_token="tmptask_push",
+                consumer_key="consumer-a",
+                caller_id="caller-a",
+                task_id="task-a",
+            )
+            service = TempMailService(provider=_FakeCloudflareProvider())
+
+            result = service.ingest_cloudflare_inbound(
+                {
+                    "email": "task@cf-mail.example.com",
+                    "address_id": 88,
+                    "provider_jwt": "jwt-88",
+                    "message": {"id": 502, "subject": "Task code", "content": "112233"},
+                }
+            )
+            stored = temp_emails_repo.get_temp_email_by_address("task@cf-mail.example.com")
+
+        self.assertFalse(result["visible_in_ui"])
+        self.assertEqual(result["mailbox_type"], "task")
+        self.assertFalse(stored["visible_in_ui"])
+        self.assertEqual(stored["consumer_key"], "consumer-a")
+
+    def test_cloudflare_inbound_push_rejects_unmanaged_domain(self):
+        with self.app.app_context():
+            from outlook_web.repositories import settings as settings_repo
+            from outlook_web.services.temp_mail_service import TempMailError, TempMailService
+
+            settings_repo.set_setting("temp_mail_provider", "cloudflare_temp_mail")
+            settings_repo.set_setting(
+                "cf_worker_domains",
+                '[{"name":"cf-mail.example.com","enabled":true}]',
+            )
+            service = TempMailService(provider=_FakeCloudflareProvider())
+
+            with self.assertRaises(TempMailError) as ctx:
+                service.ingest_cloudflare_inbound(
+                    {
+                        "email": "outside@example.net",
+                        "address_id": 99,
+                        "provider_jwt": "jwt-99",
+                        "message": {"id": 503},
+                    }
+                )
+
+        self.assertEqual(ctx.exception.code, "TEMP_EMAIL_NOT_MANAGED")
+
     def test_cloudflare_list_fills_missing_jwt_and_coalesces_duplicate_sync(self):
         with self.app.app_context():
             from outlook_web.repositories import temp_emails as temp_emails_repo

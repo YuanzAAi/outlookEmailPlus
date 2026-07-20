@@ -11,6 +11,11 @@ def create_blueprint(csrf_exempt: Optional[Callable] = None) -> Blueprint:
     bp = Blueprint("external_temp_emails", __name__)
     handlers = [
         (
+            "/api/external/temp-emails/inbound",
+            external_temp_emails_controller.api_external_ingest_temp_email,
+            ["POST"],
+        ),
+        (
             "/api/external/temp-emails/apply",
             external_temp_emails_controller.api_external_apply_temp_email,
             ["POST"],
