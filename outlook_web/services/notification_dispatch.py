@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 from datetime import datetime, timezone
 from typing import Any, Callable
@@ -26,6 +27,7 @@ MAX_WEBHOOK_NOTIFICATIONS_PER_JOB = 50
 ACCOUNT_INCLUDED_FOLDERS = ("inbox", "junkemail")
 MAX_EMAIL_BODY_LENGTH = 4000
 MAX_TEMP_EMAIL_PREVIEW_LENGTH = 200
+_TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
 
 
 class NotificationDispatchError(Exception):
@@ -190,12 +192,23 @@ def _fetch_account_messages(source: dict[str, Any], since: str) -> list[dict[str
 
 def _fetch_temp_email_messages(source: dict[str, Any], since: str) -> list[dict[str, Any]]:
     address = source["email"]
+    temp_email = source.get("temp_email") or {}
+    provider_name = str(
+        temp_email.get("provider_name")
+        or (temp_email.get("meta") or {}).get("provider_name")
+        or settings_repo.get_temp_mail_provider()
+        or ""
+    ).strip()
+    inbound_push_enabled = str(os.getenv("TEMP_MAIL_INBOUND_PUSH_ENABLED", "")).strip().casefold() in _TRUE_ENV_VALUES
+    sync_remote = not (inbound_push_enabled and provider_name == settings_repo.CLOUDFLARE_TEMP_MAIL_PROVIDER)
 
     # 通过 TempMailService（provider factory）触发远端同步并写入 DB。
+    # Cloudflare Worker 已配置入站桥接时，邮件会在到达时主动写入本地；
+    # 通知任务只读本地，避免周期性逐地址远程扫描挤占交互式取码请求。
     # 忽略返回值（_message_summary 缺少 content/html_content 字段），
     # 后续直接从 DB 读取完整行数据。
     try:
-        TempMailService().list_messages(address, sync_remote=True)
+        TempMailService().list_messages(address, sync_remote=sync_remote)
     except (TempMailError, Exception):
         logger.warning(
             "[notification_dispatch] temp email sync failed address=%s",
@@ -291,10 +304,7 @@ def send_business_telegram_notification(
     bot_token: str,
     chat_id: str,
 ) -> None:
-    from outlook_web.services.telegram_push import (
-        _build_telegram_message,
-        _send_telegram_message,
-    )
+    from outlook_web.services.telegram_push import _build_telegram_message, _send_telegram_message
 
     account_email = source.get("account", {}).get("email", source.get("label", ""))
     payload = _build_telegram_message(account_email, message)

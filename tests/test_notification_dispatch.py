@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import unittest
 from unittest.mock import patch
@@ -85,12 +86,13 @@ class NotificationDispatchTests(unittest.TestCase):
         finally:
             conn.close()
 
-    def _insert_temp_email(self, email_addr: str):
+    def _insert_temp_email(self, email_addr: str, *, provider_name: str | None = None):
         conn = self.module.create_sqlite_connection()
         try:
+            meta_json = json.dumps({"provider_name": provider_name}) if provider_name else None
             conn.execute(
-                "INSERT INTO temp_emails (email, status) VALUES (?, 'active')",
-                (email_addr,),
+                "INSERT INTO temp_emails (email, status, meta_json) VALUES (?, 'active', ?)",
+                (email_addr, meta_json),
             )
             conn.commit()
         finally:
@@ -1202,6 +1204,81 @@ class NotificationDispatchTests(unittest.TestCase):
             self.assertEqual(sent_message["content"], "Hello HTML world")
             self.assertEqual(sent_message["preview"], "Hello HTML world")
 
+    def test_temp_email_notification_syncs_remote_by_default(self):
+        with self.app.app_context():
+            from outlook_web.services import notification_dispatch
+
+            self._insert_temp_email(
+                "default-sync@example.com",
+                provider_name=settings_repo.CLOUDFLARE_TEMP_MAIL_PROVIDER,
+            )
+            source = next(
+                item
+                for item in notification_dispatch.list_email_notification_sources()
+                if item["email"] == "default-sync@example.com"
+            )
+
+            with (
+                patch.dict(os.environ, {"TEMP_MAIL_INBOUND_PUSH_ENABLED": ""}, clear=False),
+                patch(
+                    "outlook_web.services.notification_dispatch.TempMailService.list_messages",
+                    return_value=[],
+                ) as list_messages,
+            ):
+                notification_dispatch.fetch_source_messages(source, "2026-03-01T00:00:00")
+
+            list_messages.assert_called_once_with("default-sync@example.com", sync_remote=True)
+
+    def test_cloudflare_inbound_push_mode_uses_local_notification_cache(self):
+        with self.app.app_context():
+            from outlook_web.services import notification_dispatch
+
+            self._insert_temp_email(
+                "inbound-push@example.com",
+                provider_name=settings_repo.CLOUDFLARE_TEMP_MAIL_PROVIDER,
+            )
+            source = next(
+                item
+                for item in notification_dispatch.list_email_notification_sources()
+                if item["email"] == "inbound-push@example.com"
+            )
+
+            with (
+                patch.dict(os.environ, {"TEMP_MAIL_INBOUND_PUSH_ENABLED": "true"}, clear=False),
+                patch(
+                    "outlook_web.services.notification_dispatch.TempMailService.list_messages",
+                    return_value=[],
+                ) as list_messages,
+            ):
+                notification_dispatch.fetch_source_messages(source, "2026-03-01T00:00:00")
+
+            list_messages.assert_called_once_with("inbound-push@example.com", sync_remote=False)
+
+    def test_inbound_push_mode_keeps_non_cloudflare_provider_remote_sync(self):
+        with self.app.app_context():
+            from outlook_web.services import notification_dispatch
+
+            self._insert_temp_email(
+                "custom-provider@example.com",
+                provider_name="custom_domain_temp_mail",
+            )
+            source = next(
+                item
+                for item in notification_dispatch.list_email_notification_sources()
+                if item["email"] == "custom-provider@example.com"
+            )
+
+            with (
+                patch.dict(os.environ, {"TEMP_MAIL_INBOUND_PUSH_ENABLED": "true"}, clear=False),
+                patch(
+                    "outlook_web.services.notification_dispatch.TempMailService.list_messages",
+                    return_value=[],
+                ) as list_messages,
+            ):
+                notification_dispatch.fetch_source_messages(source, "2026-03-01T00:00:00")
+
+            list_messages.assert_called_once_with("custom-provider@example.com", sync_remote=True)
+
     def test_claim_delivery_attempt_is_atomic_for_same_message(self):
         with self.app.app_context():
             from outlook_web.repositories import notification_state as notification_state_repo
@@ -1318,11 +1395,7 @@ class NotificationDispatchTests(unittest.TestCase):
     def test_email_failure_does_not_block_telegram_delivery(self):
         with self.app.app_context():
             from outlook_web.db import get_db
-            from outlook_web.services import (
-                email_push,
-                notification_dispatch,
-                telegram_push,
-            )
+            from outlook_web.services import email_push, notification_dispatch, telegram_push
 
             account_id = self._insert_account(
                 "dual-channel@example.com",
