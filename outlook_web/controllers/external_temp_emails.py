@@ -197,7 +197,9 @@ def api_external_get_temp_email_sent_messages(email_addr: str):
         if limit < 1 or limit > 100 or offset < 0:
             raise external_api_service.InvalidParamError("分页参数无效")
         result = temp_mail_service.list_sent_messages(mailbox, limit=limit, offset=offset)
-        _audit(endpoint, "ok", details={"count": result["count"], "limit": limit, "offset": offset}, email_addr=normalized_email)
+        _audit(
+            endpoint, "ok", details={"count": result["count"], "limit": limit, "offset": offset}, email_addr=normalized_email
+        )
         return jsonify(external_api_service.ok({**result, "limit": limit, "offset": offset}))
     except Exception as exc:
         return _external_error(endpoint, normalized_email, exc)

@@ -400,9 +400,7 @@ def complete_claim(
 def _create_cf_mailbox_for_pool(*, email_domain: Optional[str]) -> tuple[str, dict]:
     """调用 CF Worker 创建邮箱（Service 层），返回 (email, meta_dict)。"""
     try:
-        from outlook_web.services.temp_mail_provider_cf import (
-            CloudflareTempMailProvider,
-        )
+        from outlook_web.services.temp_mail_provider_cf import CloudflareTempMailProvider
 
         provider = CloudflareTempMailProvider()
         result = provider.create_mailbox(prefix=None, domain=email_domain)
@@ -439,9 +437,7 @@ def _create_cf_mailbox_for_pool(*, email_domain: Optional[str]) -> tuple[str, di
 def _delete_cf_mailbox_nonblocking(*, email: str, meta: dict) -> None:
     """非阻塞删除远程 CF 邮箱（仅记录日志，不抛异常）。"""
     try:
-        from outlook_web.services.temp_mail_provider_cf import (
-            CloudflareTempMailProvider,
-        )
+        from outlook_web.services.temp_mail_provider_cf import CloudflareTempMailProvider
 
         provider = CloudflareTempMailProvider()
         success = provider.delete_mailbox({"email": email, "meta": meta})

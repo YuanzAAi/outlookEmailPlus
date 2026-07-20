@@ -134,23 +134,15 @@ def deserialize_temp_email_meta(raw_meta: Any, *, source: str | None = None) -> 
             "clear_messages": bool(
                 provider_capabilities.get("clear_messages", DEFAULT_PROVIDER_CAPABILITIES["clear_messages"])
             ),
-            "send_message": bool(
-                provider_capabilities.get("send_message", DEFAULT_PROVIDER_CAPABILITIES["send_message"])
-            ),
+            "send_message": bool(provider_capabilities.get("send_message", DEFAULT_PROVIDER_CAPABILITIES["send_message"])),
             "list_sent_messages": bool(
-                provider_capabilities.get(
-                    "list_sent_messages", DEFAULT_PROVIDER_CAPABILITIES["list_sent_messages"]
-                )
+                provider_capabilities.get("list_sent_messages", DEFAULT_PROVIDER_CAPABILITIES["list_sent_messages"])
             ),
             "delete_sent_message": bool(
-                provider_capabilities.get(
-                    "delete_sent_message", DEFAULT_PROVIDER_CAPABILITIES["delete_sent_message"]
-                )
+                provider_capabilities.get("delete_sent_message", DEFAULT_PROVIDER_CAPABILITIES["delete_sent_message"])
             ),
             "clear_sent_messages": bool(
-                provider_capabilities.get(
-                    "clear_sent_messages", DEFAULT_PROVIDER_CAPABILITIES["clear_sent_messages"]
-                )
+                provider_capabilities.get("clear_sent_messages", DEFAULT_PROVIDER_CAPABILITIES["clear_sent_messages"])
             ),
         },
         "provider_debug": provider_debug,
