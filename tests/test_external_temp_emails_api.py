@@ -311,3 +311,38 @@ class ExternalTempEmailsApiTests(unittest.TestCase):
 
         self.assertEqual(mailbox["meta_json"]["provider_jwt"], "jwt-71")
         self.assertEqual(messages[0]["subject"], "Code 445566")
+
+    def test_inbound_endpoint_respects_multi_key_email_scope(self):
+        with self.app.app_context():
+            from outlook_web.repositories import external_api_keys as external_api_keys_repo
+            from outlook_web.repositories import settings as settings_repo
+
+            external_api_keys_repo.create_external_api_key(
+                name="restricted-inbound",
+                api_key="restricted-inbound-key",
+                allowed_emails=["allowed@ext-temp.test"],
+            )
+            settings_repo.set_setting("temp_mail_provider", "cloudflare_temp_mail")
+            settings_repo.set_setting(
+                "cf_worker_domains",
+                '[{"name":"ext-temp.test","enabled":true}]',
+            )
+
+        resp = self.app.test_client().post(
+            "/api/external/temp-emails/inbound",
+            headers=self._headers("restricted-inbound-key"),
+            json={
+                "email": "denied@ext-temp.test",
+                "address_id": 72,
+                "provider_jwt": "jwt-72",
+                "message": {"id": 9002, "subject": "Denied", "content": "112233"},
+            },
+        )
+
+        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(resp.get_json()["code"], "EMAIL_SCOPE_FORBIDDEN")
+
+        with self.app.app_context():
+            from outlook_web.repositories import temp_emails as temp_emails_repo
+
+            self.assertIsNone(temp_emails_repo.get_temp_email_by_address("denied@ext-temp.test"))

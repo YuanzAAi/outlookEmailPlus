@@ -629,6 +629,12 @@ class ExternalApiVerificationTests(ExternalApiBaseTest):
         data = resp.get_json()
         self.assertTrue(data.get("success"))
         self.assertEqual(data.get("data", {}).get("verification_code"), "123456")
+        with self.app.app_context():
+            from outlook_web.repositories import accounts as accounts_repo
+
+            account = accounts_repo.get_account_by_email(email_addr)
+            summary = accounts_repo.get_account_compact_summary(int(account["id"]))
+        self.assertEqual(summary.get("latest_verification_code"), "123456")
 
     @patch("outlook_web.services.graph.get_emails_graph")
     def test_external_verification_code_defaults_to_recent_10_minutes(self, mock_get_emails_graph):
@@ -647,6 +653,28 @@ class ExternalApiVerificationTests(ExternalApiBaseTest):
 
         self.assertEqual(resp.status_code, 404)
         self.assertEqual(resp.get_json().get("code"), "MAIL_NOT_FOUND")
+
+    @patch("outlook_web.controllers.emails._update_account_summary_from_verification", side_effect=RuntimeError("locked"))
+    @patch("outlook_web.services.external_api.get_verification_result")
+    def test_verification_code_succeeds_when_summary_persistence_fails(self, mock_get_result, _mock_update_summary):
+        email_addr = self._insert_outlook_account()
+        self._set_external_api_key("abc123")
+        mock_get_result.return_value = {
+            "verification_code": "123456",
+            "matched_email_id": "msg-summary-failure",
+            "received_at": self._utc_iso(),
+            "folder": "inbox",
+            "method": "Graph API",
+        }
+
+        client = self.app.test_client()
+        resp = client.get(
+            f"/api/external/verification-code?email={email_addr}",
+            headers=self._auth_headers(),
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.get_json().get("data", {}).get("verification_code"), "123456")
 
     @patch("outlook_web.services.graph.get_email_raw_graph")
     @patch("outlook_web.services.graph.get_email_detail_graph")
@@ -1649,6 +1677,95 @@ class ExternalApiSystemErrorTests(ExternalApiBaseTest):
 
         resp = client.get(
             "/api/external/account-status?email=nonexist@nowhere.test",
+            headers=self._auth_headers(),
+        )
+
+        self.assertEqual(resp.status_code, 404)
+        self.assertEqual(resp.get_json().get("code"), "ACCOUNT_NOT_FOUND")
+
+
+class ExternalApiVerificationSummaryTests(ExternalApiBaseTest):
+    def _set_verification_summary(self, email_addr: str, *, code: str, received_at: str, folder: str = "inbox"):
+        with self.app.app_context():
+            from outlook_web.db import get_db
+
+            db = get_db()
+            db.execute(
+                """
+                UPDATE accounts
+                SET latest_verification_code = ?,
+                    latest_verification_folder = ?,
+                    latest_verification_received_at = ?
+                WHERE email = ? COLLATE NOCASE
+                """,
+                (code, folder, received_at, email_addr),
+            )
+            db.commit()
+
+    @patch("outlook_web.services.outlook_transport.list_messages")
+    def test_summary_returns_recent_code_without_upstream_read(self, mock_list_messages):
+        email_addr = self._insert_outlook_account("MixedCaseSummary@extapi.test")
+        self._set_external_api_key("abc123")
+        self._set_verification_summary(
+            email_addr,
+            code="654321",
+            received_at=self._utc_iso(),
+            folder="junkemail",
+        )
+
+        client = self.app.test_client()
+        resp = client.get(
+            "/api/external/verification-summary" "?email=mixedcasesummary%40extapi.test&since_minutes=5",
+            headers=self._auth_headers(),
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json().get("data", {})
+        self.assertEqual(data.get("email"), email_addr)
+        self.assertEqual(data.get("verification_code"), "654321")
+        self.assertEqual(data.get("folder"), "junkemail")
+        self.assertEqual(data.get("method"), "backend_summary")
+        mock_list_messages.assert_not_called()
+
+    def test_summary_rejects_expired_code(self):
+        email_addr = self._insert_outlook_account()
+        self._set_external_api_key("abc123")
+        self._set_verification_summary(
+            email_addr,
+            code="654321",
+            received_at=self._utc_iso(minutes_delta=-6),
+        )
+
+        client = self.app.test_client()
+        resp = client.get(
+            f"/api/external/verification-summary?email={email_addr}&since_minutes=5",
+            headers=self._auth_headers(),
+        )
+
+        self.assertEqual(resp.status_code, 404)
+        self.assertEqual(resp.get_json().get("code"), "VERIFICATION_CODE_NOT_FOUND")
+
+    def test_summary_respects_api_key_email_scope(self):
+        allowed_email = self._insert_outlook_account()
+        denied_email = self._insert_outlook_account()
+        self._create_external_api_key("summary-reader", "summary-key", allowed_emails=[allowed_email])
+        self._set_verification_summary(denied_email, code="654321", received_at=self._utc_iso())
+
+        client = self.app.test_client()
+        resp = client.get(
+            f"/api/external/verification-summary?email={denied_email}",
+            headers=self._auth_headers("summary-key"),
+        )
+
+        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(resp.get_json().get("code"), "EMAIL_SCOPE_FORBIDDEN")
+
+    def test_summary_returns_account_not_found_for_unknown_email(self):
+        self._set_external_api_key("abc123")
+        client = self.app.test_client()
+
+        resp = client.get(
+            "/api/external/verification-summary?email=missing%40extapi.test",
             headers=self._auth_headers(),
         )
 

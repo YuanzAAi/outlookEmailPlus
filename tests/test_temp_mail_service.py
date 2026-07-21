@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import json
 import unittest
 from unittest.mock import patch
@@ -97,6 +98,27 @@ class TempMailServiceTests(unittest.TestCase):
             db.execute("DELETE FROM accounts WHERE email LIKE '%@cf-mail.example.com'")
             db.execute("DELETE FROM settings WHERE key = 'cf_worker_address_sync_cursor'")
             db.commit()
+
+    def test_message_sync_locks_are_released_when_idle(self):
+        from outlook_web.services.temp_mail_service import TempMailService
+
+        service = TempMailService(provider=_FakeCloudflareProvider())
+        lock = service._message_sync_lock_for("idle@cf-mail.example.com")
+        self.assertEqual(len(service._message_sync_locks), 1)
+
+        del lock
+        gc.collect()
+
+        self.assertEqual(len(service._message_sync_locks), 0)
+
+    def test_message_sync_timestamps_are_bounded(self):
+        from outlook_web.services.temp_mail_service import MESSAGE_SYNC_STATE_MAX_ENTRIES, TempMailService
+
+        service = TempMailService(provider=_FakeCloudflareProvider())
+        for index in range(MESSAGE_SYNC_STATE_MAX_ENTRIES + 20):
+            service._mark_message_synced(f"mailbox-{index}@cf-mail.example.com")
+
+        self.assertEqual(len(service._message_sync_at), MESSAGE_SYNC_STATE_MAX_ENTRIES)
 
     def test_generate_user_mailbox_persists_prefix_domain_and_visibility(self):
         with self.app.app_context():

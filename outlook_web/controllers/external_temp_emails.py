@@ -247,6 +247,10 @@ def api_external_ingest_temp_email():
         return jsonify(external_api_service.fail("INVALID_PARAM", "请求体必须是 JSON 对象")), 400
 
     try:
+        mailbox_resolver.ensure_mailbox_scope(
+            {"kind": "temp", "email": email_addr, "mailbox_type": "user"},
+            consumer=get_external_api_consumer() or {},
+        )
         result = temp_mail_service.ingest_cloudflare_inbound(body)
         _audit(
             endpoint,
@@ -255,7 +259,7 @@ def api_external_ingest_temp_email():
             email_addr=result["email"],
         )
         return jsonify(external_api_service.ok(result))
-    except TempMailError as exc:
+    except (external_api_service.ExternalApiError, TempMailError) as exc:
         _audit(endpoint, "error", details={"code": exc.code}, email_addr=email_addr)
         return jsonify(external_api_service.fail(exc.code, exc.message, data=exc.data)), exc.status
     except Exception as exc:

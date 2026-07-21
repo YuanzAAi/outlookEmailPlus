@@ -1,5 +1,6 @@
 import json
 import unittest
+from unittest.mock import patch
 
 from tests._import_app import import_web_app_module
 
@@ -1146,6 +1147,86 @@ class PoolApiTests(unittest.TestCase):
             json={"caller_id": "test_bot", "task_id": "legacy_route"},
         )
         self.assertEqual(resp.status_code, 404)
+
+
+class PoolScopeServiceTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.module = import_web_app_module()
+        cls.app = cls.module.app
+
+    def test_temp_scope_reuses_available_cf_account_before_dynamic_create(self):
+        with self.app.app_context():
+            from outlook_web.db import get_db
+            from outlook_web.services import pool as pool_service
+
+            db = get_db()
+            target_email = "reusable-scope@cf-domain.com"
+            cursor = db.execute(
+                """
+                INSERT INTO accounts (
+                    email, password, client_id, refresh_token, status,
+                    account_type, provider, pool_status, temp_mail_meta
+                ) VALUES (?, '', '', '', 'active', 'temp_mail', 'cloudflare_temp_mail', 'available', ?)
+                """,
+                (
+                    target_email,
+                    json.dumps({"provider_jwt": "jwt", "provider_mailbox_id": "321"}),
+                ),
+            )
+            db.commit()
+
+            with patch("outlook_web.services.temp_mail_provider_cf.CloudflareTempMailProvider.create_mailbox") as create_mock:
+                account = pool_service.claim_random(
+                    caller_id="scope_test",
+                    task_id="task_reuse",
+                    provider="cloudflare_temp_mail",
+                    account_scope="temp",
+                    allowed_emails=[target_email],
+                )
+
+            self.assertEqual(account["id"], cursor.lastrowid)
+            create_mock.assert_not_called()
+
+    def test_regular_scope_excludes_available_cf_account(self):
+        with self.app.app_context():
+            from outlook_web.db import get_db
+            from outlook_web.services import pool as pool_service
+
+            db = get_db()
+            regular_email = "regular-scope@outlook.com"
+            temp_email = "temp-scope@cf-domain.com"
+            regular = db.execute(
+                """
+                INSERT INTO accounts (
+                    email, password, client_id, refresh_token, status,
+                    account_type, provider, pool_status
+                ) VALUES (?, 'pw', 'cid', 'rt', 'active', 'outlook', 'outlook', 'available')
+                """,
+                (regular_email,),
+            )
+            db.execute(
+                """
+                INSERT INTO accounts (
+                    email, password, client_id, refresh_token, status,
+                    account_type, provider, pool_status, temp_mail_meta
+                ) VALUES (?, '', '', '', 'active', 'temp_mail', 'cloudflare_temp_mail', 'available', ?)
+                """,
+                (
+                    temp_email,
+                    json.dumps({"provider_jwt": "jwt", "provider_mailbox_id": "654"}),
+                ),
+            )
+            db.commit()
+
+            account = pool_service.claim_random(
+                caller_id="scope_test",
+                task_id="task_regular_scope",
+                account_scope="regular",
+                allowed_emails=[regular_email, temp_email],
+            )
+
+            self.assertEqual(account["id"], regular.lastrowid)
 
 
 if __name__ == "__main__":

@@ -665,6 +665,23 @@ def get_account_compact_summary(account_id: int) -> Optional[Dict[str, str]]:
     return {field: str(row[field] or "") for field in COMPACT_SUMMARY_FIELDS}
 
 
+def get_account_compact_summary_by_email(email_addr: str) -> Optional[Dict[str, Any]]:
+    """按邮箱读取轻量摘要，不加载或解密账号凭据。"""
+    db = get_db()
+    fields_sql = ", ".join(COMPACT_SUMMARY_FIELDS)
+    row = db.execute(
+        f"SELECT id, email, {fields_sql} FROM accounts WHERE email = ? COLLATE NOCASE",
+        (email_addr,),
+    ).fetchone()
+    if not row:
+        return None
+    return {
+        "id": int(row["id"]),
+        "email": str(row["email"] or ""),
+        **{field: str(row[field] or "") for field in COMPACT_SUMMARY_FIELDS},
+    }
+
+
 def update_account_compact_summary(account_id: int, summary: Dict[str, Any]) -> bool:
     db = get_db()
     existing = db.execute("SELECT id FROM accounts WHERE id = ?", (account_id,)).fetchone()

@@ -6,6 +6,7 @@ import re
 import secrets
 import threading
 import time
+import weakref
 from datetime import datetime, timezone
 from email.utils import parseaddr
 from typing import Any
@@ -32,6 +33,7 @@ TEMP_MAIL_SOURCE = temp_emails_repo.DEFAULT_TEMP_MAIL_SOURCE
 TEMP_MAIL_METHOD = "Temp Mail"
 REMOTE_SYNC_ERROR_LOG_INTERVAL_SECONDS = 300
 INBOUND_PUSH_CACHE_TTL_SECONDS = 300
+MESSAGE_SYNC_STATE_MAX_ENTRIES = 256
 
 logger = logging.getLogger(__name__)
 
@@ -134,7 +136,7 @@ class TempMailService:
         self._remote_sync_last_error = ""
         self._remote_sync_last_error_log_at = 0.0
         self._message_sync_at: dict[str, float] = {}
-        self._message_sync_locks: dict[str, threading.Lock] = {}
+        self._message_sync_locks: weakref.WeakValueDictionary[str, threading.Lock] = weakref.WeakValueDictionary()
         self._message_sync_locks_guard = threading.Lock()
 
     def _provider_error(self, exc: TempMailProviderFactoryError, *, purpose: str) -> TempMailError:
@@ -374,7 +376,7 @@ class TempMailService:
         saved = temp_emails_repo.save_temp_email_messages(canonical_email, [normalized_message])
         if saved != 1:
             raise TempMailError("TEMP_EMAIL_MESSAGE_SAVE_FAILED", "入站邮件保存失败", status=500)
-        self._message_sync_at[canonical_email.casefold()] = time.monotonic()
+        self._mark_message_synced(canonical_email.casefold())
 
         mailbox = temp_emails_repo.get_temp_email_by_address(canonical_email, view="descriptor") or {}
         if account:
@@ -1030,13 +1032,27 @@ class TempMailService:
                 self._message_sync_locks[key] = lock
             return lock
 
+    def _message_sync_was_recent(self, key: str, now: float) -> bool:
+        with self._message_sync_locks_guard:
+            return now - self._message_sync_at.get(key, 0.0) < 0.75
+
+    def _mark_message_synced(self, key: str) -> None:
+        now = time.monotonic()
+        with self._message_sync_locks_guard:
+            self._message_sync_at[key] = now
+            overflow = len(self._message_sync_at) - MESSAGE_SYNC_STATE_MAX_ENTRIES
+            if overflow > 0:
+                oldest = sorted(self._message_sync_at, key=self._message_sync_at.get)[:overflow]
+                for stale_key in oldest:
+                    self._message_sync_at.pop(stale_key, None)
+
     def _sync_provider_messages(self, provider: Any, mailbox: dict[str, Any]) -> None:
         email_addr = str(mailbox.get("email") or "")
         is_cloudflare = self._provider_name(provider) == settings_repo.CLOUDFLARE_TEMP_MAIL_PROVIDER
         lock = self._message_sync_lock_for(email_addr) if is_cloudflare else threading.Lock()
         with lock:
             sync_key = email_addr.casefold()
-            if is_cloudflare and time.monotonic() - self._message_sync_at.get(sync_key, 0.0) < 0.75:
+            if is_cloudflare and self._message_sync_was_recent(sync_key, time.monotonic()):
                 return
             try:
                 api_messages = provider.list_messages(mailbox)
@@ -1046,7 +1062,7 @@ class TempMailService:
                 raise self._provider_read_failed(None, mailbox=mailbox, operation="list_messages")
             temp_emails_repo.save_temp_email_messages(email_addr, api_messages)
             if is_cloudflare:
-                self._message_sync_at[sync_key] = time.monotonic()
+                self._mark_message_synced(sync_key)
 
     def list_messages(self, email_or_mailbox: str | dict[str, Any], *, sync_remote: bool = True) -> list[dict[str, Any]]:
         mailbox = self._get_mailbox_descriptor(email_or_mailbox)

@@ -293,6 +293,54 @@ def require_account(email_addr: str) -> Dict[str, Any]:
     return account
 
 
+def get_verification_summary_for_external(
+    *,
+    email_addr: str,
+    since_minutes: int = 5,
+    baseline_timestamp: Optional[int] = None,
+) -> Dict[str, Any]:
+    """读取账号上次已持久化的验证码摘要，不访问任何邮箱上游。"""
+    requested_email = str(email_addr or "").strip()
+    if not requested_email or "@" not in requested_email:
+        raise InvalidParamError("email 参数无效")
+
+    try:
+        window_minutes = int(since_minutes)
+    except (TypeError, ValueError) as exc:
+        raise InvalidParamError("since_minutes 参数无效") from exc
+    if window_minutes < 1:
+        raise InvalidParamError("since_minutes 参数无效")
+
+    # mailbox scope 已由 controller 先校验；这里仅取 accounts 摘要，避免触发 Graph/IMAP。
+    summary = accounts_repo.get_account_compact_summary_by_email(requested_email)
+    if not summary:
+        # 通过 scope 校验的纯临时邮箱可能没有 accounts 行，应继续走原有临时邮箱兜底。
+        raise VerificationCodeNotFoundError("未找到近期已提取的验证码", data={"email": requested_email})
+
+    canonical_email = str(summary.get("email") or requested_email).strip()
+    code = str(summary.get("latest_verification_code") or "").strip()
+    received_raw = str(summary.get("latest_verification_received_at") or "").strip()
+    received_at = _parse_datetime(received_raw)
+    if not code or not received_at:
+        raise VerificationCodeNotFoundError("未找到近期已提取的验证码", data={"email": canonical_email})
+
+    now = _utcnow()
+    if received_at < now - timedelta(minutes=window_minutes):
+        raise VerificationCodeNotFoundError("验证码已过期", data={"email": canonical_email})
+    if baseline_timestamp is not None and int(received_at.timestamp()) < int(baseline_timestamp):
+        raise VerificationCodeNotFoundError("领取前的验证码不匹配", data={"email": canonical_email})
+
+    received_text, received_timestamp = _format_datetime(received_at, received_raw)
+    return {
+        "email": canonical_email,
+        "verification_code": code,
+        "folder": str(summary.get("latest_verification_folder") or "").strip(),
+        "received_at": received_text,
+        "received_timestamp": received_timestamp,
+        "method": "backend_summary",
+    }
+
+
 def _preferred_probe_method(account: Dict[str, Any]) -> str:
     account_type = (account.get("account_type") or "outlook").strip().lower()
     return "imap_generic" if account_type == "imap" else "graph"

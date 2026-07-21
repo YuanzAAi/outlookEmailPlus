@@ -1540,6 +1540,31 @@ def api_external_get_message_raw(message_id: str) -> Any:
 
 @api_key_required
 @external_api_guards()
+def api_external_get_verification_summary() -> Any:
+    """读取主应用已提取并持久化的近期验证码，不访问邮箱上游。"""
+    try:
+        args = _parse_external_common_args(default_since_minutes=5, discover_remote=False)
+        result = external_api_service.get_verification_summary_for_external(
+            email_addr=args["email"],
+            since_minutes=args["since_minutes"] or 5,
+            baseline_timestamp=args.get("baseline_timestamp"),
+        )
+        external_api_service.record_claim_read_context(
+            claim_token=args.get("claim_token"),
+            email_addr=args["email"],
+        )
+        return jsonify(external_api_service.ok(result))
+    except external_api_service.ExternalApiError as exc:
+        return _external_error_response(exc)
+    except (TypeError, ValueError):
+        return jsonify(external_api_service.fail("INVALID_PARAM", "参数错误")), 400
+    except Exception:
+        _LOGGER.exception("读取验证码摘要失败")
+        return jsonify(external_api_service.fail("INTERNAL_ERROR", "服务内部错误")), 500
+
+
+@api_key_required
+@external_api_guards()
 def api_external_get_verification_code() -> Any:
     try:
         args = _parse_external_common_args(default_since_minutes=10)
@@ -1563,6 +1588,13 @@ def api_external_get_verification_code() -> Any:
         )
         if not result.get("verification_code"):
             raise external_api_service.VerificationCodeNotFoundError("未找到符合条件的验证码邮件")
+
+        try:
+            account = accounts_repo.get_account_by_email(args["email"])
+            if account:
+                _update_account_summary_from_verification(account, result)
+        except Exception:
+            _LOGGER.warning("验证码摘要持久化失败 email=%s", args["email"], exc_info=True)
 
         external_api_service.audit_external_api_access(
             action="external_api_access",

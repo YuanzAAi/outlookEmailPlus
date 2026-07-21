@@ -8,7 +8,7 @@ folder is what matters, not whether a message already exists.
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 from outlook_web.services import graph as graph_service
 from outlook_web.services import imap as imap_service
@@ -109,12 +109,17 @@ def list_messages(
     proxy_url: str = "",
     preferred_method: Optional[str] = None,
     include_search_body: bool = False,
+    excluded_methods: Optional[Iterable[str]] = None,
 ) -> Dict[str, Any]:
     """Read a folder using the remembered transport before falling back."""
     folder = str(folder or "inbox").strip().lower() or "inbox"
     plan = build_plan(account, folder)
     if preferred_method in {"graph", IMAP_NEW, IMAP_OLD}:
         plan = [preferred_method] + [item for item in plan if item != preferred_method]
+    excluded = {str(item or "").strip().lower() for item in (excluded_methods or [])}
+    plan = [item for item in plan if item not in excluded]
+    if not plan:
+        return {"success": False, "auth_expired": False, "error": "没有可用的读取方式", "errors": {}}
 
     errors: Dict[str, Any] = {}
     graph_auth_expired = False

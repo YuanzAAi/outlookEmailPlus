@@ -41,7 +41,7 @@ from outlook_web.services.temp_mail_provider_custom import TempMailProviderReadE
 
 logger = logging.getLogger(__name__)
 
-_CF_REQUEST_TIMEOUT = (5, 12)
+_CF_REQUEST_TIMEOUT = (7, 12)
 _CF_SESSION = requests.Session()
 _CF_SESSION.trust_env = False
 _CF_SESSION.headers.update({"Connection": "keep-alive"})
@@ -279,13 +279,18 @@ class CloudflareTempMailProvider(TempMailProviderBase):
                     timeout=_CF_REQUEST_TIMEOUT,
                     **kwargs,
                 )
-            except (requests.Timeout, requests.ConnectionError) as exc:
+            except requests.Timeout:
+                # Docker Desktop 到 Cloudflare 自定义域的首次 TLS 握手可能略超 5 秒。
+                # 超时后立即重试只会放大等待时间，因此直接交给上层返回稳定错误。
+                raise
+            except requests.ConnectionError as exc:
                 last_error = exc
                 if attempt + 1 >= attempts:
                     raise
             else:
                 if response.status_code not in {502, 503, 504} or attempt + 1 >= attempts:
                     return response
+                response.close()
             time.sleep(0.2 * (attempt + 1))
         if last_error is not None:
             raise last_error

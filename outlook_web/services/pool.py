@@ -197,21 +197,20 @@ def claim_random(
         default_lease = settings["pool_default_lease_seconds"]
         _validate_lease_seconds(default_lease)
 
-        account = None
-        if account_scope != "temp":
-            try:
-                account = pool_repo.claim_atomic(
-                    conn,
-                    caller_id=caller_id,
-                    task_id=task_id,
-                    lease_seconds=default_lease,
-                    provider=provider,
-                    project_key=project_key,
-                    email_domain=email_domain,
-                    allowed_emails=allowed_emails,
-                )
-            except pool_repo.PoolRepositoryError as e:
-                raise PoolServiceError(str(e), e.error_code, http_status=500) from e
+        try:
+            account = pool_repo.claim_atomic(
+                conn,
+                caller_id=caller_id,
+                task_id=task_id,
+                lease_seconds=default_lease,
+                provider=provider,
+                project_key=project_key,
+                email_domain=email_domain,
+                allowed_emails=allowed_emails,
+                account_scope=account_scope,
+            )
+        except pool_repo.PoolRepositoryError as e:
+            raise PoolServiceError(str(e), e.error_code, http_status=500) from e
 
         if account is not None:
             return account

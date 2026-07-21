@@ -266,19 +266,13 @@ def _load_temp_mailboxes(params: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], 
         view="record",
         order_by_latest_message=True,
     )
-    account_rows = (
-        get_db()
-        .execute(
-            """
+    account_rows = get_db().execute("""
         SELECT id, email, group_id, status, temp_mail_meta, created_at, updated_at
         FROM accounts
         WHERE COALESCE(status, 'active') = 'active'
           AND COALESCE(provider, '') = 'cloudflare_temp_mail'
         ORDER BY id DESC
-        """
-        )
-        .fetchall()
-    )
+        """).fetchall()
     known_emails = {str(record.get("email") or "").casefold() for record in records}
     for row in account_rows:
         email_addr = str(row["email"] or "").strip()
@@ -668,6 +662,7 @@ def _scan_graph_account(
     errors: List[str] = []
     preference_updates: List[Dict[str, Any]] = []
     last_channel: Optional[str] = None
+    successful_folders = 0
 
     for folder in params["folders"]:
         if cancel_event and cancel_event.is_set():
@@ -703,6 +698,7 @@ def _scan_graph_account(
         if not transport.get("success"):
             errors.append(f"{folder}: 读取失败")
             continue
+        successful_folders += 1
         last_channel = str(transport.get("channel") or "")
         folder_results, folder_scanned = _scan_messages(account, folder, transport, params, cancel_event)
         results.extend(folder_results)
@@ -716,6 +712,9 @@ def _scan_graph_account(
                 "new_refresh_token": token_result.get("new_refresh_token"),
             }
         )
+
+    if successful_folders == 0 and errors:
+        return None
 
     return {
         "account_id": int(account["id"]),
@@ -731,6 +730,8 @@ def _scan_account_legacy(
     account: Dict[str, Any],
     params: Dict[str, Any],
     cancel_event: Optional[threading.Event] = None,
+    *,
+    excluded_methods: Optional[set[str]] = None,
 ) -> Dict[str, Any]:
     results: List[Dict[str, Any]] = []
     scanned_messages = 0
@@ -755,6 +756,7 @@ def _scan_account_legacy(
                 top=params["top_per_folder"],
                 proxy_url=account.get("_search_proxy_url") or "",
                 include_search_body="body" in set(params["fields"]),
+                excluded_methods=excluded_methods,
             )
         if not transport.get("success"):
             errors.append(f"{folder}: 读取失败")
@@ -791,10 +793,12 @@ def _scan_account(
 ) -> Dict[str, Any]:
     account_type = str(account.get("account_type") or "outlook").strip().lower()
     preferred = outlook_transport.normalize_channel(account.get("preferred_verification_channel"))
+    graph_attempted = False
     if account_type != "imap" and preferred not in {
         outlook_transport.IMAP_NEW,
         outlook_transport.IMAP_OLD,
     }:
+        graph_attempted = True
         owned_session = http_session is None
         session = http_session or _build_http_session()
         try:
@@ -804,7 +808,12 @@ def _scan_account(
         finally:
             if owned_session:
                 session.close()
-    return _scan_account_legacy(account, params, cancel_event)
+    return _scan_account_legacy(
+        account,
+        params,
+        cancel_event,
+        excluded_methods={"graph"} if graph_attempted else None,
+    )
 
 
 def _is_cancel_requested(job_id: str) -> bool:

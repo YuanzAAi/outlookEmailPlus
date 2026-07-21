@@ -219,6 +219,7 @@ def claim_atomic(
     project_key: Optional[str] = None,
     email_domain: Optional[str] = None,
     allowed_emails: Optional[List[str]] = None,
+    account_scope: str = "all",
 ) -> Optional[dict]:
     sql = """
         SELECT a.* FROM accounts a
@@ -226,6 +227,13 @@ def claim_atomic(
         AND a.status = 'active'
     """
     params: list = []
+
+    normalized_scope = str(account_scope or "all").strip().lower()
+    if normalized_scope == "regular":
+        sql += " AND COALESCE(a.account_type, 'outlook') != 'temp_mail'"
+        sql += " AND COALESCE(a.provider, '') != 'cloudflare_temp_mail'"
+    elif normalized_scope == "temp":
+        sql += " AND (a.account_type = 'temp_mail' OR a.provider = 'cloudflare_temp_mail')"
 
     if provider:
         sql += " AND a.provider = ?"

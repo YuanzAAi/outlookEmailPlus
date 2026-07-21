@@ -73,6 +73,23 @@ class OutlookTransportTests(unittest.TestCase):
         self.assertEqual(result["method_key"], outlook_transport.IMAP_NEW)
         mock_imap.assert_called_once()
 
+    @patch("outlook_web.services.outlook_transport._imap_list")
+    @patch("outlook_web.services.outlook_transport._graph_list")
+    def test_excluded_graph_uses_imap_without_repeating_graph(self, mock_graph, mock_imap):
+        mock_imap.return_value = {"success": True, "emails": []}
+
+        result = outlook_transport.list_messages(
+            self.account,
+            folder="inbox",
+            top=1,
+            excluded_methods={"graph"},
+        )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["method_key"], outlook_transport.IMAP_NEW)
+        mock_graph.assert_not_called()
+        mock_imap.assert_called_once()
+
     @patch("outlook_web.services.outlook_transport._graph_list")
     @patch("outlook_web.services.outlook_transport._imap_list")
     def test_remembered_imap_invalid_grant_stops_remaining_plan(self, mock_imap, mock_graph):

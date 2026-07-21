@@ -195,6 +195,45 @@ class MailSearchTests(unittest.TestCase):
         self.assertEqual(result["errors"], ["授权已失效"])
 
     @patch("outlook_web.services.mail_search.outlook_transport.list_messages")
+    @patch("outlook_web.services.mail_search.graph_service.get_emails_graph_with_access_token")
+    @patch("outlook_web.services.mail_search.graph_service.get_access_token_graph_result")
+    def test_graph_read_failure_falls_back_to_imap_without_repeating_graph(
+        self,
+        mock_token,
+        mock_graph_list,
+        mock_transport_list,
+    ):
+        mock_token.return_value = {
+            "success": True,
+            "access_token": "access-token",
+            "scope": "Mail.Read offline_access",
+        }
+        mock_graph_list.return_value = {"success": False, "error": "temporary graph failure"}
+        mock_transport_list.return_value = {
+            "success": True,
+            "emails": [],
+            "method": "IMAP (New)",
+            "method_key": "imap_new",
+            "channel": "imap_new",
+        }
+        account = {
+            "id": 13,
+            "email": "fallback@example.com",
+            "client_id": "cid",
+            "refresh_token": "rt",
+            "account_type": "outlook",
+            "preferred_verification_channel": "graph_inbox",
+        }
+        params = mail_search._normalize_params({"query": "access", "fields": ["subject"], "folders": ["inbox"]})
+
+        result = mail_search._scan_account(account, params, http_session=object())
+
+        self.assertEqual(result["errors"], [])
+        mock_graph_list.assert_called_once()
+        mock_transport_list.assert_called_once()
+        self.assertEqual(mock_transport_list.call_args.kwargs["excluded_methods"], {"graph"})
+
+    @patch("outlook_web.services.mail_search.outlook_transport.list_messages")
     def test_legacy_scan_stops_after_terminal_auth_failure(self, mock_list):
         mock_list.return_value = {
             "success": False,

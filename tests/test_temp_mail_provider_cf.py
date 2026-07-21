@@ -591,6 +591,35 @@ class CloudflareTempMailProviderTests(unittest.TestCase):
         self.assertIs(result, response)
         self.assertEqual(request_mock.call_count, 2)
 
+    def test_idempotent_get_does_not_retry_timeout(self):
+        from outlook_web.services.temp_mail_provider_cf import CloudflareTempMailProvider
+
+        provider = CloudflareTempMailProvider()
+        with patch(
+            "outlook_web.services.temp_mail_provider_cf._CF_SESSION.request",
+            side_effect=requests.Timeout("slow handshake"),
+        ) as request_mock, patch("outlook_web.services.temp_mail_provider_cf.time.sleep"):
+            with self.assertRaises(requests.Timeout):
+                provider._request("GET", "/api/parsed_mails")
+
+        self.assertEqual(request_mock.call_count, 1)
+
+    def test_idempotent_get_closes_transient_response_before_retry(self):
+        from outlook_web.services.temp_mail_provider_cf import CloudflareTempMailProvider
+
+        provider = CloudflareTempMailProvider()
+        transient_response = MagicMock(status_code=503)
+        success_response = MagicMock(status_code=200)
+        with patch(
+            "outlook_web.services.temp_mail_provider_cf._CF_SESSION.request",
+            side_effect=[transient_response, success_response],
+        ) as request_mock, patch("outlook_web.services.temp_mail_provider_cf.time.sleep"):
+            result = provider._request("GET", "/api/parsed_mails")
+
+        self.assertIs(result, success_response)
+        self.assertEqual(request_mock.call_count, 2)
+        transient_response.close.assert_called_once_with()
+
     def test_list_messages_skips_unparseable_items_and_continues(self):
         """解析单封邮件失败时应跳过该封，不影响其他邮件。"""
         with self.app.app_context():
