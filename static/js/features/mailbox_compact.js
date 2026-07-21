@@ -448,12 +448,7 @@
                         updateCompactPollUI(email, 'polling', maxCount);
                     } else {
                         if (typeof showStandardPollDot === 'function') showStandardPollDot(email);
-                        // 标准模式：仅首次启动且非静默时 Toast 提示
-                        // reapply=true 表示 UI 刷新重绘，silent=true 表示批量启动（不弹单条 Toast）
-                        if (!opts || (!opts.reapply && !opts.silent)) {
-                            var countText = maxCount > 0 ? ('，最多 ' + maxCount + ' 次') : '';
-                            if (typeof showToast === 'function') showToast(translateCompactText('开始监听') + ' ' + email + ' ' + translateCompactText('的新邮件') + countText, 'info');
-                        }
+                        // 行内圆点已经展示监听状态，批量启动时不再叠加 Toast。
                     }
                 },
                 onPollStop: function(email) {

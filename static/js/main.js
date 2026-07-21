@@ -1125,6 +1125,15 @@
 
         // 显示消息提示
         function showToast(message, type = 'info', errorDetail = null, persistent = false) {
+            let durationOverride = null;
+            if (typeof persistent === 'number') {
+                durationOverride = persistent;
+                persistent = false;
+            } else if (typeof errorDetail === 'number') {
+                durationOverride = errorDetail;
+                errorDetail = null;
+            }
+
             let container = document.getElementById('toast-container');
             if (!container) {
                 container = document.createElement('div');
@@ -1133,11 +1142,32 @@
                 document.body.appendChild(container);
             }
 
+            const translatedMessage = translateAppTextLocal(message);
+            const toastKey = `${type}:${translatedMessage}`;
+            const existing = !persistent
+                ? Array.from(container.querySelectorAll('.toast')).find(item => item.dataset.toastKey === toastKey)
+                : null;
+            const dismissToast = (toast, duration) => {
+                if (toast._dismissTimer) clearTimeout(toast._dismissTimer);
+                toast._dismissTimer = setTimeout(() => {
+                    toast.style.opacity = '0';
+                    toast.style.transform = 'translateX(30px)';
+                    setTimeout(() => toast.remove(), 300);
+                }, duration);
+            };
+            const duration = durationOverride ?? ((errorDetail && type === 'error') ? 8000 : 3000);
+            if (existing) {
+                dismissToast(existing, duration);
+                return;
+            }
+
             const toast = document.createElement('div');
             toast.className = 'toast ' + type;
+            toast.dataset.toastKey = toastKey;
+            toast.dataset.persistent = persistent ? 'true' : 'false';
 
             const messageSpan = document.createElement('span');
-            messageSpan.textContent = translateAppTextLocal(message);
+            messageSpan.textContent = translatedMessage;
             toast.appendChild(messageSpan);
 
             if (errorDetail && type === 'error') {
@@ -1153,6 +1183,8 @@
             }
 
             container.appendChild(toast);
+            const transientToasts = Array.from(container.querySelectorAll('.toast[data-persistent="false"]'));
+            transientToasts.slice(0, Math.max(0, transientToasts.length - 4)).forEach(item => item.remove());
 
             if (persistent) {
                 // persistent 模式：追加关闭按钮，不自动消失
@@ -1165,12 +1197,7 @@
                 };
                 toast.appendChild(closeBtn);
             } else {
-                const duration = (errorDetail && type === 'error') ? 8000 : 3000;
-                setTimeout(() => {
-                    toast.style.opacity = '0';
-                    toast.style.transform = 'translateX(30px)';
-                    setTimeout(() => toast.remove(), 300);
-                }, duration);
+                dismissToast(toast, duration);
             }
         }
 

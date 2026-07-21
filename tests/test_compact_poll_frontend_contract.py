@@ -183,6 +183,18 @@ class CompactPollFrontendContractTests(unittest.TestCase):
         self.assertIn("skipInitialFetch: true", accounts_js)
         self.assertIn("if (opts && opts.skipInitialFetch)", engine_js)
 
+    def test_poll_toasts_are_short_and_transient_toasts_are_deduplicated(self):
+        client = self.app.test_client()
+        main_js = self._get_text(client, "/static/js/main.js")
+        engine_js = self._get_text(client, "/static/js/features/poll-engine.js")
+        compact_js = self._get_text(client, "/static/js/features/mailbox_compact.js")
+
+        self.assertIn("var POLL_TOAST_DURATION = 1800", engine_js)
+        self.assertIn("typeof persistent === 'number'", main_js)
+        self.assertIn("item.dataset.toastKey === toastKey", main_js)
+        self.assertIn("transientToasts.length - 4", main_js)
+        self.assertNotIn("translateCompactText('开始监听') + ' ' + email", compact_js)
+
     # ──────────────────────────────────────────────────────
     # TC-B08：mailbox_compact.js 使用正确的行选择器 .mail-row
     # ──────────────────────────────────────────────────────

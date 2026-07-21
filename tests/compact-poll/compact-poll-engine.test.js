@@ -330,12 +330,12 @@ describe('TC-C10~C13: 超时与错误处理', () => {
 
     expect(pollMap.has('test@example.com')).toBe(false);
 
-    // 应展示超时 Toast（5000ms 持续时间）
+    // 应展示短时超时 Toast，避免批量轮询通知占满屏幕。
     expect(showToast).toHaveBeenCalledWith(
       expect.stringContaining('监听超时'),
       'info',
       null,
-      5000
+      1800
     );
   });
 
@@ -457,7 +457,7 @@ describe('TC-C10~C13: 超时与错误处理', () => {
       expect.stringContaining('账号已被删除'),
       'error',
       null,
-      5000
+      1800
     );
   });
 
@@ -655,7 +655,7 @@ describe('TC-C15~C16: 发现新邮件处理', () => {
       expect.stringContaining('发现新邮件'),
       'success',
       null,
-      5000
+      1800
     );
     // 仍应停止轮询
     expect(pollMap.has('test@example.com')).toBe(false);
