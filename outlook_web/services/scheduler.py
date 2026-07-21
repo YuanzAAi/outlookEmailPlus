@@ -185,9 +185,9 @@ def _configure_probe_poll_job(scheduler, app) -> None:
 def _configure_temp_mail_address_sync_job(scheduler, app) -> None:
     """只同步 CF 临时邮箱地址元数据，并保持远端 HTTP 连接热状态。"""
     try:
-        interval = int(str(os.getenv("TEMP_MAIL_ADDRESS_SYNC_INTERVAL", "15")).strip() or "15")
+        interval = int(str(os.getenv("TEMP_MAIL_ADDRESS_SYNC_INTERVAL", "30")).strip() or "30")
     except (TypeError, ValueError):
-        interval = 15
+        interval = 30
     interval = max(5, min(interval, 300))
 
     try:

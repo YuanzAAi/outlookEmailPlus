@@ -41,7 +41,7 @@ from outlook_web.services.temp_mail_provider_custom import TempMailProviderReadE
 
 logger = logging.getLogger(__name__)
 
-_CF_REQUEST_TIMEOUT = (5, 30)
+_CF_REQUEST_TIMEOUT = (5, 12)
 _CF_SESSION = requests.Session()
 _CF_SESSION.trust_env = False
 _CF_SESSION.headers.update({"Connection": "keep-alive"})
@@ -269,7 +269,7 @@ class CloudflareTempMailProvider(TempMailProviderBase):
 
     def _request(self, method: str, path: str, **kwargs: Any) -> requests.Response:
         normalized_method = str(method or "GET").upper()
-        attempts = 3 if normalized_method in {"GET", "HEAD"} else 1
+        attempts = 2 if normalized_method in {"GET", "HEAD"} else 1
         last_error: requests.RequestException | None = None
         for attempt in range(attempts):
             try:
@@ -284,7 +284,7 @@ class CloudflareTempMailProvider(TempMailProviderBase):
                 if attempt + 1 >= attempts:
                     raise
             else:
-                if response.status_code not in {429, 502, 503, 504} or attempt + 1 >= attempts:
+                if response.status_code not in {502, 503, 504} or attempt + 1 >= attempts:
                     return response
             time.sleep(0.2 * (attempt + 1))
         if last_error is not None:
