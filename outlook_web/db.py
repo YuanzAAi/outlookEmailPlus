@@ -106,19 +106,16 @@ def init_db(database_path: Optional[str] = None):
         cursor.execute("BEGIN IMMEDIATE")
 
         # 创建设置表
-        cursor.execute(
-            """
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
                 value TEXT,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
-            """
-        )
+            """)
 
         # 数据库迁移记录（用于升级可验证/可诊断）
-        cursor.execute(
-            """
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS schema_migrations (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 from_version INTEGER NOT NULL,
@@ -129,14 +126,11 @@ def init_db(database_path: Optional[str] = None):
                 error TEXT,
                 trace_id TEXT
             )
-            """
-        )
-        cursor.execute(
-            """
+            """)
+        cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_schema_migrations_started_at
             ON schema_migrations(started_at)
-            """
-        )
+            """)
 
         # 在锁内读取当前 schema 版本（保证一致性）
         row = cursor.execute("SELECT value FROM settings WHERE key = ?", (DB_SCHEMA_VERSION_KEY,)).fetchone()
@@ -169,8 +163,7 @@ def init_db(database_path: Optional[str] = None):
         # -------------------- Schema 创建/迁移（幂等） --------------------
 
         # 分组表
-        cursor.execute(
-            """
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS groups (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT UNIQUE NOT NULL,
@@ -184,12 +177,10 @@ def init_db(database_path: Optional[str] = None):
                 verification_ai_model TEXT DEFAULT '',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
-        """
-        )
+        """)
 
         # 邮箱账号表
-        cursor.execute(
-            """
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS accounts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 email TEXT UNIQUE NOT NULL,
@@ -209,12 +200,10 @@ def init_db(database_path: Optional[str] = None):
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (group_id) REFERENCES groups (id)
             )
-        """
-        )
+        """)
 
         # 临时邮箱表
-        cursor.execute(
-            """
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS temp_emails (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 email TEXT UNIQUE NOT NULL,
@@ -234,11 +223,9 @@ def init_db(database_path: Optional[str] = None):
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
-        """
-        )
+        """)
 
-        cursor.execute(
-            """
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS temp_email_tags (
                 temp_email_id INTEGER NOT NULL,
                 tag_id INTEGER NOT NULL,
@@ -246,12 +233,10 @@ def init_db(database_path: Optional[str] = None):
                 FOREIGN KEY (temp_email_id) REFERENCES temp_emails (id) ON DELETE CASCADE,
                 FOREIGN KEY (tag_id) REFERENCES tags (id) ON DELETE CASCADE
             )
-        """
-        )
+        """)
 
         # 临时邮件表（本地缓存，按邮箱地址 + message_id 维度唯一）
-        cursor.execute(
-            """
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS temp_email_messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 message_id TEXT NOT NULL,
@@ -267,12 +252,10 @@ def init_db(database_path: Optional[str] = None):
                 FOREIGN KEY (email_address) REFERENCES temp_emails (email),
                 UNIQUE(email_address, message_id)
             )
-            """
-        )
+            """)
 
         # 刷新记录表（账号级）
-        cursor.execute(
-            """
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS account_refresh_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 account_id INTEGER NOT NULL,
@@ -284,18 +267,14 @@ def init_db(database_path: Optional[str] = None):
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (account_id) REFERENCES accounts (id) ON DELETE CASCADE
             )
-            """
-        )
-        cursor.execute(
-            """
+            """)
+        cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_account_refresh_logs_run_id
             ON account_refresh_logs(run_id)
-            """
-        )
+            """)
 
         # 审计日志表
-        cursor.execute(
-            """
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS audit_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 action TEXT NOT NULL,
@@ -308,20 +287,15 @@ def init_db(database_path: Optional[str] = None):
                 trace_id TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
-            """
-        )
-        cursor.execute(
-            """
+            """)
+        cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_audit_logs_trace_id
             ON audit_logs(trace_id)
-            """
-        )
-        cursor.execute(
-            """
+            """)
+        cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at
             ON audit_logs(created_at)
-            """
-        )
+            """)
         cursor.execute("PRAGMA table_info(audit_logs)")
         audit_logs_columns = [col[1] for col in cursor.fetchall()]
         if "operator" not in audit_logs_columns:
@@ -330,20 +304,17 @@ def init_db(database_path: Optional[str] = None):
             cursor.execute("ALTER TABLE audit_logs ADD COLUMN status TEXT DEFAULT ''")
 
         # 标签表
-        cursor.execute(
-            """
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS tags (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT UNIQUE NOT NULL,
                 color TEXT NOT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
-            """
-        )
+            """)
 
         # 账号标签关联表
-        cursor.execute(
-            """
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS account_tags (
                 account_id INTEGER NOT NULL,
                 tag_id INTEGER NOT NULL,
@@ -352,24 +323,20 @@ def init_db(database_path: Optional[str] = None):
                 FOREIGN KEY (account_id) REFERENCES accounts (id) ON DELETE CASCADE,
                 FOREIGN KEY (tag_id) REFERENCES tags (id) ON DELETE CASCADE
             )
-            """
-        )
+            """)
 
         # 分布式锁（用于刷新冲突控制/多进程一致性）
-        cursor.execute(
-            """
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS distributed_locks (
                 name TEXT PRIMARY KEY,
                 owner_id TEXT NOT NULL,
                 acquired_at REAL NOT NULL,
                 expires_at REAL NOT NULL
             )
-            """
-        )
+            """)
 
         # 导出二次验证 Token（持久化，支持重启/多进程）
-        cursor.execute(
-            """
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS export_verify_tokens (
                 token TEXT PRIMARY KEY,
                 ip TEXT,
@@ -377,24 +344,20 @@ def init_db(database_path: Optional[str] = None):
                 expires_at REAL NOT NULL,
                 created_at REAL NOT NULL
             )
-            """
-        )
+            """)
 
         # 登录速率限制（持久化，支持重启/多进程）
-        cursor.execute(
-            """
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS login_attempts (
                 ip TEXT PRIMARY KEY,
                 count INTEGER NOT NULL,
                 last_attempt_at REAL NOT NULL,
                 locked_until_at REAL
             )
-            """
-        )
+            """)
 
         # 刷新运行记录（用于“最近触发/来源/统计/运行中状态”的可验证性）
-        cursor.execute(
-            """
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS refresh_runs (
                 id TEXT PRIMARY KEY,
                 trigger_source TEXT NOT NULL,
@@ -409,20 +372,15 @@ def init_db(database_path: Optional[str] = None):
                 message TEXT,
                 trace_id TEXT
             )
-            """
-        )
-        cursor.execute(
-            """
+            """)
+        cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_refresh_runs_started_at
             ON refresh_runs(started_at)
-            """
-        )
-        cursor.execute(
-            """
+            """)
+        cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_refresh_runs_trigger_source
             ON refresh_runs(trigger_source)
-            """
-        )
+            """)
 
         # 兼容旧 schema：补齐缺失列
         cursor.execute("PRAGMA table_info(accounts)")
@@ -528,19 +486,16 @@ def init_db(database_path: Optional[str] = None):
             cursor.execute("UPDATE temp_emails SET task_token = NULL WHERE task_token IS NOT NULL AND TRIM(task_token) = ''")
         except Exception:
             pass
-        duplicate_sample = cursor.execute(
-            """
+        duplicate_sample = cursor.execute("""
             SELECT task_token, COUNT(*) AS c
             FROM temp_emails
             WHERE task_token IS NOT NULL AND TRIM(task_token) != ''
             GROUP BY task_token
             HAVING COUNT(*) > 1
             LIMIT 5
-            """
-        ).fetchall()
+            """).fetchall()
         if duplicate_sample:
-            dup_count_row = cursor.execute(
-                """
+            dup_count_row = cursor.execute("""
                 SELECT COUNT(*) AS c
                 FROM (
                     SELECT task_token
@@ -549,8 +504,7 @@ def init_db(database_path: Optional[str] = None):
                     GROUP BY task_token
                     HAVING COUNT(*) > 1
                 )
-                """
-            ).fetchone()
+                """).fetchone()
             dup_count = int(dup_count_row["c"] if dup_count_row and dup_count_row["c"] is not None else 0)
             trace_text = str(migration_trace_id or "").strip()
             sql_hint = (
@@ -589,31 +543,25 @@ def init_db(database_path: Optional[str] = None):
                 + "\n请先备份数据库并清理重复 task_token 后重试。参考 SQL：\n"
                 + sql_hint
             )
-        cursor.execute(
-            """
+        cursor.execute("""
             CREATE UNIQUE INDEX IF NOT EXISTS idx_temp_emails_task_token_unique
             ON temp_emails(task_token)
-            """
-        )
+            """)
         cursor.execute("UPDATE temp_emails SET mailbox_type = 'user' WHERE mailbox_type IS NULL OR TRIM(mailbox_type) = ''")
         cursor.execute("UPDATE temp_emails SET visible_in_ui = 1 WHERE visible_in_ui IS NULL")
         cursor.execute("UPDATE temp_emails SET source = 'legacy_gptmail' WHERE source IS NULL OR TRIM(source) = ''")
-        cursor.execute(
-            """
+        cursor.execute("""
             UPDATE temp_emails
             SET prefix = substr(email, 1, instr(email, '@') - 1)
             WHERE (prefix IS NULL OR TRIM(prefix) = '')
               AND instr(email, '@') > 1
-        """
-        )
-        cursor.execute(
-            """
+        """)
+        cursor.execute("""
             UPDATE temp_emails
             SET domain = substr(email, instr(email, '@') + 1)
             WHERE (domain IS NULL OR TRIM(domain) = '')
               AND instr(email, '@') > 1
-        """
-        )
+        """)
 
         cursor.execute("PRAGMA table_info(temp_email_messages)")
         temp_email_message_columns = [col[1] for col in cursor.fetchall()]
@@ -625,8 +573,7 @@ def init_db(database_path: Optional[str] = None):
         temp_message_create_sql = str(temp_message_create_sql_row[0] if temp_message_create_sql_row else "")
         needs_temp_email_message_rebuild = "UNIQUE(email_address, message_id)" not in temp_message_create_sql
         if needs_temp_email_message_rebuild:
-            cursor.execute(
-                """
+            cursor.execute("""
                 CREATE TABLE IF NOT EXISTS temp_email_messages_v2 (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     message_id TEXT NOT NULL,
@@ -642,10 +589,8 @@ def init_db(database_path: Optional[str] = None):
                     FOREIGN KEY (email_address) REFERENCES temp_emails (email),
                     UNIQUE(email_address, message_id)
                 )
-            """
-            )
-            cursor.execute(
-                """
+            """)
+            cursor.execute("""
                 INSERT OR REPLACE INTO temp_email_messages_v2 (
                     message_id, email_address, from_address, subject, content,
                     html_content, has_html, timestamp, raw_content, created_at
@@ -663,8 +608,7 @@ def init_db(database_path: Optional[str] = None):
                     created_at
                 FROM temp_email_messages
                 ORDER BY id ASC
-            """
-            )
+            """)
             cursor.execute("DROP TABLE temp_email_messages")
             cursor.execute("ALTER TABLE temp_email_messages_v2 RENAME TO temp_email_messages")
 
@@ -674,27 +618,21 @@ def init_db(database_path: Optional[str] = None):
             cursor.execute("ALTER TABLE audit_logs ADD COLUMN trace_id TEXT")
 
         # 默认分组
-        cursor.execute(
-            """
+        cursor.execute("""
             INSERT OR IGNORE INTO groups (name, description, color)
             VALUES ('默认分组', '未分组的邮箱', '#666666')
-            """
-        )
+            """)
 
         # 临时邮箱分组（系统分组）
-        cursor.execute(
-            """
+        cursor.execute("""
             INSERT OR IGNORE INTO groups (name, description, color, is_system)
             VALUES ('临时邮箱', '自建临时邮箱服务', '#00bcf2', 1)
-            """
-        )
-        cursor.execute(
-            """
+            """)
+        cursor.execute("""
             UPDATE groups
             SET description = '自建临时邮箱服务'
             WHERE name = '临时邮箱' AND description IN ('GPTMail 临时邮箱服务', '临时邮箱服务')
-            """
-        )
+            """)
 
         # 初始化默认设置：登录密码（自动迁移明文 -> 哈希）
         cursor.execute("SELECT value FROM settings WHERE key = 'login_password'")
@@ -726,12 +664,10 @@ def init_db(database_path: Optional[str] = None):
             """,
             (temp_mail_api_key_default,),
         )
-        cursor.execute(
-            """
+        cursor.execute("""
             INSERT OR IGNORE INTO settings (key, value)
             VALUES ('temp_mail_provider', 'custom_domain_temp_mail')
-            """
-        )
+            """)
         cursor.execute(
             """
             INSERT OR IGNORE INTO settings (key, value)
@@ -746,184 +682,129 @@ def init_db(database_path: Optional[str] = None):
             """,
             (temp_mail_api_key_default,),
         )
-        cursor.execute(
-            """
+        cursor.execute("""
             INSERT OR IGNORE INTO settings (key, value)
             VALUES ('temp_mail_domains', '[]')
-            """
-        )
-        cursor.execute(
-            """
+            """)
+        cursor.execute("""
             INSERT OR IGNORE INTO settings (key, value)
             VALUES ('temp_mail_default_domain', '')
-            """
-        )
-        cursor.execute(
-            """
+            """)
+        cursor.execute("""
             INSERT OR IGNORE INTO settings (key, value)
             VALUES ('temp_mail_prefix_rules', '{"min_length":1,"max_length":32,"pattern":"^[a-z0-9][a-z0-9._-]*$"}')
-            """
-        )
+            """)
 
         # v0.3: 设置页面 Tab 重构 — CF Worker 独立域名 key
-        cursor.execute(
-            """
+        cursor.execute("""
             INSERT OR IGNORE INTO settings (key, value)
             VALUES ('cf_worker_domains', '[]')
-            """
-        )
-        cursor.execute(
-            """
+            """)
+        cursor.execute("""
             INSERT OR IGNORE INTO settings (key, value)
             VALUES ('cf_worker_default_domain', '')
-            """
-        )
-        cursor.execute(
-            """
+            """)
+        cursor.execute("""
             INSERT OR IGNORE INTO settings (key, value)
             VALUES ('cf_worker_prefix_rules', '{"min_length":1,"max_length":32,"pattern":"^[a-z0-9][a-z0-9._-]*$"}')
-            """
-        )
+            """)
 
         # PRD-00008 / FD-00008：对外开放 API Key（默认空，建议加密存储）
-        cursor.execute(
-            """
+        cursor.execute("""
             INSERT OR IGNORE INTO settings (key, value)
             VALUES ('external_api_key', '')
-            """
-        )
+            """)
 
         # 验证码 AI 增强（系统级配置）
-        cursor.execute(
-            """
+        cursor.execute("""
             INSERT OR IGNORE INTO settings (key, value)
             VALUES ('verification_ai_enabled', 'false')
-            """
-        )
-        cursor.execute(
-            """
+            """)
+        cursor.execute("""
             INSERT OR IGNORE INTO settings (key, value)
             VALUES ('verification_ai_base_url', '')
-            """
-        )
-        cursor.execute(
-            """
+            """)
+        cursor.execute("""
             INSERT OR IGNORE INTO settings (key, value)
             VALUES ('verification_ai_api_key', '')
-            """
-        )
-        cursor.execute(
-            """
+            """)
+        cursor.execute("""
             INSERT OR IGNORE INTO settings (key, value)
             VALUES ('verification_ai_model', '')
-            """
-        )
+            """)
 
         # 初始化刷新配置
-        cursor.execute(
-            """
+        cursor.execute("""
             INSERT OR IGNORE INTO settings (key, value)
             VALUES ('refresh_interval_days', '30')
-            """
-        )
-        cursor.execute(
-            """
+            """)
+        cursor.execute("""
             INSERT OR IGNORE INTO settings (key, value)
             VALUES ('refresh_delay_seconds', '5')
-            """
-        )
-        cursor.execute(
-            """
+            """)
+        cursor.execute("""
             INSERT OR IGNORE INTO settings (key, value)
             VALUES ('refresh_cron', '0 2 * * *')
-            """
-        )
-        cursor.execute(
-            """
+            """)
+        cursor.execute("""
             INSERT OR IGNORE INTO settings (key, value)
             VALUES ('use_cron_schedule', 'false')
-            """
-        )
-        cursor.execute(
-            """
+            """)
+        cursor.execute("""
             INSERT OR IGNORE INTO settings (key, value)
             VALUES ('enable_scheduled_refresh', 'true')
-            """
-        )
+            """)
 
         # 初始化轮询配置
-        cursor.execute(
-            """
+        cursor.execute("""
             INSERT OR IGNORE INTO settings (key, value)
             VALUES ('enable_auto_polling', 'false')
-            """
-        )
-        cursor.execute(
-            """
+            """)
+        cursor.execute("""
             INSERT OR IGNORE INTO settings (key, value)
             VALUES ('polling_interval', '10')
-            """
-        )
-        cursor.execute(
-            """
+            """)
+        cursor.execute("""
             INSERT OR IGNORE INTO settings (key, value)
             VALUES ('polling_count', '5')
-        """
-        )
-        cursor.execute(
-            """
+        """)
+        cursor.execute("""
             INSERT OR IGNORE INTO settings (key, value)
             VALUES ('email_notification_enabled', 'false')
-        """
-        )
-        cursor.execute(
-            """
+        """)
+        cursor.execute("""
             INSERT OR IGNORE INTO settings (key, value)
             VALUES ('email_notification_recipient', '')
-        """
-        )
+        """)
 
         # 索引（性能基线）
-        cursor.execute(
-            """
+        cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_accounts_last_refresh_at
             ON accounts(last_refresh_at)
-            """
-        )
-        cursor.execute(
-            """
+            """)
+        cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_accounts_status
             ON accounts(status)
-            """
-        )
-        cursor.execute(
-            """
+            """)
+        cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_accounts_group_id
             ON accounts(group_id)
-            """
-        )
-        cursor.execute(
-            """
+            """)
+        cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_account_refresh_logs_account_id
             ON account_refresh_logs(account_id)
-            """
-        )
-        cursor.execute(
-            """
+            """)
+        cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_account_refresh_logs_account_id_id
             ON account_refresh_logs(account_id, id)
-            """
-        )
-        cursor.execute(
-            """
+            """)
+        cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_account_tags_tag_id
             ON account_tags(tag_id)
-            """
-        )
+            """)
 
         # v5: Telegram 推送去重日志（BUG-00011 P2）
-        cursor.execute(
-            """
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS telegram_push_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 account_id INTEGER NOT NULL,
@@ -931,24 +812,18 @@ def init_db(database_path: Optional[str] = None):
                 pushed_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now')),
                 UNIQUE(account_id, message_id)
             )
-            """
-        )
-        cursor.execute(
-            """
+            """)
+        cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_telegram_push_log_account_id
             ON telegram_push_log(account_id)
-            """
-        )
-        cursor.execute(
-            """
+            """)
+        cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_telegram_push_log_pushed_at
             ON telegram_push_log(pushed_at)
-            """
-        )
+            """)
 
         # v13: 统一通知游标表（V1.90 邮件通知增强）
-        cursor.execute(
-            """
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS notification_cursor_states (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 channel TEXT NOT NULL,
@@ -959,18 +834,14 @@ def init_db(database_path: Optional[str] = None):
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(channel, source_type, source_key)
             )
-            """
-        )
-        cursor.execute(
-            """
+            """)
+        cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_notification_cursor_states_lookup
             ON notification_cursor_states(channel, source_type, source_key)
-            """
-        )
+            """)
 
         # v13: 统一通知投递日志（用于跨通道去重）
-        cursor.execute(
-            """
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS notification_delivery_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 channel TEXT NOT NULL,
@@ -984,18 +855,14 @@ def init_db(database_path: Optional[str] = None):
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(channel, source_type, source_key, message_id)
             )
-            """
-        )
-        cursor.execute(
-            """
+            """)
+        cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_notification_delivery_logs_lookup
             ON notification_delivery_logs(channel, source_type, source_key, delivered_at)
-            """
-        )
+            """)
 
         # v6: 对外 API 限流表 + 公网模式默认配置（PRD-00008 P1）
-        cursor.execute(
-            """
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS external_api_rate_limits (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 ip_address TEXT NOT NULL,
@@ -1004,14 +871,11 @@ def init_db(database_path: Optional[str] = None):
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(ip_address, minute_bucket)
             )
-            """
-        )
-        cursor.execute(
-            """
+            """)
+        cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_ext_rate_ip_bucket
             ON external_api_rate_limits(ip_address, minute_bucket)
-            """
-        )
+            """)
         # P1 默认配置
         for key, default in [
             ("external_api_public_mode", "false"),
@@ -1026,8 +890,7 @@ def init_db(database_path: Optional[str] = None):
             )
 
         # v7: wait-message 异步探测缓存表（PRD-00008 P2）
-        cursor.execute(
-            """
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS external_probe_cache (
                 id TEXT PRIMARY KEY,
                 email_addr TEXT NOT NULL,
@@ -1045,24 +908,18 @@ def init_db(database_path: Optional[str] = None):
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 expires_at TIMESTAMP NOT NULL
             )
-            """
-        )
-        cursor.execute(
-            """
+            """)
+        cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_probe_status
             ON external_probe_cache(status, expires_at)
-            """
-        )
-        cursor.execute(
-            """
+            """)
+        cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_probe_email
             ON external_probe_cache(email_addr, status)
-            """
-        )
+            """)
 
         # v8: 上游真实探测结果缓存表（PRD-00008 P1）
-        cursor.execute(
-            """
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS external_upstream_probes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 scope_type TEXT NOT NULL,
@@ -1075,24 +932,18 @@ def init_db(database_path: Optional[str] = None):
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(scope_type, scope_key)
             )
-            """
-        )
-        cursor.execute(
-            """
+            """)
+        cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_upstream_probe_scope
             ON external_upstream_probes(scope_type, scope_key)
-            """
-        )
-        cursor.execute(
-            """
+            """)
+        cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_upstream_probe_email
             ON external_upstream_probes(email_addr, updated_at)
-            """
-        )
+            """)
 
         # v9: 对外 API 多 Key 配置表（PRD-00008 P2）
-        cursor.execute(
-            """
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS external_api_keys (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
@@ -1104,28 +955,22 @@ def init_db(database_path: Optional[str] = None):
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
-            """
-        )
+            """)
         cursor.execute("PRAGMA table_info(external_api_keys)")
         external_api_keys_columns = [col[1] for col in cursor.fetchall()]
         if "pool_access" not in external_api_keys_columns:
             cursor.execute("ALTER TABLE external_api_keys ADD COLUMN pool_access INTEGER NOT NULL DEFAULT 0")
-        cursor.execute(
-            """
+        cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_external_api_keys_enabled
             ON external_api_keys(enabled, updated_at)
-            """
-        )
-        cursor.execute(
-            """
+            """)
+        cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_external_api_keys_name
             ON external_api_keys(name)
-            """
-        )
+            """)
 
         # v10: 调用方日级使用统计（PRD-00008 P2）
-        cursor.execute(
-            """
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS external_api_consumer_usage_daily (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 consumer_key TEXT NOT NULL,
@@ -1144,14 +989,11 @@ def init_db(database_path: Optional[str] = None):
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(consumer_key, usage_date, endpoint)
             )
-            """
-        )
-        cursor.execute(
-            """
+            """)
+        cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_external_api_consumer_usage_daily_key
             ON external_api_consumer_usage_daily(consumer_key, usage_date)
-            """
-        )
+            """)
         cursor.execute("PRAGMA table_info(external_api_consumer_usage_daily)")
         external_usage_columns = [col[1] for col in cursor.fetchall()]
         if "caller_id" not in external_usage_columns:
@@ -1160,8 +1002,7 @@ def init_db(database_path: Optional[str] = None):
             cursor.execute("ALTER TABLE external_api_consumer_usage_daily ADD COLUMN date TEXT NOT NULL DEFAULT ''")
         if "call_count" not in external_usage_columns:
             cursor.execute("ALTER TABLE external_api_consumer_usage_daily ADD COLUMN call_count INTEGER NOT NULL DEFAULT 0")
-        cursor.execute(
-            """
+        cursor.execute("""
             UPDATE external_api_consumer_usage_daily
             SET caller_id = COALESCE(NULLIF(caller_id, ''), consumer_name, consumer_key),
                 date = COALESCE(NULLIF(date, ''), usage_date),
@@ -1169,8 +1010,7 @@ def init_db(database_path: Optional[str] = None):
                     WHEN COALESCE(call_count, 0) <= 0 AND COALESCE(total_count, 0) > 0 THEN total_count
                     ELSE COALESCE(call_count, 0)
                 END
-            """
-        )
+            """)
 
         # v11: 邮箱池字段 + account_claim_logs 表（PRD-00009 MT-1）
         cursor.execute("PRAGMA table_info(accounts)")
@@ -1190,8 +1030,7 @@ def init_db(database_path: Optional[str] = None):
             if col_def[0] not in accounts_columns_v11:
                 cursor.execute(f"ALTER TABLE accounts ADD COLUMN {col_def[0]} {col_def[1]}")
 
-        cursor.execute(
-            """
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS account_claim_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 account_id INTEGER NOT NULL,
@@ -1205,43 +1044,32 @@ def init_db(database_path: Optional[str] = None):
                 created_at TEXT NOT NULL,
                 FOREIGN KEY (account_id) REFERENCES accounts(id)
             )
-            """
-        )
-        cursor.execute(
-            """
+            """)
+        cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_claim_logs_account_id
             ON account_claim_logs(account_id)
-            """
-        )
-        cursor.execute(
-            """
+            """)
+        cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_claim_logs_task_id
             ON account_claim_logs(task_id)
-            """
-        )
-        cursor.execute(
-            """
+            """)
+        cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_claim_logs_claim_token
             ON account_claim_logs(claim_token)
-            """
-        )
-        cursor.execute(
-            """
+            """)
+        cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_accounts_pool_status
             ON accounts(pool_status)
-            """
-        )
+            """)
         cursor.execute("PRAGMA table_info(account_claim_logs)")
         account_claim_log_columns = [col[1] for col in cursor.fetchall()]
         if "claimed_at" not in account_claim_log_columns:
             cursor.execute("ALTER TABLE account_claim_logs ADD COLUMN claimed_at TEXT DEFAULT NULL")
-        cursor.execute(
-            """
+        cursor.execute("""
             UPDATE account_claim_logs
             SET claimed_at = COALESCE(claimed_at, created_at)
             WHERE claimed_at IS NULL
-            """
-        )
+            """)
 
         cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('pool_cooldown_seconds', '86400')")
         cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('pool_default_lease_seconds', '600')")
@@ -1252,23 +1080,18 @@ def init_db(database_path: Optional[str] = None):
         if "email_domain" not in accounts_columns_v17:
             cursor.execute("ALTER TABLE accounts ADD COLUMN email_domain TEXT DEFAULT NULL")
         # 回填 email_domain（从 email 列提取域名部分）
-        cursor.execute(
-            """
+        cursor.execute("""
             UPDATE accounts
             SET email_domain = LOWER(SUBSTR(email, INSTR(email, '@') + 1))
             WHERE (email_domain IS NULL OR TRIM(email_domain) = '')
               AND INSTR(email, '@') > 1
-        """
-        )
-        cursor.execute(
-            """
+        """)
+        cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_accounts_email_domain
             ON accounts(email_domain COLLATE NOCASE)
-        """
-        )
+        """)
 
-        cursor.execute(
-            """
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS account_project_usage (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 account_id INTEGER NOT NULL,
@@ -1282,20 +1105,15 @@ def init_db(database_path: Optional[str] = None):
                 UNIQUE(account_id, consumer_key, project_key),
                 FOREIGN KEY (account_id) REFERENCES accounts(id)
             )
-        """
-        )
-        cursor.execute(
-            """
+        """)
+        cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_account_project_usage_lookup
             ON account_project_usage(consumer_key, project_key)
-        """
-        )
-        cursor.execute(
-            """
+        """)
+        cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_account_project_usage_account_id
             ON account_project_usage(account_id)
-        """
-        )
+        """)
 
         # v17: 给 external_probe_cache 加 baseline_timestamp 列（PR#27 probe 与 claim 关联）
         cursor.execute("PRAGMA table_info(external_probe_cache)")
@@ -1336,18 +1154,15 @@ def init_db(database_path: Optional[str] = None):
         # 一次性数据迁移：历史 used 长期邮箱回 available，释放被旧语义"锁死"的邮箱资产
         # 临时邮箱（cloudflare_temp_mail / temp_mail）不参与迁移，因其生命周期由 CF 管理
         if current_version < 22:
-            cursor.execute(
-                """
+            cursor.execute("""
                 UPDATE accounts
                 SET pool_status = 'available'
                 WHERE pool_status = 'used'
                   AND COALESCE(provider, '') != 'cloudflare_temp_mail'
                   AND COALESCE(account_type, '') != 'temp_mail'
-                """
-            )
+                """)
 
-        cursor.execute(
-            """
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS verification_extract_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 account_id INTEGER NOT NULL,
@@ -1362,32 +1177,23 @@ def init_db(database_path: Optional[str] = None):
                 trace_id TEXT,
                 created_at REAL NOT NULL DEFAULT (unixepoch('now'))
             )
-            """
-        )
-        cursor.execute(
-            """
+            """)
+        cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_vel_account_id
             ON verification_extract_logs(account_id)
-            """
-        )
-        cursor.execute(
-            """
+            """)
+        cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_vel_started_at
             ON verification_extract_logs(started_at)
-            """
-        )
-        cursor.execute(
-            """
+            """)
+        cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_vel_channel
             ON verification_extract_logs(channel)
-            """
-        )
-        cursor.execute(
-            """
+            """)
+        cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_vel_result_type
             ON verification_extract_logs(result_type)
-            """
-        )
+            """)
 
         # v24: 临时邮箱接入邮箱池 — temp_emails 新增池生命周期字段
         # 语义：所有临时邮箱自动进池，claim-random 在 accounts 无命中时可领取 temp_emails；
@@ -1405,34 +1211,26 @@ def init_db(database_path: Optional[str] = None):
         ]:
             if col_def[0] not in temp_email_columns_v24:
                 cursor.execute(f"ALTER TABLE temp_emails ADD COLUMN {col_def[0]} {col_def[1]}")
-        cursor.execute(
-            """
+        cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_temp_emails_pool_status
             ON temp_emails(pool_status)
-            """
-        )
-        cursor.execute(
-            """
+            """)
+        cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_temp_emails_claim_token
             ON temp_emails(claim_token)
-            """
-        )
+            """)
         # 回填历史行的 domain/prefix：老库存在 domain IS NULL 的临时邮箱，
         # 否则按 email_domain 领取时会被过滤而继续返回 NO_AVAILABLE_ACCOUNT。
-        cursor.execute(
-            """
+        cursor.execute("""
             UPDATE temp_emails
             SET domain = substr(email, instr(email, '@') + 1)
             WHERE (domain IS NULL OR domain = '') AND instr(email, '@') > 0
-            """
-        )
-        cursor.execute(
-            """
+            """)
+        cursor.execute("""
             UPDATE temp_emails
             SET prefix = substr(email, 1, instr(email, '@') - 1)
             WHERE (prefix IS NULL OR prefix = '') AND instr(email, '@') > 0
-            """
-        )
+            """)
 
         # 迁移现有明文数据为加密数据
         migrate_sensitive_data(conn)
