@@ -123,6 +123,31 @@ class RefreshOutlookOnlyTests(unittest.TestCase):
         finally:
             conn.close()
 
+    def _insert_legacy_cf_account(self, *, email_addr: str, unique: str) -> int:
+        conn = self.module.create_sqlite_connection()
+        try:
+            cursor = conn.execute(
+                """
+                INSERT INTO accounts (email, password, client_id, refresh_token, account_type, provider, group_id, remark, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    email_addr,
+                    "",
+                    f"cf_client_{unique}",
+                    self.module.encrypt_data(f"cf_rt_{unique}"),
+                    "outlook",
+                    "cloudflare_temp_mail",
+                    self._default_group_id(),
+                    "",
+                    "active",
+                ),
+            )
+            conn.commit()
+            return int(cursor.lastrowid)
+        finally:
+            conn.close()
+
     def _get_account_row(self, account_id: int):
         conn = self.module.create_sqlite_connection()
         try:
@@ -185,6 +210,24 @@ class RefreshOutlookOnlyTests(unittest.TestCase):
         row = self._get_account_row(account_id)
         self.assertEqual(self.module.decrypt_data(row["refresh_token"]), f"imap_rt_{unique}")
         self.assertIsNone(row["last_refresh_at"])
+        self.assertEqual(len(self._get_refresh_logs(account_id=account_id, refresh_type="manual")), 0)
+
+    def test_manual_single_refresh_rejects_legacy_cf_provider_even_when_type_is_outlook(self):
+        client = self.app.test_client()
+        self._login(client)
+
+        unique = uuid.uuid4().hex
+        account_id = self._insert_legacy_cf_account(
+            email_addr=f"legacy_cf_{unique}@example.com",
+            unique=unique,
+        )
+
+        with patch.object(self.graph_service, "test_refresh_token_with_rotation") as mocked_refresh:
+            resp = client.post(f"/api/accounts/{account_id}/refresh")
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual((resp.get_json().get("error") or {}).get("code"), "ACCOUNT_REFRESH_UNSUPPORTED")
+        mocked_refresh.assert_not_called()
         self.assertEqual(len(self._get_refresh_logs(account_id=account_id, refresh_type="manual")), 0)
 
     def test_manual_single_refresh_allows_outlook_and_rotates_refresh_token(self):
@@ -292,6 +335,34 @@ class RefreshOutlookOnlyTests(unittest.TestCase):
             len(self._get_refresh_logs(account_id=imap_id, refresh_type="manual_all")),
             0,
         )
+
+    def test_refresh_stats_excludes_account_backed_temp_mail_accounts(self):
+        client = self.app.test_client()
+        self._login(client)
+        unique = uuid.uuid4().hex
+        self._insert_outlook_account(email_addr=f"stats_out_{unique}@outlook.com", unique=unique)
+        self._insert_imap_account(email_addr=f"stats_imap_{unique}@example.com", unique=unique)
+        conn = self.module.create_sqlite_connection()
+        try:
+            conn.execute(
+                """
+                INSERT INTO accounts (
+                    email, client_id, refresh_token, account_type, provider, status, group_id
+                ) VALUES (?, '', '', 'temp_mail', 'cloudflare_temp_mail', 'active', ?)
+                """,
+                (f"stats_cf_{unique}@example.com", self._default_group_id()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        response = client.get("/api/accounts/refresh-stats")
+
+        self.assertEqual(response.status_code, 200)
+        stats = response.get_json()["stats"]
+        self.assertEqual(stats["total"], 2)
+        self.assertEqual(stats["success_count"], 2)
+        self.assertEqual(stats["failed_count"], 0)
 
     def test_refresh_all_includes_legacy_null_account_type(self):
         client = self.app.test_client()

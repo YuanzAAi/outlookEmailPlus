@@ -60,6 +60,8 @@ def get_overview_summary(conn: sqlite3.Connection | None = None) -> Dict[str, An
     account_rows = db.execute("""
         SELECT COALESCE(status, '') AS status, COUNT(*) AS cnt
         FROM accounts
+        WHERE COALESCE(account_type, '') != 'temp_mail'
+          AND COALESCE(provider, '') != 'cloudflare_temp_mail'
         GROUP BY COALESCE(status, '')
         """).fetchall()
     account_status = {
@@ -99,6 +101,28 @@ def get_overview_summary(conn: sqlite3.Connection | None = None) -> Dict[str, An
     }
     for row in pool_rows:
         status = str(row["pool_status"] or "").strip().lower()
+        count = int(row["cnt"] or 0)
+        pool_snapshot["total"] += count
+        if status == "available":
+            pool_snapshot["available"] += count
+        elif status == "claimed":
+            pool_snapshot["in_use"] += count
+        elif status == "cooldown":
+            pool_snapshot["cooldown"] += count
+        elif status == "used":
+            pool_snapshot["used"] += count
+        elif status in {"frozen", "retired"}:
+            pool_snapshot["disabled"] += count
+    temp_pool_rows = db.execute("""
+        SELECT COALESCE(pool_status, 'available') AS pool_status, COUNT(*) AS cnt
+        FROM temp_emails
+        WHERE COALESCE(status, 'active') = 'active'
+          AND COALESCE(mailbox_type, 'user') = 'user'
+          AND COALESCE(source, '') != 'cloudflare_account_temp_mail'
+        GROUP BY COALESCE(pool_status, 'available')
+        """).fetchall()
+    for row in temp_pool_rows:
+        status = str(row["pool_status"] or "available").strip().lower()
         count = int(row["cnt"] or 0)
         pool_snapshot["total"] += count
         if status == "available":
@@ -154,6 +178,16 @@ def get_overview_summary(conn: sqlite3.Connection | None = None) -> Dict[str, An
         SELECT COUNT(*) AS active_count
         FROM temp_emails
         WHERE COALESCE(status, 'active') = 'active'
+          AND COALESCE(source, '') != 'cloudflare_account_temp_mail'
+        """).fetchone()
+    account_backed_temp_active = db.execute("""
+        SELECT COUNT(*) AS active_count
+        FROM accounts
+        WHERE COALESCE(status, 'active') = 'active'
+          AND (
+              COALESCE(account_type, '') = 'temp_mail'
+              OR COALESCE(provider, '') = 'cloudflare_temp_mail'
+          )
         """).fetchone()
 
     return {
@@ -172,7 +206,10 @@ def get_overview_summary(conn: sqlite3.Connection | None = None) -> Dict[str, An
         "kpi": {
             "emails_received": int(today_messages["message_count"] or 0) if today_messages else 0,
             "verification_extracted": int(today_logs["verification_count"] or 0) if today_logs else 0,
-            "temp_emails_active": int(temp_mail_active["active_count"] or 0) if temp_mail_active else 0,
+            "temp_emails_active": (
+                (int(temp_mail_active["active_count"] or 0) if temp_mail_active else 0)
+                + (int(account_backed_temp_active["active_count"] or 0) if account_backed_temp_active else 0)
+            ),
         },
     }
 
@@ -441,6 +478,26 @@ def get_pool_stats(conn: sqlite3.Connection | None = None, *, days: int = 7) -> 
         elif status == "used":
             pool_counts["used"] += count
 
+    temp_rows = db.execute("""
+        SELECT COALESCE(pool_status, 'available') AS pool_status, COUNT(*) AS cnt
+        FROM temp_emails
+        WHERE COALESCE(status, 'active') = 'active'
+          AND COALESCE(mailbox_type, 'user') = 'user'
+          AND COALESCE(source, '') != 'cloudflare_account_temp_mail'
+        GROUP BY COALESCE(pool_status, 'available')
+        """).fetchall()
+    for row in temp_rows:
+        status = str(row["pool_status"] or "available").strip().lower()
+        count = int(row["cnt"] or 0)
+        if status == "available":
+            pool_counts["available"] += count
+        elif status == "claimed":
+            pool_counts["in_use"] += count
+        elif status == "cooldown":
+            pool_counts["cooldown"] += count
+        elif status == "used":
+            pool_counts["used"] += count
+
     dist_rows = db.execute(
         """
         SELECT action, result, COUNT(*) AS cnt
@@ -480,6 +537,16 @@ def get_pool_stats(conn: sqlite3.Connection | None = None, *, days: int = 7) -> 
         FROM accounts
         WHERE pool_status = 'claimed' AND claimed_at IS NOT NULL
         """).fetchone()
+    max_temp_claimed = db.execute("""
+        SELECT MAX(CAST((julianday('now') - julianday(claimed_at)) * 86400 AS INTEGER)) AS max_claim_s
+        FROM temp_emails
+        WHERE pool_status = 'claimed' AND claimed_at IS NOT NULL
+          AND COALESCE(source, '') != 'cloudflare_account_temp_mail'
+        """).fetchone()
+    max_claimed_duration = max(
+        int(max_claimed["max_claim_s"] or 0) if max_claimed else 0,
+        int(max_temp_claimed["max_claim_s"] or 0) if max_temp_claimed else 0,
+    )
     claim_count = operation_distribution["claim"]
     complete_count = operation_distribution["complete"]
     complete_success = operation_distribution["complete_success"]
@@ -535,7 +602,7 @@ def get_pool_stats(conn: sqlite3.Connection | None = None, *, days: int = 7) -> 
             "in_use": pool_counts["in_use"],
             "cooldown": pool_counts["cooldown"],
             "used": pool_counts["used"],
-            "max_claimed_duration_s": int(max_claimed["max_claim_s"] or 0) if max_claimed else 0,
+            "max_claimed_duration_s": max_claimed_duration,
             "claim_count_7d": claim_count,
             "complete_success_rate": _safe_div(complete_success, complete_count),
         },

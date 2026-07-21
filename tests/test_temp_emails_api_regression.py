@@ -133,6 +133,32 @@ class TempEmailsApiRegressionTests(unittest.TestCase):
         self.assertEqual(data["error"]["code"], "TEMP_EMAIL_CREATE_FAILED")
         self.assertIn("domain unavailable", data["error"]["message"])
 
+    def test_temp_email_list_orders_mailboxes_by_latest_message(self):
+        client = self.app.test_client()
+        self._login(client)
+
+        older_email = "older@temp.example"
+        newer_email = "newer@temp.example"
+        empty_email = "empty@temp.example"
+        for email_addr in (empty_email, newer_email, older_email):
+            self._insert_temp_email(email_addr)
+        self._insert_temp_email_message(email_addr=older_email, message_id="older-message", timestamp=100)
+        self._insert_temp_email_message(email_addr=newer_email, message_id="newer-message", timestamp=200)
+
+        with patch(
+            "outlook_web.controllers.temp_emails.temp_mail_service.sync_remote_mailboxes",
+            return_value=0,
+        ):
+            response = client.get("/api/temp-emails")
+
+        self.assertEqual(response.status_code, 200)
+        mailboxes = response.get_json()["emails"]
+        self.assertEqual([item["email"] for item in mailboxes], [newer_email, older_email, empty_email])
+        self.assertEqual(mailboxes[0]["latest_message_at"], 200)
+        self.assertEqual(mailboxes[0]["message_count"], 1)
+        self.assertEqual(mailboxes[-1]["latest_message_at"], 0)
+        self.assertEqual(mailboxes[-1]["message_count"], 0)
+
     def test_get_temp_email_messages_formats_remote_payload_and_caches_it(self):
         client = self.app.test_client()
         self._login(client)

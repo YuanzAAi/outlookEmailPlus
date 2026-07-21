@@ -73,6 +73,20 @@ class ExternalApiTempMailCompatTests(unittest.TestCase):
                 db.commit()
         return email_addr
 
+    def _create_user_mailbox(self, *, email_addr: str = "visible@compat-temp.test") -> str:
+        with self.app.app_context():
+            from outlook_web.repositories import temp_emails as temp_emails_repo
+
+            temp_emails_repo.create_temp_email(
+                email_addr=email_addr,
+                mailbox_type="user",
+                visible_in_ui=True,
+                source="custom_domain_temp_mail",
+                prefix=email_addr.split("@", 1)[0],
+                domain="compat-temp.test",
+            )
+        return email_addr
+
     def _seed_message(
         self,
         email_addr: str,
@@ -183,6 +197,198 @@ class ExternalApiTempMailCompatTests(unittest.TestCase):
                 verification_link_resp.get_json()["data"]["verification_link"],
                 "https://verify.example/confirm",
             )
+
+        with self.app.app_context():
+            from outlook_web.db import get_db
+            from outlook_web.repositories import overview as overview_repo
+            from outlook_web.repositories import temp_emails as temp_emails_repo
+            from outlook_web.services.verification_extract_log import encode_temp_mail_log_account_id
+
+            mailbox = temp_emails_repo.get_temp_email_by_address(email_addr)
+            log_account_id = encode_temp_mail_log_account_id(mailbox["id"])
+            logs = (
+                get_db()
+                .execute(
+                    """
+                SELECT channel, result_type
+                FROM verification_extract_logs
+                WHERE account_id = ?
+                ORDER BY id ASC
+                """,
+                    (log_account_id,),
+                )
+                .fetchall()
+            )
+            recent = overview_repo.get_verification_stats(recent_limit=50)["recent"]
+
+        self.assertEqual([row["channel"] for row in logs], ["temp_mail", "temp_mail"])
+        self.assertEqual([row["result_type"] for row in logs], ["code", "link"])
+        self.assertGreaterEqual(sum(1 for item in recent if item["account_email"] == email_addr), 2)
+
+    def test_account_status_supports_user_and_finished_task_temp_mailboxes(self):
+        user_email = self._create_user_mailbox(email_addr="StatusUser@compat-temp.test")
+        task_email = self._create_task_mailbox(
+            email_addr="finished@compat-temp.test",
+            task_token="tmptask_status_finished",
+            status="finished",
+        )
+        client = self.app.test_client()
+
+        user_resp = client.get(
+            f"/api/external/account-status?email={user_email.lower()}",
+            headers=self._headers("compat-key"),
+        )
+        self.assertEqual(user_resp.status_code, 200)
+        user_data = user_resp.get_json()["data"]
+        self.assertEqual(user_data["email"], user_email)
+        self.assertEqual(user_data["mailbox_kind"], "temp")
+        self.assertEqual(user_data["account_type"], "temp_mail")
+        self.assertEqual(user_data["mailbox_type"], "user")
+        self.assertTrue(user_data["visible_in_ui"])
+        self.assertTrue(user_data["can_read"])
+
+        task_resp = client.get(
+            f"/api/external/account-status?email={task_email}",
+            headers=self._headers("compat-key"),
+        )
+        self.assertEqual(task_resp.status_code, 200)
+        task_data = task_resp.get_json()["data"]
+        self.assertEqual(task_data["mailbox_type"], "task")
+        self.assertEqual(task_data["status"], "finished")
+        self.assertFalse(task_data["visible_in_ui"])
+        self.assertFalse(task_data["can_read"])
+
+    def test_instance_probe_can_select_account_backed_temp_mailbox(self):
+        email_addr = "probe-account-backed@managed-temp.test"
+        with self.app.app_context():
+            from outlook_web.db import get_db
+            from outlook_web.repositories import settings as settings_repo
+            from outlook_web.services import external_api
+
+            settings_repo.set_setting("temp_mail_provider", "cloudflare_temp_mail")
+            db = get_db()
+            group = db.execute("SELECT id FROM groups WHERE name = '默认分组' LIMIT 1").fetchone()
+            db.execute(
+                """
+                INSERT INTO accounts (
+                    email, client_id, refresh_token, account_type, provider,
+                    status, group_id, temp_mail_meta
+                ) VALUES (?, '', '', 'temp_mail', 'cloudflare_temp_mail', 'active', ?, ?)
+                """,
+                (
+                    email_addr,
+                    int(group["id"]) if group else 1,
+                    '{"provider_name":"cloudflare_temp_mail","provider_jwt":"jwt"}',
+                ),
+            )
+            db.commit()
+
+            account = {
+                "id": 901,
+                "email": email_addr,
+                "status": "active",
+                "provider": "cloudflare_temp_mail",
+                "account_type": "temp_mail",
+                "group_id": int(group["id"]) if group else 1,
+                "temp_mail_meta": '{"provider_name":"cloudflare_temp_mail","provider_jwt":"jwt"}',
+            }
+            with (
+                patch.object(external_api.temp_emails_repo, "load_temp_emails", return_value=[]),
+                patch.object(external_api.accounts_repo, "load_accounts", return_value=[account]),
+            ):
+                mailbox = external_api._pick_instance_probe_temp_mailbox()
+
+        self.assertIsNotNone(mailbox)
+        self.assertEqual(mailbox["email"], email_addr)
+        self.assertTrue(mailbox["account_backed"])
+
+    def test_multi_key_allowed_emails_applies_to_user_temp_mailboxes_but_not_owned_tasks(self):
+        allowed_email = self._create_user_mailbox(email_addr="allowed@compat-temp.test")
+        denied_email = self._create_user_mailbox(email_addr="denied@compat-temp.test")
+        with self.app.app_context():
+            from outlook_web.repositories import external_api_keys as external_api_keys_repo
+
+            owner = external_api_keys_repo.create_external_api_key(
+                name="scoped-owner",
+                api_key="scoped-owner-key",
+                allowed_emails=[allowed_email],
+            )
+
+        task_email = self._create_task_mailbox(
+            email_addr="dynamic-task@compat-temp.test",
+            task_token="tmptask_scoped_owner",
+            consumer_key=owner["consumer_key"],
+        )
+        client = self.app.test_client()
+
+        allowed_resp = client.get(
+            f"/api/external/account-status?email={allowed_email}",
+            headers=self._headers("scoped-owner-key"),
+        )
+        self.assertEqual(allowed_resp.status_code, 200)
+
+        denied_resp = client.get(
+            f"/api/external/account-status?email={denied_email}",
+            headers=self._headers("scoped-owner-key"),
+        )
+        self.assertEqual(denied_resp.status_code, 403)
+        self.assertEqual(denied_resp.get_json()["code"], "EMAIL_SCOPE_FORBIDDEN")
+
+        task_resp = client.get(
+            f"/api/external/account-status?email={task_email}",
+            headers=self._headers("scoped-owner-key"),
+        )
+        self.assertEqual(task_resp.status_code, 200)
+        self.assertEqual(task_resp.get_json()["data"]["email"], task_email)
+
+    def test_temp_mail_raw_endpoint_returns_saved_provider_payload(self):
+        email_addr = self._create_task_mailbox(
+            email_addr="RawCase@compat-temp.test",
+            task_token="tmptask_raw",
+        )
+        message_id = self._seed_message(email_addr, message_id="msg-raw", content="Raw code 314159")
+        client = self.app.test_client()
+        with patch(
+            "outlook_web.services.gptmail.gptmail_request",
+            side_effect=self._success_gptmail_request_factory(
+                message_id=message_id,
+                content="Raw code 314159",
+                subject="Raw payload",
+            ),
+        ):
+            response = client.get(
+                f"/api/external/messages/{message_id}/raw?email={email_addr.lower()}",
+                headers=self._headers("compat-key"),
+            )
+
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()["data"]
+        self.assertEqual(set(data), {"id", "email_address", "raw_content", "method"})
+        self.assertEqual(data["email_address"], email_addr)
+        self.assertIn("314159", data["raw_content"])
+
+    def test_instance_health_probe_falls_back_to_visible_temp_mailbox(self):
+        email_addr = self._create_user_mailbox(email_addr="health@compat-temp.test")
+        with self.app.app_context():
+            from outlook_web.db import get_db
+            from outlook_web.services import external_api as external_api_service
+
+            db = get_db()
+            db.execute("DELETE FROM external_upstream_probes WHERE scope_type IN ('instance', 'temp_email')")
+            db.commit()
+            with (
+                patch("outlook_web.services.external_api._pick_instance_probe_account", return_value=None),
+                patch("outlook_web.services.external_api.get_temp_mail_service") as get_service,
+            ):
+                get_service.return_value.list_messages.return_value = []
+                summary = external_api_service.probe_instance_upstream(force=True)
+            probe_row = db.execute(
+                "SELECT email_addr FROM external_upstream_probes WHERE scope_type = 'instance' AND scope_key = '__instance__'"
+            ).fetchone()
+
+        self.assertTrue(summary["upstream_probe_ok"])
+        self.assertEqual(summary["probe_method"], "Temp Mail")
+        self.assertEqual(probe_row["email_addr"], email_addr)
 
     def test_latest_local_only_mode_does_not_sync_temp_mail_upstream(self):
         email_addr = self._create_task_mailbox(email_addr="localonly@compat-temp.test")

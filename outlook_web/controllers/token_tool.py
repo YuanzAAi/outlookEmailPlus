@@ -335,6 +335,7 @@ def get_account_list() -> Any:
         }
         for account in accounts
         if account.get("account_type") in ("outlook", None)
+        and str(account.get("provider") or "").strip().lower() != "cloudflare_temp_mail"
     ]
     return jsonify({"success": True, "data": result})
 

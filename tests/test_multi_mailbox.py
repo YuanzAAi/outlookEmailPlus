@@ -220,6 +220,7 @@ class MultiMailboxSupportTests(unittest.TestCase):
         unique = uuid.uuid4().hex
         outlook_email = f"out_{unique}@outlook.com"
         imap_email = f"imap_{unique}@example.com"
+        legacy_cf_email = f"cf_{unique}@example.com"
 
         conn = self.module.create_sqlite_connection()
         try:
@@ -235,6 +236,23 @@ class MultiMailboxSupportTests(unittest.TestCase):
                     self.module.encrypt_data("rt_" + unique),
                     "outlook",
                     "outlook",
+                    self._default_group_id(),
+                    "",
+                    "active",
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO accounts (email, password, client_id, refresh_token, account_type, provider, group_id, remark, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    legacy_cf_email,
+                    "",
+                    "cf_client_" + unique,
+                    self.module.encrypt_data("cf_rt_" + unique),
+                    "outlook",
+                    "cloudflare_temp_mail",
                     self._default_group_id(),
                     "",
                     "active",
@@ -283,6 +301,7 @@ class MultiMailboxSupportTests(unittest.TestCase):
         self.assertGreaterEqual(len(called), 1)
         self.assertTrue(any(cid == "client_" + unique for cid, _, _ in called))
         self.assertFalse(any(cid == "" for cid, _, _ in called))  # 不应包含 IMAP 账号（空 client_id）
+        self.assertFalse(any(cid == "cf_client_" + unique for cid, _, _ in called))
 
         # 成功刷新时应写回滚动更新后的 refresh_token（加密存储）
         conn = self.module.create_sqlite_connection()

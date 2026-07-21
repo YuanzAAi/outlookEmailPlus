@@ -1,6 +1,7 @@
 (function () {
   const DEFAULT_WAIT_SECONDS = 60;
   const FETCH_TIMEOUT_MS = 65000;
+  const VERIFICATION_RETRY_INTERVAL_MS = 2000;
   const ACTION_TIMEOUT_MS = 10000;
   const MAX_HISTORY = 100;
   const CALLER_ID = 'browser-extension';
@@ -501,36 +502,62 @@
     }
   }
 
-  async function apiGetCode(config, email) {
+  async function apiGetCode(config, task) {
+    return apiGetVerification(config, task, 'verification-code');
+  }
+
+  async function apiGetVerification(config, task, endpoint) {
     const base = trimUrl(config.serverUrl);
-    const url = `${base}/api/external/verification-code?email=${encodeURIComponent(email)}&wait=${DEFAULT_WAIT_SECONDS}`;
+    const params = new URLSearchParams({ email: task.email });
+    if (task.claimToken) params.set('claim_token', task.claimToken);
+    const url = `${base}/api/external/${endpoint}?${params.toString()}`;
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
-    try {
+    const deadline = Date.now() + DEFAULT_WAIT_SECONDS * 1000;
+
+    async function requestOnce() {
       const resp = await fetch(url, {
         headers: buildHeaders(config.apiKey),
         signal: ctrl.signal,
       });
-      return handleResponse(resp);
+      let body = null;
+      try {
+        body = await resp.json();
+      } catch {
+        body = null;
+      }
+      if (resp.ok && (!body || body.success !== false)) return body;
+
+      const error = new Error(
+        (body && (body.message || body.error)) ||
+          (resp.status >= 500 ? '服务端内部错误，请稍后再试' : `请求失败 (${resp.status})`),
+      );
+      error.code = body && body.code ? body.code : '';
+      error.status = resp.status;
+      throw error;
+    }
+
+    try {
+      while (true) {
+        try {
+          return await requestOnce();
+        } catch (err) {
+          const retryable = [
+            'MAIL_NOT_FOUND',
+            'VERIFICATION_CODE_NOT_FOUND',
+            'VERIFICATION_LINK_NOT_FOUND',
+          ].includes(err && err.code);
+          if (!retryable || Date.now() >= deadline) throw err;
+          await new Promise((resolve) => setTimeout(resolve, VERIFICATION_RETRY_INTERVAL_MS));
+        }
+      }
     } finally {
       clearTimeout(timer);
     }
   }
 
-  async function apiGetLink(config, email) {
-    const base = trimUrl(config.serverUrl);
-    const url = `${base}/api/external/verification-link?email=${encodeURIComponent(email)}&wait=${DEFAULT_WAIT_SECONDS}`;
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
-    try {
-      const resp = await fetch(url, {
-        headers: buildHeaders(config.apiKey),
-        signal: ctrl.signal,
-      });
-      return handleResponse(resp);
-    } finally {
-      clearTimeout(timer);
-    }
+  async function apiGetLink(config, task) {
+    return apiGetVerification(config, task, 'verification-link');
   }
 
   async function apiComplete(config, task) {
@@ -645,7 +672,7 @@
     await renderMailboxState('fetching', Object.assign({}, currentTask, { fetchType: 'code' }));
 
     try {
-      const result = await apiGetCode(config, currentTask.email);
+      const result = await apiGetCode(config, currentTask);
       if (!result || !result.data || !result.data.verification_code) {
         throw new Error('未获取到验证码');
       }
@@ -671,7 +698,7 @@
     await renderMailboxState('fetching', Object.assign({}, currentTask, { fetchType: 'link' }));
 
     try {
-      const result = await apiGetLink(config, currentTask.email);
+      const result = await apiGetLink(config, currentTask);
       if (!result || !result.data || !result.data.verification_link) {
         throw new Error('未获取到验证链接');
       }

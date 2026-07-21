@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 from unittest.mock import patch
 
@@ -93,6 +94,7 @@ class TempMailServiceTests(unittest.TestCase):
             db.execute("DELETE FROM temp_emails WHERE email LIKE '%@service.test'")
             db.execute("DELETE FROM temp_email_messages WHERE email_address LIKE '%@cf-mail.example.com'")
             db.execute("DELETE FROM temp_emails WHERE email LIKE '%@cf-mail.example.com'")
+            db.execute("DELETE FROM accounts WHERE email LIKE '%@cf-mail.example.com'")
             db.execute("DELETE FROM settings WHERE key = 'cf_worker_address_sync_cursor'")
             db.commit()
 
@@ -260,6 +262,218 @@ class TempMailServiceTests(unittest.TestCase):
         self.assertEqual(result["mailbox_type"], "task")
         self.assertFalse(stored["visible_in_ui"])
         self.assertEqual(stored["consumer_key"], "consumer-a")
+
+    def test_cloudflare_inbound_push_uses_hidden_message_parent_for_account_backed_mailbox(self):
+        with self.app.app_context():
+            from outlook_web.db import get_db
+            from outlook_web.repositories import accounts as accounts_repo
+            from outlook_web.repositories import settings as settings_repo
+            from outlook_web.repositories import temp_emails as temp_emails_repo
+            from outlook_web.services import mailbox_resolver
+            from outlook_web.services.temp_mail_service import TempMailService
+
+            settings_repo.set_setting("temp_mail_provider", "cloudflare_temp_mail")
+            settings_repo.set_setting(
+                "cf_worker_domains",
+                '[{"name":"cf-mail.example.com","enabled":true}]',
+            )
+            db = get_db()
+            db.execute(
+                """
+                INSERT INTO accounts (
+                    email, password, client_id, refresh_token, account_type, provider,
+                    status, pool_status, temp_mail_meta
+                ) VALUES (?, '', '', '', 'temp_mail', 'cloudflare_temp_mail', 'active', 'claimed', ?)
+                """,
+                (
+                    "PoolCase@cf-mail.example.com",
+                    json.dumps({"provider_name": "cloudflare_temp_mail", "provider_mailbox_id": "77"}),
+                ),
+            )
+            db.commit()
+            provider = _FakeCloudflareProvider()
+            service = TempMailService(provider=provider)
+
+            result = service.ingest_cloudflare_inbound(
+                {
+                    "email": "poolcase@cf-mail.example.com",
+                    "address_id": 77,
+                    "provider_jwt": "jwt-77",
+                    "message": {"id": 504, "subject": "Pool code", "content": "445566"},
+                }
+            )
+            account = accounts_repo.get_account_by_email("POOLCASE@CF-MAIL.EXAMPLE.COM")
+            resolved = mailbox_resolver.resolve_mailbox("poolcase@cf-mail.example.com")
+            messages = service.list_messages(resolved, sync_remote=False)
+            duplicate = temp_emails_repo.get_temp_email_by_address("poolcase@cf-mail.example.com")
+
+        self.assertEqual(result["email"], "PoolCase@cf-mail.example.com")
+        self.assertFalse(result["visible_in_ui"])
+        self.assertIsNotNone(duplicate)
+        self.assertFalse(duplicate["visible_in_ui"])
+        self.assertEqual(duplicate["source"], "cloudflare_account_temp_mail")
+        self.assertEqual(json.loads(account["temp_mail_meta"])["provider_jwt"], "jwt-77")
+        self.assertEqual(resolved["kind"], "temp")
+        self.assertEqual(messages[0]["subject"], "Pool code")
+
+    def test_account_backed_sync_does_not_take_over_unrelated_temp_mailbox(self):
+        with self.app.app_context():
+            from outlook_web.db import get_db
+            from outlook_web.repositories import settings as settings_repo
+            from outlook_web.repositories import temp_emails as temp_emails_repo
+            from outlook_web.services.temp_mail_service import TempMailError, TempMailService
+
+            email_addr = "collision@cf-mail.example.com"
+            settings_repo.set_setting("temp_mail_provider", "cloudflare_temp_mail")
+            settings_repo.set_setting(
+                "cf_worker_domains",
+                '[{"name":"cf-mail.example.com","enabled":true}]',
+            )
+            temp_emails_repo.create_temp_email(
+                email_addr=email_addr,
+                source="custom_domain_temp_mail",
+                provider_name="custom_domain_temp_mail",
+                visible_in_ui=True,
+            )
+            db = get_db()
+            db.execute(
+                """
+                INSERT INTO accounts (
+                    email, password, client_id, refresh_token, account_type, provider,
+                    status, pool_status, temp_mail_meta
+                ) VALUES (?, '', '', '', 'temp_mail', 'cloudflare_temp_mail', 'active', 'claimed', ?)
+                """,
+                (email_addr, json.dumps({"provider_name": "cloudflare_temp_mail"})),
+            )
+            db.commit()
+            service = TempMailService(provider=_FakeCloudflareProvider())
+
+            with self.assertRaises(TempMailError) as ctx:
+                service.ingest_cloudflare_inbound(
+                    {
+                        "email": email_addr,
+                        "address_id": 88,
+                        "provider_jwt": "jwt-88",
+                        "message": {"id": 505, "subject": "Must not persist", "content": "000000"},
+                    }
+                )
+            stored = temp_emails_repo.get_temp_email_by_address(email_addr)
+            messages = temp_emails_repo.get_temp_email_messages(email_addr)
+
+        self.assertEqual(ctx.exception.code, "TEMP_EMAIL_ACCOUNT_CONFLICT")
+        self.assertTrue(stored["visible_in_ui"])
+        self.assertEqual(stored["source"], "custom_domain_temp_mail")
+        self.assertEqual(stored["provider_name"], "custom_domain_temp_mail")
+        self.assertEqual(messages, [])
+
+    def test_orphan_account_backed_parent_is_not_readable_through_temp_service(self):
+        with self.app.app_context():
+            from outlook_web.repositories import temp_emails as temp_emails_repo
+            from outlook_web.services.temp_mail_service import TempMailError, TempMailService
+
+            email_addr = "orphan@cf-mail.example.com"
+            temp_emails_repo.create_temp_email(
+                email_addr=email_addr,
+                mailbox_type="user",
+                visible_in_ui=False,
+                source="cloudflare_account_temp_mail",
+                provider_name="cloudflare_temp_mail",
+            )
+            service = TempMailService(provider=_FakeCloudflareProvider())
+
+            with self.assertRaises(TempMailError) as ctx:
+                service.list_messages(email_addr, sync_remote=False)
+
+        self.assertEqual(ctx.exception.code, "TEMP_EMAIL_NOT_FOUND")
+
+    def test_account_backed_mailbox_missing_credentials_discovers_once_and_keeps_messages_readable(self):
+        with self.app.app_context():
+            from outlook_web.db import get_db
+            from outlook_web.repositories import accounts as accounts_repo
+            from outlook_web.repositories import settings as settings_repo
+            from outlook_web.repositories import temp_emails as temp_emails_repo
+            from outlook_web.services import mailbox_resolver
+            from outlook_web.services.temp_mail_service import TempMailService
+
+            settings_repo.set_setting("temp_mail_provider", "cloudflare_temp_mail")
+            settings_repo.set_setting(
+                "cf_worker_domains",
+                '[{"name":"cf-mail.example.com","enabled":true}]',
+            )
+            db = get_db()
+            db.execute(
+                """
+                INSERT INTO accounts (
+                    email, password, client_id, refresh_token, account_type, provider,
+                    status, pool_status, temp_mail_meta
+                ) VALUES (?, '', '', '', 'temp_mail', 'cloudflare_temp_mail', 'active', 'claimed', ?)
+                """,
+                (
+                    "LazyPool@cf-mail.example.com",
+                    json.dumps({"provider_name": "cloudflare_temp_mail"}),
+                ),
+            )
+            db.commit()
+            provider = _FakeCloudflareProvider()
+            provider.discovered = {
+                "success": True,
+                "email": "LazyPool@cf-mail.example.com",
+                "provider_name": "cloudflare_temp_mail",
+                "meta": {
+                    "provider_name": "cloudflare_temp_mail",
+                    "provider_mailbox_id": "91",
+                    "provider_jwt": "jwt-91",
+                },
+            }
+            provider.list_payload = [{"id": "cf_601", "subject": "Lazy code", "content": "667788"}]
+            service = TempMailService(provider=provider)
+            resolved = mailbox_resolver.resolve_mailbox("lazypool@cf-mail.example.com")
+            messages = service.list_messages(resolved, sync_remote=True)
+            account = accounts_repo.get_account_by_email("lazypool@cf-mail.example.com")
+            shadow = temp_emails_repo.get_temp_email_by_address("lazypool@cf-mail.example.com")
+
+        self.assertEqual(provider.discover_calls, 1)
+        self.assertEqual(provider.list_calls, 1)
+        self.assertEqual(messages[0]["subject"], "Lazy code")
+        self.assertEqual(json.loads(account["temp_mail_meta"])["provider_jwt"], "jwt-91")
+        self.assertFalse(shadow["visible_in_ui"])
+        self.assertEqual(shadow["source"], "cloudflare_account_temp_mail")
+
+    def test_account_backed_mailbox_cannot_be_deleted_through_temp_mail_api_service(self):
+        with self.app.app_context():
+            from outlook_web.db import get_db
+            from outlook_web.repositories import settings as settings_repo
+            from outlook_web.repositories import temp_emails as temp_emails_repo
+            from outlook_web.services.temp_mail_service import TempMailError, TempMailService
+
+            settings_repo.set_setting("temp_mail_provider", "cloudflare_temp_mail")
+            db = get_db()
+            db.execute(
+                """
+                INSERT INTO accounts (
+                    email, password, client_id, refresh_token, account_type, provider,
+                    status, pool_status, temp_mail_meta
+                ) VALUES (?, '', '', '', 'temp_mail', 'cloudflare_temp_mail', 'active', 'claimed', ?)
+                """,
+                (
+                    "ProtectedPool@cf-mail.example.com",
+                    json.dumps({"provider_name": "cloudflare_temp_mail", "provider_jwt": "jwt"}),
+                ),
+            )
+            db.commit()
+            temp_emails_repo.ensure_account_backed_temp_email(
+                "ProtectedPool@cf-mail.example.com",
+                {"provider_name": "cloudflare_temp_mail", "provider_jwt": "jwt"},
+                provider_name="cloudflare_temp_mail",
+            )
+            service = TempMailService(provider=_FakeCloudflareProvider())
+
+            with self.assertRaises(TempMailError) as ctx:
+                service.delete_mailbox("protectedpool@cf-mail.example.com")
+            shadow = temp_emails_repo.get_temp_email_by_address("protectedpool@cf-mail.example.com")
+
+        self.assertEqual(ctx.exception.code, "TEMP_EMAIL_POOL_ACCOUNT_MANAGED")
+        self.assertIsNotNone(shadow)
 
     def test_cloudflare_inbound_push_rejects_unmanaged_domain(self):
         with self.app.app_context():

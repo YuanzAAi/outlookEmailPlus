@@ -1131,6 +1131,16 @@ class OAuthToolApiAccountListTests(OAuthToolTestBase):
                 group_id=1,
                 remark="oauth-test",
             )
+            accounts_repo.add_account(
+                email_addr="cf-test@oauth-test.com",
+                password="",
+                client_id="legacy-cf-client",
+                refresh_token="legacy-cf-token",
+                account_type="outlook",
+                provider="cloudflare_temp_mail",
+                group_id=1,
+                remark="oauth-test",
+            )
 
         with self.app.test_client() as client:
             self._login(client)
@@ -1145,6 +1155,7 @@ class OAuthToolApiAccountListTests(OAuthToolTestBase):
             self.assertIn("status", acc)
             self.assertIn("account_type", acc)
             self.assertTrue(all(item.get("account_type") in ("outlook", None) for item in accounts))
+            self.assertNotIn("cf-test@oauth-test.com", {item.get("email") for item in accounts})
 
     def test_accounts_list_excludes_sensitive_fields(self):
         self._insert_test_account(email="sensitive-test@oauth-test.com")

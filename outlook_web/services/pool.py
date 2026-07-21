@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Optional
+from typing import Iterable, Optional
 
 from outlook_web.db import create_sqlite_connection
 from outlook_web.repositories import pool as pool_repo
@@ -113,6 +113,26 @@ def _validate_email_domain(email_domain: Optional[str]) -> Optional[str]:
     return d
 
 
+def _normalize_allowed_emails(allowed_emails: Iterable[str] | None) -> list[str]:
+    return sorted(
+        {
+            str(email or "").strip().lower()
+            for email in (allowed_emails or [])
+            if str(email or "").strip() and "@" in str(email or "")
+        }
+    )
+
+
+def _ensure_allowed_email(email_addr: str, allowed_emails: Iterable[str] | None) -> None:
+    normalized_allowed_emails = _normalize_allowed_emails(allowed_emails)
+    if normalized_allowed_emails and str(email_addr or "").strip().lower() not in normalized_allowed_emails:
+        raise PoolServiceError(
+            "当前 API Key 无权操作该邮箱",
+            "email_scope_forbidden",
+            http_status=403,
+        )
+
+
 def _read_settings_via_conn(conn) -> dict:
     """在独立连接场景下直接从 settings 表读取池相关配置。"""
     rows = conn.execute(
@@ -157,12 +177,14 @@ def claim_random(
     provider: Optional[str] = None,
     project_key: Optional[str] = None,
     email_domain: Optional[str] = None,
+    allowed_emails: Iterable[str] | None = None,
 ) -> dict:
     _validate_caller_id(caller_id)
     _validate_task_id(task_id)
     provider = _validate_provider(provider)
     project_key = _validate_project_key(project_key)
     email_domain = _validate_email_domain(email_domain)
+    allowed_emails = _normalize_allowed_emails(allowed_emails)
 
     conn = create_sqlite_connection()
     try:
@@ -179,6 +201,7 @@ def claim_random(
                 provider=provider,
                 project_key=project_key,
                 email_domain=email_domain,
+                allowed_emails=allowed_emails,
             )
         except pool_repo.PoolRepositoryError as e:
             # 将 Repository 层异常转换为 Service 层异常
@@ -196,6 +219,7 @@ def claim_random(
                     task_id=task_id,
                     lease_seconds=default_lease,
                     email_domain=email_domain,
+                    allowed_emails=allowed_emails,
                 )
             except pool_repo.PoolRepositoryError as e:
                 raise PoolServiceError(str(e), e.error_code, http_status=500) from e
@@ -203,7 +227,7 @@ def claim_random(
                 return temp_account
 
         # 池为空：仅当显式指定 provider=cloudflare_temp_mail 时，动态创建 CF 临时邮箱
-        if provider == "cloudflare_temp_mail":
+        if provider == "cloudflare_temp_mail" and not allowed_emails:
             created_email, created_meta = _create_cf_mailbox_for_pool(email_domain=email_domain)
 
             try:
@@ -267,6 +291,7 @@ def release_claim(
     caller_id: str,
     task_id: str,
     reason: Optional[str] = None,
+    allowed_emails: Iterable[str] | None = None,
 ) -> None:
     """释放已领取的邮箱账号（不计入成功/失败统计，直接回 available）。"""
     _validate_caller_id(caller_id)
@@ -282,6 +307,8 @@ def release_claim(
         if pool_repo.is_temp_pool_account_id(account_id):
             temp_id = pool_repo.temp_id_from_account_id(account_id)
             temp_row = pool_repo.get_temp_mailbox_pool_row(conn, temp_id)
+            if temp_row is not None:
+                _ensure_allowed_email(str(temp_row.get("email") or ""), allowed_emails)
             _validate_claim_ownership(
                 temp_row, action="release", claim_token=claim_token, caller_id=caller_id, task_id=task_id
             )
@@ -289,9 +316,11 @@ def release_claim(
             return
 
         row = conn.execute(
-            "SELECT id, claim_token, claimed_by, pool_status FROM accounts WHERE id = ?",
+            "SELECT id, email, claim_token, claimed_by, pool_status FROM accounts WHERE id = ?",
             (account_id,),
         ).fetchone()
+        if row is not None:
+            _ensure_allowed_email(str(row["email"] or ""), allowed_emails)
         _validate_claim_ownership(
             dict(row) if row is not None else None,
             action="release",
@@ -313,6 +342,7 @@ def complete_claim(
     task_id: str,
     result: str,
     detail: Optional[str] = None,
+    allowed_emails: Iterable[str] | None = None,
 ) -> str:
     """
     标记领取结果并驱动状态机流转。
@@ -337,6 +367,8 @@ def complete_claim(
         if pool_repo.is_temp_pool_account_id(account_id):
             temp_id = pool_repo.temp_id_from_account_id(account_id)
             temp_row = pool_repo.get_temp_mailbox_pool_row(conn, temp_id)
+            if temp_row is not None:
+                _ensure_allowed_email(str(temp_row.get("email") or ""), allowed_emails)
             _validate_claim_ownership(
                 temp_row, action="complete", claim_token=claim_token, caller_id=caller_id, task_id=task_id
             )
@@ -352,6 +384,8 @@ def complete_claim(
             """,
             (account_id,),
         ).fetchone()
+        if row is not None:
+            _ensure_allowed_email(str(row["email"] or ""), allowed_emails)
         _validate_claim_ownership(
             dict(row) if row is not None else None,
             action="complete",
@@ -486,10 +520,10 @@ def append_claim_read_context(
         conn.close()
 
 
-def get_pool_stats() -> dict:
+def get_pool_stats(*, allowed_emails: Iterable[str] | None = None) -> dict:
     """返回池状态统计（不修改任何数据）。"""
     conn = create_sqlite_connection()
     try:
-        return pool_repo.get_stats(conn)
+        return pool_repo.get_stats(conn, allowed_emails=_normalize_allowed_emails(allowed_emails))
     finally:
         conn.close()

@@ -24,7 +24,7 @@ from outlook_web.repositories.refresh_runs import create_refresh_run, finish_ref
 from outlook_web.security.auth import get_client_ip, get_user_agent, login_required
 from outlook_web.security.crypto import decrypt_data
 from outlook_web.services import graph as graph_service
-from outlook_web.services import outlook_transport
+from outlook_web.services import mailbox_resolver, outlook_transport
 from outlook_web.services import refresh as refresh_service
 
 
@@ -895,7 +895,9 @@ def _detect_line_type(
         prov = infer_provider_from_email(email)
         if prov:
             if prov == "outlook":
-                return _err("Outlook 两段格式不支持密码直连，请使用 4 段 OAuth 格式：邮箱----密码----client_id----refresh_token")
+                return _err(
+                    "Outlook 两段格式不支持密码直连，请使用 4 段 OAuth 格式：邮箱----密码----client_id----refresh_token"
+                )
             cfg = MAIL_PROVIDERS.get(prov, {})
             host = cfg.get("imap_host", "")
             port = int(cfg.get("imap_port", 993))
@@ -1825,7 +1827,11 @@ def api_probe_mail_methods() -> Any:
     skipped = 0
     for email_addr in emails:
         account = accounts_repo.get_account_by_email(email_addr)
-        if not account or str(account.get("account_type") or "outlook").strip().lower() != "outlook":
+        if (
+            not account
+            or str(account.get("account_type") or "outlook").strip().lower() != "outlook"
+            or mailbox_resolver.is_account_backed_temp_mailbox(account)
+        ):
             skipped += 1
             continue
         proxy_url = ""
@@ -2130,6 +2136,12 @@ def api_search_accounts() -> Any:
 # ==================== 导出功能 API ====================
 
 
+def _filter_exportable_accounts(accounts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return [
+        account for account in (accounts or []) if str(account.get("provider") or "").strip().lower() != "cloudflare_temp_mail"
+    ]
+
+
 def _build_export_text(accounts: List[Dict[str, Any]], temp_emails: Optional[List[Dict]] = None) -> str:
     """构建导出文本 v2：头部元信息 + 分段 + 临时邮箱分段。"""
     import io
@@ -2140,7 +2152,7 @@ def _build_export_text(accounts: List[Dict[str, Any]], temp_emails: Optional[Lis
     imap_groups: Dict[str, List[str]] = {}
     temp_mail_lines: List[str] = []
 
-    for acc in accounts or []:
+    for acc in _filter_exportable_accounts(accounts):
         atype = (acc.get("account_type") or "outlook").strip().lower()
         prov = (acc.get("provider") or "").strip().lower()
 
@@ -2240,12 +2252,12 @@ def api_export_all_accounts() -> Any:
         return build_export_verify_failure_response(error_message)
 
     # 使用 load_accounts 获取所有账号（自动解密）
-    accounts = accounts_repo.load_accounts()
+    accounts = _filter_exportable_accounts(accounts_repo.load_accounts())
 
     # 加载临时邮箱
     from outlook_web.repositories import temp_emails as temp_emails_repo
 
-    temp_emails = temp_emails_repo.load_temp_emails()
+    temp_emails = temp_emails_repo.load_temp_emails(visible_only=True)
 
     if not accounts and not temp_emails:
         return build_error_response(
@@ -2304,6 +2316,7 @@ def api_export_selected_accounts() -> Any:
     for group_id in group_ids:
         accounts = accounts_repo.load_accounts(group_id)
         all_accounts.extend(accounts)
+    all_accounts = _filter_exportable_accounts(all_accounts)
 
     # 仅当选中了"临时邮箱"系统分组时才附加临时邮箱
     from outlook_web.repositories import temp_emails as temp_emails_repo
@@ -2311,7 +2324,7 @@ def api_export_selected_accounts() -> Any:
     temp_emails: List[Dict] = []
     temp_group = groups_repo.get_group_by_name("临时邮箱")
     if temp_group and temp_group["id"] in group_ids:
-        temp_emails = temp_emails_repo.load_temp_emails()
+        temp_emails = temp_emails_repo.load_temp_emails(visible_only=True)
 
     if not all_accounts and not temp_emails:
         return build_error_response(
@@ -2380,7 +2393,7 @@ def api_refresh_account(account_id: int) -> Any:
     """刷新单个账号的 token"""
     db = get_db()
     cursor = db.execute(
-        "SELECT id, email, client_id, refresh_token, group_id, account_type FROM accounts WHERE id = ?",
+        "SELECT id, email, client_id, refresh_token, group_id, account_type, provider FROM accounts WHERE id = ?",
         (account_id,),
     )
     account = cursor.fetchone()
@@ -2400,14 +2413,14 @@ def api_refresh_account(account_id: int) -> Any:
     client_id = account["client_id"]
     encrypted_refresh_token = account["refresh_token"]
 
-    if not refresh_service.is_refreshable_outlook_account(account["account_type"]):
+    if not refresh_service.is_refreshable_outlook_account(account["account_type"], provider=account["provider"]):
         return build_error_response(
             "ACCOUNT_REFRESH_UNSUPPORTED",
-            "IMAP 账号不支持 Token 刷新",
-            message_en="IMAP accounts do not support token refresh",
+            "当前邮箱类型不支持 Token 刷新",
+            message_en="This mailbox type does not support token refresh",
             err_type="UnsupportedOperationError",
             status=400,
-            details=f"account_id={account_id}, account_type={account['account_type']}",
+            details=f"account_id={account_id}, account_type={account['account_type']}, provider={account['provider']}",
         )
 
     # 获取分组代理设置
@@ -2641,8 +2654,7 @@ def api_get_failed_refresh_logs() -> Any:
     db = get_db()
 
     # 获取每个账号最近一次失败的刷新记录
-    cursor = db.execute(
-        """
+    cursor = db.execute("""
         SELECT l.*, a.email as account_email, a.status as account_status
         FROM account_refresh_logs l
         INNER JOIN (
@@ -2653,8 +2665,7 @@ def api_get_failed_refresh_logs() -> Any:
         LEFT JOIN accounts a ON l.account_id = a.id
         WHERE l.status = 'failed'
         ORDER BY l.created_at DESC
-    """
-    )
+    """)
 
     logs = []
     for row in cursor.fetchall():
@@ -2756,27 +2767,24 @@ def api_get_refresh_stats() -> Any:
     """获取刷新统计信息（统计当前失败状态的邮箱数量）"""
     db = get_db()
 
-    cursor = db.execute(
-        """
+    cursor = db.execute("""
         SELECT MAX(created_at) as last_refresh_time
         FROM account_refresh_logs
         WHERE refresh_type IN ('manual', 'manual_all', 'scheduled', 'retry')
-    """
-    )
+    """)
     row = cursor.fetchone()
     last_refresh_time = row["last_refresh_time"] if row else None
 
-    cursor = db.execute(
-        """
+    cursor = db.execute("""
         SELECT COUNT(*) as total_accounts
         FROM accounts
         WHERE status = 'active'
-    """
-    )
+          AND COALESCE(account_type, '') != 'temp_mail'
+          AND COALESCE(provider, '') != 'cloudflare_temp_mail'
+    """)
     total_accounts = cursor.fetchone()["total_accounts"]
 
-    cursor = db.execute(
-        """
+    cursor = db.execute("""
         SELECT COUNT(DISTINCT l.account_id) as failed_count
         FROM account_refresh_logs l
         INNER JOIN (
@@ -2785,9 +2793,11 @@ def api_get_refresh_stats() -> Any:
             GROUP BY account_id
         ) latest ON l.account_id = latest.account_id AND l.created_at = latest.last_refresh
         INNER JOIN accounts a ON l.account_id = a.id
-        WHERE l.status = 'failed' AND a.status = 'active'
-    """
-    )
+        WHERE l.status = 'failed'
+          AND a.status = 'active'
+          AND COALESCE(a.account_type, '') != 'temp_mail'
+          AND COALESCE(a.provider, '') != 'cloudflare_temp_mail'
+    """)
     failed_count = cursor.fetchone()["failed_count"]
 
     return jsonify(

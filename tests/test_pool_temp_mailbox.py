@@ -25,6 +25,7 @@ class TempMailboxPoolTests(unittest.TestCase):
             conn.execute("DELETE FROM account_project_usage")
             conn.execute("DELETE FROM account_claim_logs")
             conn.execute("DELETE FROM accounts")
+            conn.execute("DELETE FROM temp_email_messages")
             conn.execute("DELETE FROM temp_emails")
             conn.commit()
         finally:
@@ -33,6 +34,7 @@ class TempMailboxPoolTests(unittest.TestCase):
     def tearDown(self):
         conn = self.create_conn()
         try:
+            conn.execute("DELETE FROM temp_email_messages")
             conn.execute("DELETE FROM temp_emails")
             conn.commit()
         finally:
@@ -211,6 +213,42 @@ class TempMailboxPoolTests(unittest.TestCase):
         self._make_temp_email()
         stats = self.pool_service.get_pool_stats()
         self.assertGreaterEqual(stats["pool_counts"]["available"], 1)
+
+    def test_account_backed_message_parent_is_not_claimed_or_double_counted_as_temp_pool(self):
+        email = "mirror@account-backed.test"
+        conn = self.create_conn()
+        try:
+            conn.execute(
+                """
+                INSERT INTO accounts (
+                    email, password, client_id, refresh_token, status,
+                    account_type, provider, pool_status, temp_mail_meta
+                ) VALUES (?, '', '', '', 'active', 'temp_mail', 'cloudflare_temp_mail', 'available', ?)
+                """,
+                (email, '{"provider_name":"cloudflare_temp_mail","provider_jwt":"jwt"}'),
+            )
+            conn.execute(
+                """
+                INSERT INTO temp_emails (
+                    email, status, mailbox_type, visible_in_ui, source, prefix, domain, meta_json
+                ) VALUES (?, 'active', 'user', 0, 'cloudflare_account_temp_mail', 'mirror', 'account-backed.test', ?)
+                """,
+                (email, '{"provider_name":"cloudflare_temp_mail"}'),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        stats = self.pool_service.get_pool_stats()
+        self.assertEqual(stats["pool_counts"]["available"], 1)
+        with self.assertRaises(self.pool_service.PoolServiceError) as ctx:
+            self.pool_service.claim_random(
+                caller_id="reg_bot",
+                task_id="t_mirror",
+                provider="custom",
+                email_domain="account-backed.test",
+            )
+        self.assertEqual(ctx.exception.error_code, "no_available_account")
 
 
 if __name__ == "__main__":

@@ -262,7 +262,7 @@ function renderOverviewSummary(data) {
                 badge: '当天',
                 hoverNote: '这是面向今天的即时读数，适合和外部流量高峰一起对着看。',
                 body: `
-                    <div class="ov-kv"><span>${esc(ovT('今日收件'))}</span><strong>${formatNumber(kpi.emails_received || 0)}</strong></div>
+                    <div class="ov-kv"><span>${esc(ovT('今日临时收件'))}</span><strong>${formatNumber(kpi.emails_received || 0)}</strong></div>
                     <div class="ov-kv"><span>${esc(ovT('验证码提取'))}</span><strong>${formatNumber(kpi.verification_extracted || 0)}</strong></div>
                     <div class="ov-kv"><span>${esc(ovT('活跃临时邮箱'))}</span><strong>${formatNumber(kpi.temp_emails_active || 0)}</strong></div>
                 `
@@ -407,7 +407,7 @@ function renderPoolStats(data) {
 
     container.innerHTML = `
         <div class="kpi-row">
-            ${renderKpiCard('可用账号', formatNumber(kpi.available || 0), ovLabelValue('占用', formatNumber(kpi.in_use || 0)), 'kpi-primary', '先看可用与占用的对比，能快速判断池子是不是正被持续抽空。')}
+            ${renderKpiCard('可用邮箱', formatNumber(kpi.available || 0), ovLabelValue('占用', formatNumber(kpi.in_use || 0)), 'kpi-primary', '先看可用与占用的对比，能快速判断池子是不是正被持续抽空。')}
             ${renderKpiCard('冷却中', formatNumber(kpi.cooldown || 0), ovLabelValue('已使用', formatNumber(kpi.used || 0)), 'kpi-warn', '冷却中高说明周转变慢，已使用高说明池子消耗速度偏快。')}
             ${renderKpiCard('近 7 天领取', formatNumber(kpi.claim_count_7d || 0), ovLabelValue('完成率', formatPercent(kpi.complete_success_rate || 0)), 'kpi-success', '领取量高但完成率低时，优先排查任务完成链路或外部使用质量。')}
             ${renderKpiCard('最长占用', formatDurationSeconds(kpi.max_claimed_duration_s || 0), '当前占用中', 'kpi-accent', '长时间不释放通常代表外部任务卡住，适合直接盯这张卡片。')}

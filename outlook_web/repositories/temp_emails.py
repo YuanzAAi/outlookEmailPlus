@@ -21,6 +21,7 @@ _TEMP_EMAIL_RICH_KEYS = (
 TEMP_MAIL_KIND = "temp"
 TEMP_MAIL_READ_CAPABILITY = "temp_provider"
 DEFAULT_TEMP_MAIL_SOURCE = "custom_domain_temp_mail"
+ACCOUNT_BACKED_TEMP_MAIL_SOURCE = "cloudflare_account_temp_mail"
 LEGACY_TEMP_MAIL_SOURCE = "legacy_gptmail"
 DEFAULT_TEMP_MAIL_PROVIDER_NAME = "custom_domain_temp_mail"
 LEGACY_TEMP_MAIL_PROVIDER_NAME = "legacy_bridge"
@@ -155,6 +156,35 @@ def serialize_temp_email_meta(meta: Any, *, source: str | None = None) -> str:
     return json.dumps(normalized, ensure_ascii=False, separators=(",", ":"))
 
 
+def merge_temp_email_meta(
+    existing_meta: Any,
+    incoming_meta: Any,
+    *,
+    source: str | None = None,
+    provider_name: Optional[str] = None,
+) -> Dict[str, Any]:
+    """合并 Provider 元数据，避免空凭据覆盖既有有效值。"""
+    existing = deserialize_temp_email_meta(existing_meta, source=source)
+    incoming = deserialize_temp_email_meta(incoming_meta, source=source)
+    merged = dict(existing)
+    merged["provider_name"] = str(provider_name or incoming.get("provider_name") or existing.get("provider_name") or "")
+    for key in ("provider_mailbox_id", "provider_jwt", "provider_cursor"):
+        incoming_value = str(incoming.get(key) or "").strip()
+        if incoming_value:
+            merged[key] = incoming_value
+    if incoming.get("provider_labels"):
+        merged["provider_labels"] = incoming["provider_labels"]
+    merged["provider_capabilities"] = {
+        **(existing.get("provider_capabilities") or {}),
+        **(incoming.get("provider_capabilities") or {}),
+    }
+    merged["provider_debug"] = {
+        **(existing.get("provider_debug") or {}),
+        **(incoming.get("provider_debug") or {}),
+    }
+    return merged
+
+
 def get_temp_email_group_id() -> int:
     """获取临时邮箱分组的 ID"""
     db = get_db()
@@ -206,6 +236,7 @@ def build_temp_mailbox_descriptor(record: Dict[str, Any]) -> Dict[str, Any]:
 
 def build_temp_mailbox_public_dto(record: Dict[str, Any]) -> Dict[str, Any]:
     descriptor = build_temp_mailbox_descriptor(record)
+    stored_record = descriptor.get("record") or {}
     return {
         "email": descriptor["email"],
         "prefix": descriptor["prefix"],
@@ -218,6 +249,8 @@ def build_temp_mailbox_public_dto(record: Dict[str, Any]) -> Dict[str, Any]:
         "task_token": descriptor["task_token"],
         "provider_name": descriptor["provider_name"],
         "capabilities": dict((descriptor.get("meta") or {}).get("provider_capabilities") or {}),
+        "latest_message_at": int(stored_record.get("latest_message_at") or 0),
+        "message_count": int(stored_record.get("message_count") or 0),
     }
 
 
@@ -228,26 +261,59 @@ def load_temp_emails(
     status: Optional[str] = None,
     consumer_key: Optional[str] = None,
     view: str = "record",
+    order_by_latest_message: bool = False,
 ) -> List[Dict]:
     """加载临时邮箱，支持按可见性/类型/状态/调用方归属筛选。"""
     db = get_db()
     clauses: list[str] = []
     params: list[Any] = []
     if visible_only:
-        clauses.append("visible_in_ui = 1")
+        clauses.append("te.visible_in_ui = 1")
     if mailbox_type:
-        clauses.append("mailbox_type = ?")
+        clauses.append("te.mailbox_type = ?")
         params.append(str(mailbox_type).strip())
     if status:
-        clauses.append("status = ?")
+        clauses.append("te.status = ?")
         params.append(str(status).strip())
     if consumer_key:
-        clauses.append("consumer_key = ?")
+        clauses.append("te.consumer_key = ?")
         params.append(str(consumer_key).strip())
-    sql = "SELECT * FROM temp_emails"
+    if order_by_latest_message:
+        sql = """
+            SELECT
+                te.*,
+                COALESCE(message_stats.latest_message_at, 0) AS latest_message_at,
+                COALESCE(message_stats.message_count, 0) AS message_count
+            FROM temp_emails AS te
+            LEFT JOIN (
+                SELECT
+                    LOWER(email_address) AS email_key,
+                    MAX(
+                        COALESCE(
+                            NULLIF(timestamp, 0),
+                            CAST(strftime('%s', created_at) AS INTEGER),
+                            0
+                        )
+                    ) AS latest_message_at,
+                    COUNT(*) AS message_count
+                FROM temp_email_messages
+                GROUP BY LOWER(email_address)
+            ) AS message_stats ON message_stats.email_key = LOWER(te.email)
+        """
+    else:
+        sql = "SELECT te.* FROM temp_emails AS te"
     if clauses:
         sql += " WHERE " + " AND ".join(clauses)
-    sql += " ORDER BY created_at DESC"
+    if order_by_latest_message:
+        sql += """
+            ORDER BY
+                CASE WHEN COALESCE(message_stats.message_count, 0) > 0 THEN 0 ELSE 1 END,
+                COALESCE(message_stats.latest_message_at, 0) DESC,
+                te.created_at DESC,
+                te.id DESC
+        """
+    else:
+        sql += " ORDER BY te.created_at DESC, te.id DESC"
     cursor = db.execute(sql, params)
     rows = cursor.fetchall()
     serialized = [_serialize_temp_email_row(row) for row in rows]
@@ -367,24 +433,12 @@ def update_temp_email_provider_meta(
         return False
 
     source = str(record.get("source") or DEFAULT_TEMP_MAIL_SOURCE)
-    existing = deserialize_temp_email_meta(record.get("meta_json"), source=source)
-    incoming = deserialize_temp_email_meta(meta, source=source)
-    merged = dict(existing)
-    merged["provider_name"] = str(provider_name or incoming.get("provider_name") or existing.get("provider_name") or "")
-    for key in ("provider_mailbox_id", "provider_jwt", "provider_cursor"):
-        incoming_value = str(incoming.get(key) or "").strip()
-        if incoming_value:
-            merged[key] = incoming_value
-    if incoming.get("provider_labels"):
-        merged["provider_labels"] = incoming["provider_labels"]
-    merged["provider_capabilities"] = {
-        **(existing.get("provider_capabilities") or {}),
-        **(incoming.get("provider_capabilities") or {}),
-    }
-    merged["provider_debug"] = {
-        **(existing.get("provider_debug") or {}),
-        **(incoming.get("provider_debug") or {}),
-    }
+    merged = merge_temp_email_meta(
+        record.get("meta_json"),
+        meta,
+        source=source,
+        provider_name=provider_name,
+    )
 
     db = get_db()
     cursor = db.execute(
@@ -397,6 +451,102 @@ def update_temp_email_provider_meta(
     )
     db.commit()
     return cursor.rowcount > 0
+
+
+def ensure_account_backed_temp_email(
+    email_addr: str,
+    meta: Dict[str, Any],
+    *,
+    provider_name: Optional[str] = None,
+) -> Dict[str, Any]:
+    """为 accounts 中的动态临时邮箱确保一个隐藏的消息父记录。"""
+    normalized_email = str(email_addr or "").strip()
+    if not normalized_email or "@" not in normalized_email:
+        return {}
+
+    db = get_db()
+    existing = get_temp_email_by_address(normalized_email)
+    if existing and str(existing.get("mailbox_type") or "").strip().lower() == "task":
+        return {}
+
+    if existing:
+        existing_source = str(existing.get("source") or "").strip().lower()
+        existing_provider = (
+            str(existing.get("provider_name") or (existing.get("meta_json") or {}).get("provider_name") or "").strip().lower()
+        )
+        # 不接管同地址的普通临时邮箱；只有既有记录本身已标记为 CF，
+        # 或明确是账号型隐藏父记录时，才允许合并历史重复数据。
+        if existing_source != ACCOUNT_BACKED_TEMP_MAIL_SOURCE and existing_provider != "cloudflare_temp_mail":
+            return {}
+        merged = merge_temp_email_meta(
+            existing.get("meta_json"),
+            meta,
+            source=ACCOUNT_BACKED_TEMP_MAIL_SOURCE,
+            provider_name=provider_name,
+        )
+        db.execute(
+            """
+            UPDATE temp_emails
+            SET mailbox_type = 'user', visible_in_ui = 0,
+                source = ?, meta_json = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE email = ? COLLATE NOCASE
+            """,
+            (
+                ACCOUNT_BACKED_TEMP_MAIL_SOURCE,
+                serialize_temp_email_meta(merged, source=ACCOUNT_BACKED_TEMP_MAIL_SOURCE),
+                normalized_email,
+            ),
+        )
+    else:
+        prefix, domain = normalized_email.rsplit("@", 1)
+        normalized_meta = merge_temp_email_meta(
+            {},
+            meta,
+            source=ACCOUNT_BACKED_TEMP_MAIL_SOURCE,
+            provider_name=provider_name,
+        )
+        cursor = db.execute(
+            """
+            INSERT OR IGNORE INTO temp_emails (
+                email, status, mailbox_type, visible_in_ui, source, prefix, domain,
+                task_token, consumer_key, caller_id, task_id, meta_json
+            )
+            VALUES (?, 'active', 'user', 0, ?, ?, ?, NULL, NULL, NULL, NULL, ?)
+            """,
+            (
+                normalized_email,
+                ACCOUNT_BACKED_TEMP_MAIL_SOURCE,
+                prefix,
+                domain,
+                serialize_temp_email_meta(normalized_meta, source=ACCOUNT_BACKED_TEMP_MAIL_SOURCE),
+            ),
+        )
+        if cursor.rowcount == 0:
+            raced = get_temp_email_by_address(normalized_email)
+            if not raced or str(raced.get("mailbox_type") or "").strip().lower() == "task":
+                db.rollback()
+                return {}
+            merged = merge_temp_email_meta(
+                raced.get("meta_json"),
+                meta,
+                source=ACCOUNT_BACKED_TEMP_MAIL_SOURCE,
+                provider_name=provider_name,
+            )
+            db.execute(
+                """
+                UPDATE temp_emails
+                SET mailbox_type = 'user', visible_in_ui = 0,
+                    source = ?, meta_json = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE email = ? COLLATE NOCASE
+                """,
+                (
+                    ACCOUNT_BACKED_TEMP_MAIL_SOURCE,
+                    serialize_temp_email_meta(merged, source=ACCOUNT_BACKED_TEMP_MAIL_SOURCE),
+                    normalized_email,
+                ),
+            )
+    db.commit()
+    return get_temp_email_by_address(normalized_email, view="record") or {}
 
 
 def add_temp_email(email_addr: str) -> bool:
@@ -516,6 +666,48 @@ def get_temp_email_messages(email_addr: str) -> List[Dict]:
     )
     rows = cursor.fetchall()
     return [dict(row) for row in rows]
+
+
+def get_temp_email_messages_for_mailboxes(
+    email_addresses: List[str],
+    *,
+    limit_per_mailbox: int,
+) -> Dict[str, List[Dict]]:
+    """一次读取多个临时邮箱最近的邮件，返回以小写邮箱为键的分组结果。"""
+    normalized = list(dict.fromkeys(str(item or "").strip() for item in email_addresses if str(item or "").strip()))
+    grouped: Dict[str, List[Dict]] = {email.casefold(): [] for email in normalized}
+    if not normalized:
+        return grouped
+
+    limit = max(1, int(limit_per_mailbox))
+    placeholders = ",".join("?" for _ in normalized)
+    db = get_db()
+    rows = db.execute(
+        f"""
+        WITH ranked_messages AS (
+            SELECT
+                messages.*,
+                LOWER(messages.email_address) AS email_key,
+                ROW_NUMBER() OVER (
+                    PARTITION BY LOWER(messages.email_address)
+                    ORDER BY
+                        COALESCE(messages.timestamp, 0) DESC,
+                        messages.created_at DESC,
+                        messages.id DESC
+                ) AS row_number
+            FROM temp_email_messages AS messages
+            WHERE messages.email_address COLLATE NOCASE IN ({placeholders})
+        )
+        SELECT * FROM ranked_messages
+        WHERE row_number <= ?
+        ORDER BY email_key, COALESCE(timestamp, 0) DESC, created_at DESC, id DESC
+        """,
+        (*normalized, limit),
+    ).fetchall()
+    for row in rows:
+        item = dict(row)
+        grouped.setdefault(str(item.get("email_address") or "").casefold(), []).append(item)
+    return grouped
 
 
 def get_temp_email_message_by_id(message_id: str, *, email_addr: Optional[str] = None) -> Optional[Dict]:

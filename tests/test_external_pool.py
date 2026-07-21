@@ -24,6 +24,8 @@ class ExternalPoolApiTests(unittest.TestCase):
                 "DELETE FROM account_claim_logs WHERE account_id IN (SELECT id FROM accounts WHERE email LIKE '%@extpool.test')"
             )
             db.execute("DELETE FROM accounts WHERE email LIKE '%@extpool.test'")
+            db.execute("DELETE FROM temp_email_messages WHERE email_address LIKE '%@extpool.test'")
+            db.execute("DELETE FROM temp_emails WHERE email LIKE '%@extpool.test'")
             db.commit()
             settings_repo.set_setting("external_api_key", "")
             settings_repo.set_setting("external_api_public_mode", "false")
@@ -51,6 +53,7 @@ class ExternalPoolApiTests(unittest.TestCase):
         *,
         pool_access: bool = False,
         enabled: bool = True,
+        allowed_emails: list[str] | None = None,
     ):
         with self.app.app_context():
             from outlook_web.repositories import external_api_keys as external_api_keys_repo
@@ -58,7 +61,7 @@ class ExternalPoolApiTests(unittest.TestCase):
             return external_api_keys_repo.create_external_api_key(
                 name=name,
                 api_key=api_key,
-                allowed_emails=[],
+                allowed_emails=allowed_emails or [],
                 pool_access=pool_access,
                 enabled=enabled,
             )
@@ -83,8 +86,14 @@ class ExternalPoolApiTests(unittest.TestCase):
 
             settings_repo.set_setting(setting_key, "true" if enabled else "false")
 
-    def _insert_pool_account(self, *, provider: str = "outlook", pool_status: str = "available") -> int:
-        email_addr = f"{uuid.uuid4().hex}@extpool.test"
+    def _insert_pool_account(
+        self,
+        *,
+        provider: str = "outlook",
+        pool_status: str = "available",
+        email_addr: str | None = None,
+    ) -> int:
+        email_addr = email_addr or f"{uuid.uuid4().hex}@extpool.test"
         with self.app.app_context():
             from outlook_web.db import get_db
 
@@ -110,6 +119,21 @@ class ExternalPoolApiTests(unittest.TestCase):
             )
             db.commit()
             row = db.execute("SELECT id FROM accounts WHERE email = ?", (email_addr,)).fetchone()
+            return int(row["id"])
+
+    def _insert_temp_pool_email(self, email_addr: str) -> int:
+        with self.app.app_context():
+            from outlook_web.repositories import temp_emails as temp_emails_repo
+
+            temp_emails_repo.create_temp_email(
+                email_addr=email_addr,
+                mailbox_type="user",
+                visible_in_ui=True,
+                source="custom_domain_temp_mail",
+                prefix=email_addr.split("@", 1)[0],
+                domain="extpool.test",
+            )
+            row = temp_emails_repo.get_temp_email_by_address(email_addr)
             return int(row["id"])
 
     def test_old_anonymous_pool_endpoints_are_removed(self):
@@ -240,6 +264,168 @@ class ExternalPoolApiTests(unittest.TestCase):
         self.assertIn("account_id", payload)
         self.assertIn("claim_token", payload)
         self.assertIn("lease_expires_at", payload)
+
+    def test_scoped_multi_key_claims_only_allowed_regular_account(self):
+        client = self.app.test_client()
+        allowed_email = f"allowed-{uuid.uuid4().hex}@extpool.test"
+        denied_email = f"denied-{uuid.uuid4().hex}@extpool.test"
+        self._insert_pool_account(email_addr=allowed_email)
+        self._insert_pool_account(email_addr=denied_email)
+        self._create_external_api_key(
+            "scoped-pool",
+            "scoped-pool-key",
+            pool_access=True,
+            allowed_emails=[allowed_email.upper()],
+        )
+        with self.app.app_context():
+            from outlook_web.repositories import settings as settings_repo
+
+            settings_repo.set_setting("pool_external_enabled", "true")
+
+        response = client.post(
+            "/api/external/pool/claim-random",
+            headers=self._auth_headers("scoped-pool-key"),
+            json={"caller_id": "scoped-worker", "task_id": "scoped-account", "provider": "outlook"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["data"]["email"], allowed_email)
+
+    def test_scoped_multi_key_claims_only_allowed_temp_mailbox(self):
+        client = self.app.test_client()
+        allowed_email = f"allowed-temp-{uuid.uuid4().hex}@extpool.test"
+        denied_email = f"denied-temp-{uuid.uuid4().hex}@extpool.test"
+        self._insert_temp_pool_email(allowed_email)
+        self._insert_temp_pool_email(denied_email)
+        self._create_external_api_key(
+            "scoped-temp-pool",
+            "scoped-temp-pool-key",
+            pool_access=True,
+            allowed_emails=[allowed_email],
+        )
+        with self.app.app_context():
+            from outlook_web.repositories import settings as settings_repo
+
+            settings_repo.set_setting("pool_external_enabled", "true")
+
+        response = client.post(
+            "/api/external/pool/claim-random",
+            headers=self._auth_headers("scoped-temp-pool-key"),
+            json={"caller_id": "scoped-worker", "task_id": "scoped-temp", "provider": "custom"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["data"]["email"], allowed_email)
+
+    def test_scoped_multi_key_pool_stats_only_count_allowed_mailboxes(self):
+        client = self.app.test_client()
+        allowed_regular = f"stats-regular-{uuid.uuid4().hex}@extpool.test"
+        denied_regular = f"stats-denied-{uuid.uuid4().hex}@extpool.test"
+        allowed_temp = f"stats-temp-{uuid.uuid4().hex}@extpool.test"
+        denied_temp = f"stats-temp-denied-{uuid.uuid4().hex}@extpool.test"
+        self._insert_pool_account(email_addr=allowed_regular)
+        self._insert_pool_account(email_addr=denied_regular)
+        self._insert_temp_pool_email(allowed_temp)
+        self._insert_temp_pool_email(denied_temp)
+        self._create_external_api_key(
+            "scoped-stats",
+            "scoped-stats-key",
+            pool_access=True,
+            allowed_emails=[allowed_regular.upper(), allowed_temp],
+        )
+        with self.app.app_context():
+            from outlook_web.repositories import settings as settings_repo
+
+            settings_repo.set_setting("pool_external_enabled", "true")
+
+        response = client.get(
+            "/api/external/pool/stats",
+            headers=self._auth_headers("scoped-stats-key"),
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.get_json()["data"]["pool_counts"],
+            {
+                "available": 2,
+                "claimed": 0,
+                "used": 0,
+                "cooldown": 0,
+                "frozen": 0,
+                "retired": 0,
+            },
+        )
+
+    def test_scoped_multi_key_cannot_release_out_of_scope_regular_account(self):
+        client = self.app.test_client()
+        denied_email = f"release-denied-{uuid.uuid4().hex}@extpool.test"
+        self._insert_pool_account(email_addr=denied_email)
+        self._set_external_api_key("legacy-pool-key")
+        self._create_external_api_key(
+            "scoped-release",
+            "scoped-release-key",
+            pool_access=True,
+            allowed_emails=[f"allowed-{uuid.uuid4().hex}@extpool.test"],
+        )
+        with self.app.app_context():
+            from outlook_web.repositories import settings as settings_repo
+
+            settings_repo.set_setting("pool_external_enabled", "true")
+
+        claim = client.post(
+            "/api/external/pool/claim-random",
+            headers=self._auth_headers("legacy-pool-key"),
+            json={"caller_id": "scope-worker", "task_id": "scope-release", "provider": "outlook"},
+        ).get_json()["data"]
+        response = client.post(
+            "/api/external/pool/claim-release",
+            headers=self._auth_headers("scoped-release-key"),
+            json={
+                "account_id": claim["account_id"],
+                "claim_token": claim["claim_token"],
+                "caller_id": "scope-worker",
+                "task_id": "scope-release",
+            },
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.get_json()["code"], "EMAIL_SCOPE_FORBIDDEN")
+
+    def test_scoped_multi_key_cannot_complete_out_of_scope_temp_mailbox(self):
+        client = self.app.test_client()
+        denied_email = f"complete-denied-{uuid.uuid4().hex}@extpool.test"
+        self._insert_temp_pool_email(denied_email)
+        self._set_external_api_key("legacy-temp-pool-key")
+        self._create_external_api_key(
+            "scoped-complete",
+            "scoped-complete-key",
+            pool_access=True,
+            allowed_emails=[f"allowed-{uuid.uuid4().hex}@extpool.test"],
+        )
+        with self.app.app_context():
+            from outlook_web.repositories import settings as settings_repo
+
+            settings_repo.set_setting("pool_external_enabled", "true")
+
+        claim = client.post(
+            "/api/external/pool/claim-random",
+            headers=self._auth_headers("legacy-temp-pool-key"),
+            json={"caller_id": "scope-worker", "task_id": "scope-complete", "provider": "custom"},
+        ).get_json()["data"]
+        response = client.post(
+            "/api/external/pool/claim-complete",
+            headers=self._auth_headers("scoped-complete-key"),
+            json={
+                "account_id": claim["account_id"],
+                "claim_token": claim["claim_token"],
+                "caller_id": "scope-worker",
+                "task_id": "scope-complete",
+                "result": "success",
+            },
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.get_json()["code"], "EMAIL_SCOPE_FORBIDDEN")
 
     def test_external_pool_post_does_not_require_csrf(self):
         client = self.app.test_client()

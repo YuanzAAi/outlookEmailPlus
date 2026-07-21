@@ -10,6 +10,7 @@ from outlook_web.audit import log_audit
 from outlook_web.repositories import accounts as accounts_repo
 from outlook_web.repositories import external_api_keys as external_api_keys_repo
 from outlook_web.repositories import groups as groups_repo
+from outlook_web.repositories import temp_emails as temp_emails_repo
 from outlook_web.security.auth import get_external_api_consumer
 from outlook_web.services import graph as graph_service  # noqa: F401 - 保留旧版补丁入口
 from outlook_web.services import imap as imap_service  # noqa: F401 - 保留旧版补丁入口
@@ -21,7 +22,11 @@ from outlook_web.services.imap_generic import (
     get_latest_matching_email_imap_generic,
 )
 from outlook_web.services.temp_mail_service import TempMailError, get_temp_mail_service
-from outlook_web.services.verification_extract_log import resolve_extract_log_outcome, write_verification_extract_log
+from outlook_web.services.verification_extract_log import (
+    encode_temp_mail_log_account_id,
+    resolve_extract_log_outcome,
+    write_verification_extract_log,
+)
 from outlook_web.services.verification_extractor import (
     apply_confidence_gate,
     enhance_verification_with_ai_fallback,
@@ -195,11 +200,6 @@ def ensure_external_email_access(
     allow_finished: bool = False,
     discover_remote: bool = True,
 ) -> None:
-    ensure_external_email_scope(
-        email_addr,
-        allow_finished=allow_finished,
-        discover_remote=discover_remote,
-    )
     mailbox = mailbox_resolver.resolve_mailbox(email_addr, discover_remote=discover_remote)
     mailbox_resolver.ensure_mailbox_can_read(
         mailbox,
@@ -213,24 +213,14 @@ def ensure_external_email_scope(
     *,
     allow_finished: bool = False,
     discover_remote: bool = True,
-) -> None:
+) -> Dict[str, Any]:
     mailbox = mailbox_resolver.resolve_mailbox(email_addr, discover_remote=discover_remote)
     consumer = get_current_external_api_consumer()
-    if mailbox.get("kind") == "account":
-        allowed_emails = [str(item or "").strip().lower() for item in (consumer.get("allowed_emails") or [])]
-        target_email = str(email_addr or "").strip().lower()
-        if allowed_emails and target_email not in allowed_emails:
-            raise EmailScopeForbiddenError(
-                "当前 API Key 无权访问该邮箱",
-                data={
-                    "email": email_addr,
-                    "consumer_id": consumer.get("id"),
-                    "consumer_name": consumer.get("name"),
-                },
-            )
-        return
-
-    mailbox_resolver.ensure_mailbox_can_read(mailbox, consumer=consumer, allow_finished=allow_finished)
+    if mailbox.get("kind") == "temp":
+        mailbox_resolver.ensure_mailbox_can_read(mailbox, consumer=consumer, allow_finished=allow_finished)
+    else:
+        mailbox_resolver.ensure_mailbox_scope(mailbox, consumer=consumer)
+    return mailbox
 
 
 def _build_message_summary(
@@ -484,9 +474,94 @@ def probe_account_upstream(
 def _pick_instance_probe_account() -> Optional[Dict[str, Any]]:
     candidates = accounts_repo.load_accounts()
     for account in candidates:
-        if _account_can_read(account):
-            return account
+        if not _account_can_read(account):
+            continue
+        mailbox = {
+            "kind": "account",
+            "email": str(account.get("email") or ""),
+            "meta": {"account": account},
+        }
+        try:
+            mailbox_resolver.ensure_mailbox_scope(mailbox, consumer=get_current_external_api_consumer())
+        except ExternalApiError:
+            continue
+        return account
     return None
+
+
+def _pick_instance_probe_temp_mailbox() -> Optional[Dict[str, Any]]:
+    mailboxes = temp_emails_repo.load_temp_emails(
+        visible_only=True,
+        mailbox_type="user",
+        status="active",
+        view="descriptor",
+    )
+    for mailbox in mailboxes:
+        try:
+            mailbox_resolver.ensure_mailbox_scope(mailbox, consumer=get_current_external_api_consumer())
+        except ExternalApiError:
+            continue
+        return mailbox
+
+    # 号池管理的 CF 邮箱没有 visible temp_emails 行，仍应参与实例健康探测。
+    for account in accounts_repo.load_accounts():
+        if not mailbox_resolver.is_account_backed_temp_mailbox(account):
+            continue
+        if str(account.get("status") or "active").strip().lower() != "active":
+            continue
+        mailbox = mailbox_resolver.build_account_backed_temp_mailbox(account)
+        try:
+            mailbox_resolver.ensure_mailbox_scope(mailbox, consumer=get_current_external_api_consumer())
+        except ExternalApiError:
+            continue
+        return mailbox
+    return None
+
+
+def probe_temp_mailbox_upstream(
+    mailbox: Dict[str, Any],
+    *,
+    cache_ttl_seconds: int = 60,
+    force: bool = False,
+) -> Dict[str, Any]:
+    email_addr = str(mailbox.get("email") or "").strip()
+    preferred_method = str(mailbox.get("provider_name") or mailbox.get("source") or "temp_mail").strip()
+    cached = get_upstream_probe_summary("temp_email", email_addr) if email_addr else {}
+    if email_addr and (not force) and _is_probe_summary_fresh(cached, cache_ttl_seconds):
+        return cached
+
+    last_probe_at = _probe_now_iso()
+    try:
+        _emails, method = list_messages_for_external(email_addr=email_addr, folder="inbox", top=1, skip=0)
+        summary = record_upstream_probe_summary(
+            scope_type="temp_email",
+            scope_key=email_addr,
+            email_addr=email_addr,
+            probe_ok=True,
+            probe_method=str(method or preferred_method),
+            last_probe_error="",
+            last_probe_at=last_probe_at,
+        )
+    except Exception as exc:
+        summary = record_upstream_probe_summary(
+            scope_type="temp_email",
+            scope_key=email_addr,
+            email_addr=email_addr,
+            probe_ok=False,
+            probe_method=preferred_method,
+            last_probe_error=_probe_error_message(exc),
+            last_probe_at=last_probe_at,
+        )
+    record_upstream_probe_summary(
+        scope_type="instance",
+        scope_key="__instance__",
+        email_addr=email_addr,
+        probe_ok=summary.get("upstream_probe_ok"),
+        probe_method=summary.get("probe_method") or preferred_method,
+        last_probe_error=summary.get("last_probe_error") or "",
+        last_probe_at=summary.get("last_probe_at") or last_probe_at,
+    )
+    return summary
 
 
 def probe_instance_upstream(*, cache_ttl_seconds: int = 60, force: bool = False) -> Dict[str, Any]:
@@ -495,10 +570,73 @@ def probe_instance_upstream(*, cache_ttl_seconds: int = 60, force: bool = False)
         return cached
 
     account = _pick_instance_probe_account()
-    if not account:
-        return cached
+    if account:
+        return probe_account_upstream(account, cache_ttl_seconds=cache_ttl_seconds, force=force)
 
-    return probe_account_upstream(account, cache_ttl_seconds=cache_ttl_seconds, force=force)
+    temp_mailbox = _pick_instance_probe_temp_mailbox()
+    if temp_mailbox:
+        return probe_temp_mailbox_upstream(temp_mailbox, cache_ttl_seconds=cache_ttl_seconds, force=force)
+    return cached
+
+
+def get_mailbox_status_for_external(email_addr: str) -> Dict[str, Any]:
+    """返回普通账号或临时邮箱的统一状态视图。"""
+    mailbox = ensure_external_email_scope(email_addr, allow_finished=True)
+    canonical_email = str(mailbox.get("email") or email_addr).strip()
+
+    if mailbox.get("kind") == "temp":
+        status = str(mailbox.get("status") or "active").strip().lower()
+        provider = str(mailbox.get("provider_name") or mailbox.get("source") or "temp_mail").strip()
+        return {
+            "email": canonical_email,
+            "exists": True,
+            "mailbox_kind": "temp",
+            "account_type": "temp_mail",
+            "provider": provider,
+            "email_domain": str(mailbox.get("domain") or ""),
+            "group_id": mailbox.get("group_id"),
+            "status": status,
+            "last_refresh_at": str(mailbox.get("updated_at") or mailbox.get("created_at") or ""),
+            "preferred_method": "temp_mail",
+            "can_read": status == "active",
+            "upstream_probe_ok": None,
+            "probe_method": provider,
+            "last_probe_at": "",
+            "last_probe_error": "",
+            "mailbox_type": str(mailbox.get("mailbox_type") or "user"),
+            "visible_in_ui": bool(mailbox.get("visible_in_ui")),
+            "capabilities": dict((mailbox.get("meta") or {}).get("provider_capabilities") or {}),
+        }
+
+    account = (mailbox.get("meta") or {}).get("account") or {}
+    account_type = (account.get("account_type") or "outlook").strip().lower()
+    provider = (account.get("provider") or account_type or "outlook").strip().lower()
+    preferred_method = "imap_generic" if account_type == "imap" else "graph"
+    can_read = can_account_read(account)
+    data = {
+        "email": canonical_email,
+        "exists": True,
+        "mailbox_kind": "account",
+        "account_type": account_type,
+        "provider": provider,
+        "email_domain": account.get("email_domain") or "",
+        "group_id": account.get("group_id"),
+        "status": account.get("status"),
+        "last_refresh_at": account.get("last_refresh_at"),
+        "preferred_method": preferred_method,
+        "can_read": can_read,
+        "upstream_probe_ok": None,
+        "probe_method": "",
+        "last_probe_at": "",
+        "last_probe_error": "",
+    }
+    if can_read:
+        probe_summary = probe_account_upstream(account)
+        data["upstream_probe_ok"] = probe_summary.get("upstream_probe_ok")
+        data["probe_method"] = probe_summary.get("probe_method") or preferred_method
+        data["last_probe_at"] = probe_summary.get("last_probe_at") or ""
+        data["last_probe_error"] = probe_summary.get("last_probe_error") or ""
+    return data
 
 
 def list_messages_for_external(  # noqa: C901
@@ -731,6 +869,7 @@ def get_message_detail_for_external(  # noqa: C901
     folder: str = "inbox",
 ) -> Dict[str, Any]:
     mailbox = mailbox_resolver.resolve_mailbox(email_addr)
+    email_addr = str(mailbox.get("email") or email_addr).strip()
     mailbox_meta = mailbox_resolver.ensure_mailbox_can_read(mailbox, consumer=get_current_external_api_consumer())
     message_id = (message_id or "").strip()
     if not message_id:
@@ -1060,7 +1199,16 @@ def _resolve_verification_extract_context(
             group_id = 0
         if group_id > 0:
             group = groups_repo.get_group_by_id(group_id)
-    return account, account_id, group
+        return account, account_id, group
+
+    # 临时邮箱没有 accounts.id；复用既有负数编码，让外部 API 取码也进入
+    # verification_extract_logs，并由 overview 通过 temp_emails.id 关联回邮箱。
+    temp_mailbox = temp_emails_repo.get_temp_email_by_address((email_addr or "").strip())
+    if temp_mailbox:
+        temp_account_id = encode_temp_mail_log_account_id(temp_mailbox.get("id"))
+        return None, temp_account_id, None
+
+    return None, None, None
 
 
 def _resolve_verification_policy_for_request(

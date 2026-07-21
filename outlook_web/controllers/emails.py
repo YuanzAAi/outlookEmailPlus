@@ -18,7 +18,7 @@ from outlook_web.services import email_delete as email_delete_service
 from outlook_web.services import external_api as external_api_service
 from outlook_web.services import graph as graph_service
 from outlook_web.services import imap as imap_service
-from outlook_web.services import outlook_transport
+from outlook_web.services import mailbox_resolver, outlook_transport
 from outlook_web.services import verification_channel_routing as verification_channel_service
 from outlook_web.services.imap_generic import (
     get_email_detail_imap_generic_result,
@@ -26,6 +26,8 @@ from outlook_web.services.imap_generic import (
     get_latest_matching_email_imap_generic,
 )
 from outlook_web.services.mailbox_resolver import normalize_alias_email
+from outlook_web.services.temp_email_content import build_inline_resource_map, rewrite_html_with_inline_resources
+from outlook_web.services.temp_mail_service import TempMailError, get_temp_mail_service
 
 _LOGGER = logging.getLogger("outlook_web.controllers.emails")
 
@@ -113,6 +115,87 @@ def _update_account_summary_from_verification(account: Dict[str, Any], data: Dic
     )
 
 
+def _build_temp_mail_controller_error(exc: TempMailError, *, message_en: str):
+    return build_error_response(
+        exc.code,
+        exc.message,
+        message_en=message_en,
+        err_type="TempMailError",
+        status=exc.status,
+        details=exc.data or "",
+    )
+
+
+def _format_account_backed_temp_message(item: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "id": str(item.get("id") or ""),
+        "subject": str(item.get("subject") or "无主题"),
+        "from": str(item.get("from_address") or "未知"),
+        "date": str(item.get("created_at") or ""),
+        "is_read": True,
+        "has_attachments": False,
+        "body_preview": str(item.get("content_preview") or ""),
+    }
+
+
+def _fetch_account_backed_temp_folder(
+    account: Dict[str, Any],
+    *,
+    folder: str,
+    skip: int,
+    top: int,
+) -> Dict[str, Any]:
+    normalized_folder = str(folder or "inbox").strip().lower() or "inbox"
+    if normalized_folder != "inbox":
+        return {
+            "success": True,
+            "emails": [],
+            "method": "Temp Mail",
+            "has_more": False,
+        }
+
+    mailbox = mailbox_resolver.build_account_backed_temp_mailbox(account)
+    messages = get_temp_mail_service().list_messages(mailbox, sync_remote=True)
+    start = max(0, int(skip or 0))
+    limit = max(1, int(top or 20))
+    page = messages[start : start + limit]
+    formatted = [_format_account_backed_temp_message(item) for item in page]
+    account_summary = compact_summary_service.update_summary_from_message_list(
+        int(account["id"]),
+        formatted,
+        folder="inbox",
+    )
+    return {
+        "success": True,
+        "emails": formatted,
+        "method": "Temp Mail",
+        "has_more": len(messages) > start + limit,
+        "account_summary": account_summary,
+    }
+
+
+def _format_account_backed_temp_detail(detail: Dict[str, Any]) -> Dict[str, Any]:
+    html_content = str(detail.get("html_content") or "")
+    text_content = str(detail.get("content") or "")
+    use_html = bool(html_content)
+    inline_resources = build_inline_resource_map(detail.get("raw_content"))
+    if use_html and inline_resources:
+        html_content = rewrite_html_with_inline_resources(html_content, inline_resources)
+    return {
+        "id": str(detail.get("id") or ""),
+        "subject": str(detail.get("subject") or "无主题"),
+        "from": str(detail.get("from_address") or "未知"),
+        "to": str(detail.get("to_address") or detail.get("email_address") or ""),
+        "cc": "",
+        "date": str(detail.get("created_at") or ""),
+        "body": html_content if use_html else text_content,
+        "body_type": "html" if use_html else "text",
+        "raw_content": str(detail.get("raw_content") or ""),
+        "inline_resources": inline_resources,
+        "method": "Temp Mail",
+    }
+
+
 # ==================== 邮件 API ====================
 
 
@@ -159,6 +242,36 @@ def api_batch_get_emails() -> Any:
         seen_ids.add(aid)
         deduped_ids.append(aid)
 
+    folders = data.get("folders")
+    if folders is None:
+        folders = ["inbox", "junkemail"]
+    if not isinstance(folders, list) or not folders:
+        return build_error_response(
+            "INVALID_PARAM",
+            "folders 必须为非空列表",
+            message_en="folders must be a non-empty list",
+            status=400,
+        )
+    normalized_folders = [str(f or "").strip().lower() for f in folders if str(f or "").strip()]
+    if not normalized_folders:
+        return build_error_response(
+            "INVALID_PARAM",
+            "folders 必须为非空列表",
+            message_en="folders must be a non-empty list",
+            status=400,
+        )
+
+    try:
+        skip = int(data.get("skip", 0) or 0)
+        top = int(data.get("top", 10) or 10)
+    except Exception:
+        return build_error_response(
+            "INVALID_PARAM",
+            "skip/top 参数无效",
+            message_en="Invalid skip/top",
+            status=400,
+        )
+
     # 测试环境：避免引入外部上游依赖（Graph/IMAP），只验证接口契约与聚合结构。
     # 生产环境：再走真实拉取链路。
     if bool(current_app.config.get("TESTING")):
@@ -178,6 +291,39 @@ def api_batch_get_emails() -> Any:
                         }
                     )
                     failed_accounts += 1
+                    continue
+
+                if mailbox_resolver.is_account_backed_temp_mailbox(account):
+                    per_folder_results: Dict[str, Any] = {}
+                    any_folder_success = False
+                    for folder in normalized_folders:
+                        try:
+                            folder_result = _fetch_account_backed_temp_folder(
+                                account,
+                                folder=folder,
+                                skip=skip,
+                                top=top,
+                            )
+                        except TempMailError as exc:
+                            folder_result = {
+                                "success": False,
+                                "error": exc.code,
+                                "message": exc.message,
+                            }
+                        per_folder_results[folder] = folder_result
+                        any_folder_success = any_folder_success or bool(folder_result.get("success"))
+                    results.append(
+                        {
+                            "account_id": int(aid),
+                            "email": account.get("email") or "",
+                            "success": any_folder_success,
+                            "folders": per_folder_results,
+                        }
+                    )
+                    if any_folder_success:
+                        success_accounts += 1
+                    else:
+                        failed_accounts += 1
                     continue
 
                 results.append(
@@ -216,36 +362,6 @@ def api_batch_get_emails() -> Any:
         )
 
     # 生产环境：真实聚合拉取（默认 folders=inbox+junkemail, latest-only）。
-    folders = data.get("folders")
-    if folders is None:
-        folders = ["inbox", "junkemail"]
-    if not isinstance(folders, list) or not folders:
-        return build_error_response(
-            "INVALID_PARAM",
-            "folders 必须为非空列表",
-            message_en="folders must be a non-empty list",
-            status=400,
-        )
-    normalized_folders = [str(f or "").strip().lower() for f in folders if str(f or "").strip()]
-    if not normalized_folders:
-        return build_error_response(
-            "INVALID_PARAM",
-            "folders 必须为非空列表",
-            message_en="folders must be a non-empty list",
-            status=400,
-        )
-
-    try:
-        skip = int(data.get("skip", 0) or 0)
-        top = int(data.get("top", 10) or 10)
-    except Exception:
-        return build_error_response(
-            "INVALID_PARAM",
-            "skip/top 参数无效",
-            message_en="Invalid skip/top",
-            status=400,
-        )
-
     results: List[Dict[str, Any]] = []
     success_accounts = 0
     failed_accounts = 0
@@ -264,6 +380,40 @@ def api_batch_get_emails() -> Any:
 
         email_addr = str(account.get("email") or "")
         account_type = (account.get("account_type") or "outlook").strip().lower()
+
+        if mailbox_resolver.is_account_backed_temp_mailbox(account):
+            per_folder_results: Dict[str, Any] = {}
+            any_folder_success = False
+            for folder in normalized_folders:
+                try:
+                    folder_result = _fetch_account_backed_temp_folder(
+                        account,
+                        folder=folder,
+                        skip=skip,
+                        top=top,
+                    )
+                except TempMailError as exc:
+                    folder_result = {
+                        "success": False,
+                        "error": exc.code,
+                        "message": exc.message,
+                    }
+                per_folder_results[folder] = folder_result
+                any_folder_success = any_folder_success or bool(folder_result.get("success"))
+
+            results.append(
+                {
+                    "account_id": int(aid),
+                    "email": email_addr,
+                    "success": any_folder_success,
+                    "folders": per_folder_results,
+                }
+            )
+            if any_folder_success:
+                success_accounts += 1
+            else:
+                failed_accounts += 1
+            continue
 
         # outlook 类型需要先检查凭据解密错误（保持与单账号接口一致的安全行为）
         if account_type != "imap":
@@ -482,6 +632,19 @@ def api_get_emails(email_addr: str) -> Any:
     skip = int(request.args.get("skip", 0))
     top = int(request.args.get("top", 20))
 
+    if mailbox_resolver.is_account_backed_temp_mailbox(account):
+        try:
+            return jsonify(
+                _fetch_account_backed_temp_folder(
+                    account,
+                    folder=folder,
+                    skip=skip,
+                    top=top,
+                )
+            )
+        except TempMailError as exc:
+            return _build_temp_mail_controller_error(exc, message_en="Failed to fetch temporary mailbox messages")
+
     # PRD-00005 / FD-00005 / TDD-00005：按 account_type 路由分发（Outlook 链路保持原样，IMAP 走通用 IMAP 服务）
     account_type = (account.get("account_type") or "outlook").strip().lower()
     if account_type != "imap":
@@ -628,6 +791,39 @@ def api_delete_emails() -> Any:
             status=404,
         )
 
+    if mailbox_resolver.is_account_backed_temp_mailbox(account):
+        success_count = 0
+        errors: List[Dict[str, Any]] = []
+        mailbox = mailbox_resolver.build_account_backed_temp_mailbox(account)
+        for message_id in message_ids:
+            try:
+                get_temp_mail_service().delete_message(mailbox, str(message_id))
+                success_count += 1
+            except TempMailError as exc:
+                errors.append(
+                    {
+                        "id": str(message_id),
+                        "code": exc.code,
+                        "message": exc.message,
+                    }
+                )
+        failed_count = len(message_ids) - success_count
+        if success_count:
+            log_audit(
+                "delete",
+                "email",
+                str(account.get("email") or email_addr),
+                f"删除临时邮箱邮件 {success_count} 封",
+            )
+        return jsonify(
+            {
+                "success": failed_count == 0,
+                "success_count": success_count,
+                "failed_count": failed_count,
+                "errors": errors,
+            }
+        )
+
     # PRD-00005：IMAP 账号不支持远程删除（避免误操作与跨厂商副作用）
     account_type = (account.get("account_type") or "outlook").strip().lower()
     if account_type == "imap":
@@ -719,6 +915,18 @@ def api_get_email_detail(email_addr: str, message_id: str) -> Any:
             message_en="Account not found",
             status=404,
         )
+
+    if mailbox_resolver.is_account_backed_temp_mailbox(account):
+        try:
+            mailbox = mailbox_resolver.build_account_backed_temp_mailbox(account)
+            detail = get_temp_mail_service().get_message_detail(
+                mailbox,
+                message_id,
+                refresh_if_missing=True,
+            )
+            return jsonify({"success": True, "email": _format_account_backed_temp_detail(detail)})
+        except TempMailError as exc:
+            return _build_temp_mail_controller_error(exc, message_en="Failed to fetch temporary mailbox message")
 
     account_type = (account.get("account_type") or "outlook").strip().lower()
     folder = request.args.get("folder", "inbox")
@@ -1303,7 +1511,7 @@ def api_external_get_message_raw(message_id: str) -> Any:
             external_api_service.ok(
                 {
                     "id": message_id,
-                    "email_address": args["email"],
+                    "email_address": detail.get("email_address") or args["email"],
                     "raw_content": detail.get("raw_content", ""),
                     "method": detail.get("method", ""),
                 }

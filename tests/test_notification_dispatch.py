@@ -86,13 +86,24 @@ class NotificationDispatchTests(unittest.TestCase):
         finally:
             conn.close()
 
-    def _insert_temp_email(self, email_addr: str, *, provider_name: str | None = None):
+    def _insert_temp_email(
+        self,
+        email_addr: str,
+        *,
+        provider_name: str | None = None,
+        mailbox_type: str = "user",
+        visible_in_ui: bool = True,
+        status: str = "active",
+    ):
         conn = self.module.create_sqlite_connection()
         try:
             meta_json = json.dumps({"provider_name": provider_name}) if provider_name else None
             conn.execute(
-                "INSERT INTO temp_emails (email, status, meta_json) VALUES (?, 'active', ?)",
-                (email_addr, meta_json),
+                """
+                INSERT INTO temp_emails (email, status, mailbox_type, visible_in_ui, meta_json)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (email_addr, status, mailbox_type, 1 if visible_in_ui else 0, meta_json),
             )
             conn.commit()
         finally:
@@ -221,6 +232,155 @@ class NotificationDispatchTests(unittest.TestCase):
             self.assertEqual(len(rows), 2)
             self.assertEqual({row["source_type"] for row in rows}, {"account", "temp_email"})
             self.assertTrue(all(row["status"] == "sent" for row in rows))
+
+    def test_hidden_task_mailbox_is_excluded_from_global_notification_sources(self):
+        with self.app.app_context():
+            from outlook_web.services import notification_dispatch
+
+            self._insert_temp_email("visible-notify@example.com")
+            self._insert_temp_email(
+                "hidden-task@example.com",
+                mailbox_type="task",
+                visible_in_ui=False,
+            )
+            self._insert_temp_email("inactive-notify@example.com", status="finished")
+
+            sources = notification_dispatch.list_email_notification_sources()
+
+        self.assertEqual(
+            {source["email"] for source in sources if source["source_type"] == notification_dispatch.SOURCE_TEMP_EMAIL},
+            {"visible-notify@example.com"},
+        )
+
+    def test_cf_pool_account_notification_uses_temp_mail_source(self):
+        with self.app.app_context():
+            from outlook_web.db import get_db
+            from outlook_web.services import notification_dispatch
+
+            account_id = self._insert_account(
+                "cf-pool-notify@example.com",
+                provider="cloudflare_temp_mail",
+                account_type="temp_mail",
+                telegram_enabled=1,
+            )
+            get_db().execute(
+                "UPDATE accounts SET temp_mail_meta = ? WHERE id = ?",
+                (
+                    json.dumps(
+                        {
+                            "provider_name": "cloudflare_temp_mail",
+                            "provider_mailbox_id": "501",
+                            "provider_jwt": "jwt-501",
+                        }
+                    ),
+                    account_id,
+                ),
+            )
+            get_db().commit()
+
+            source = next(
+                item
+                for item in notification_dispatch.list_email_notification_sources()
+                if item["email"] == "cf-pool-notify@example.com"
+            )
+            self.assertEqual(source["source_type"], notification_dispatch.SOURCE_TEMP_EMAIL)
+            self.assertTrue(notification_dispatch._is_source_notification_enabled(source))
+
+            with (
+                patch.dict(os.environ, {"TEMP_MAIL_INBOUND_PUSH_ENABLED": ""}, clear=False),
+                patch(
+                    "outlook_web.services.notification_dispatch.TempMailService.list_messages",
+                    return_value=[],
+                ) as list_messages,
+            ):
+                notification_dispatch.fetch_source_messages(source, "2026-03-01T00:00:00")
+
+        mailbox_arg = list_messages.call_args.args[0]
+        self.assertEqual(mailbox_arg["kind"], "temp")
+        self.assertEqual(mailbox_arg["email"], "cf-pool-notify@example.com")
+        self.assertTrue(list_messages.call_args.kwargs["sync_remote"])
+
+    def test_cf_pool_account_keeps_telegram_channel_after_temp_routing(self):
+        with self.app.app_context():
+            from outlook_web.services import notification_dispatch
+
+            self._insert_account(
+                "cf-telegram-notify@example.com",
+                provider="cloudflare_temp_mail",
+                account_type="temp_mail",
+                telegram_enabled=1,
+            )
+            source = next(
+                item
+                for item in notification_dispatch.list_email_notification_sources()
+                if item["email"] == "cf-telegram-notify@example.com"
+            )
+            channels = notification_dispatch._build_active_channels_for_source(
+                source,
+                email_enabled=False,
+                telegram_runtime={"bot_token": "token", "chat_id": "chat"},
+                webhook_runtime=None,
+            )
+
+        self.assertEqual([channel for channel, _sender, _limit in channels], [notification_dispatch.CHANNEL_TELEGRAM])
+
+    def test_legacy_telegram_scanner_excludes_cf_pool_accounts(self):
+        with self.app.app_context():
+            from outlook_web.repositories import accounts as accounts_repo
+
+            self._insert_account(
+                "regular-telegram@example.com",
+                provider="outlook",
+                account_type="outlook",
+                telegram_enabled=1,
+            )
+            self._insert_account(
+                "cf-legacy-telegram@example.com",
+                provider="cloudflare_temp_mail",
+                account_type="outlook",
+                telegram_enabled=1,
+            )
+            accounts = accounts_repo.get_telegram_push_accounts()
+
+        self.assertEqual({account["email"] for account in accounts}, {"regular-telegram@example.com"})
+
+    def test_cf_pool_account_and_legacy_visible_temp_row_share_one_notification_source(self):
+        with self.app.app_context():
+            from outlook_web.db import get_db
+            from outlook_web.services import notification_dispatch
+
+            account_id = self._insert_account(
+                "cf-duplicate-notify@example.com",
+                provider="cloudflare_temp_mail",
+                account_type="temp_mail",
+                telegram_enabled=1,
+            )
+            db = get_db()
+            db.execute(
+                "UPDATE accounts SET temp_mail_meta = ? WHERE id = ?",
+                ('{"provider_name":"cloudflare_temp_mail","provider_jwt":"jwt"}', account_id),
+            )
+            db.execute(
+                """
+                INSERT INTO temp_emails (email, status, mailbox_type, visible_in_ui, source, meta_json)
+                VALUES (?, 'active', 'user', 1, 'custom_domain_temp_mail', ?)
+                """,
+                (
+                    "cf-duplicate-notify@example.com",
+                    '{"provider_name":"cloudflare_temp_mail","provider_jwt":"jwt"}',
+                ),
+            )
+            db.commit()
+
+            sources = [
+                source
+                for source in notification_dispatch.list_email_notification_sources()
+                if source["email"] == "cf-duplicate-notify@example.com"
+            ]
+
+        self.assertEqual(len(sources), 1)
+        self.assertEqual(sources[0]["source_type"], notification_dispatch.SOURCE_TEMP_EMAIL)
+        self.assertEqual(sources[0]["account"]["id"], account_id)
 
     def test_missing_message_id_uses_stable_fallback_dedup(self):
         with self.app.app_context():

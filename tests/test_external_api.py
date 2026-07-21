@@ -173,14 +173,12 @@ class ExternalApiBaseTest(unittest.TestCase):
             from outlook_web.db import get_db
 
             db = get_db()
-            rows = db.execute(
-                """
+            rows = db.execute("""
                 SELECT action, resource_id, details
                 FROM audit_logs
                 WHERE resource_type = 'external_api'
                 ORDER BY id ASC
-                """
-            ).fetchall()
+                """).fetchall()
         return [dict(row) for row in rows]
 
     def _external_consumer_usage_rows(self):
@@ -188,13 +186,11 @@ class ExternalApiBaseTest(unittest.TestCase):
             from outlook_web.db import get_db
 
             db = get_db()
-            rows = db.execute(
-                """
+            rows = db.execute("""
                 SELECT consumer_key, consumer_name, endpoint, total_count, success_count, error_count
                 FROM external_api_consumer_usage_daily
                 ORDER BY id ASC
-                """
-            ).fetchall()
+                """).fetchall()
         return [dict(row) for row in rows]
 
 
@@ -528,14 +524,14 @@ class ExternalApiConsumerAuditTests(ExternalApiBaseTest):
     @patch("outlook_web.services.graph.get_email_raw_graph")
     @patch("outlook_web.services.graph.get_email_detail_graph")
     def test_external_message_detail_returns_message_content(self, mock_get_email_detail_graph, mock_get_email_raw_graph):
-        email_addr = self._insert_outlook_account()
+        email_addr = self._insert_outlook_account("MixedCase@extapi.test")
         self._set_external_api_key("abc123")
         mock_get_email_detail_graph.return_value = self._graph_detail()
         mock_get_email_raw_graph.return_value = "RAW MIME CONTENT"
 
         client = self.app.test_client()
         resp = client.get(
-            f"/api/external/messages/msg-1?email={email_addr}",
+            f"/api/external/messages/msg-1?email={email_addr.lower()}",
             headers=self._auth_headers(),
         )
 
@@ -544,6 +540,7 @@ class ExternalApiConsumerAuditTests(ExternalApiBaseTest):
         self.assertTrue(data.get("success"))
         self.assertIn("content", data.get("data", {}))
         self.assertIn("raw_content", data.get("data", {}))
+        self.assertEqual(data.get("data", {}).get("email_address"), email_addr)
         self.assertEqual(data.get("data", {}).get("raw_content"), "RAW MIME CONTENT")
 
     @patch("outlook_web.services.graph.get_email_raw_graph")
@@ -740,6 +737,10 @@ class ExternalApiSystemTests(ExternalApiBaseTest):
     def test_external_capabilities_returns_feature_list_and_audits(self):
         client = self.app.test_client()
         self._set_external_api_key("abc123")
+        with self.app.app_context():
+            from outlook_web.repositories import settings as settings_repo
+
+            settings_repo.set_setting("pool_external_enabled", "true")
 
         resp = client.get("/api/external/capabilities", headers=self._auth_headers())
 
@@ -749,10 +750,33 @@ class ExternalApiSystemTests(ExternalApiBaseTest):
         self.assertIn("service", data.get("data", {}))
         self.assertIn("version", data.get("data", {}))
         self.assertIn("features", data.get("data", {}))
+        capabilities = data.get("data", {})
+        self.assertIn("message_latest", capabilities["features"])
+        self.assertIn("async_probe", capabilities["features"])
+        self.assertIn("account_status", capabilities["features"])
+        self.assertIn("pool_claim_random", capabilities["features"])
+        self.assertEqual(capabilities["mailbox_types"], ["account", "temp"])
+        self.assertIn("temp_mail", capabilities["read_methods"])
 
         audit_logs = self._external_audit_logs()
         self.assertEqual(len(audit_logs), 1)
         self.assertIn("/api/external/capabilities", audit_logs[0]["details"])
+
+    def test_external_capabilities_marks_disabled_pool_features_as_restricted(self):
+        client = self.app.test_client()
+        self._set_external_api_key("abc123")
+        with self.app.app_context():
+            from outlook_web.repositories import settings as settings_repo
+
+            settings_repo.set_setting("pool_external_enabled", "false")
+
+        response = client.get("/api/external/capabilities", headers=self._auth_headers())
+
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()["data"]
+        self.assertNotIn("mailbox_pool", data["features"])
+        self.assertIn("mailbox_pool", data["restricted_features"])
+        self.assertIn("pool_claim_random", data["restricted_features"])
 
     def test_external_health_audits_access(self):
         client = self.app.test_client()
@@ -1055,6 +1079,7 @@ class ExternalApiSchemaValidationTests(ExternalApiBaseTest):
             "server_time_utc",
             "database",
             "upstream_probe_ok",
+            "probe_method",
             "last_probe_at",
             "last_probe_error",
         ):
@@ -1067,7 +1092,7 @@ class ExternalApiSchemaValidationTests(ExternalApiBaseTest):
 
         self.assertEqual(resp.status_code, 200)
         data = resp.get_json().get("data", {})
-        for key in ("service", "version", "features"):
+        for key in ("service", "version", "features", "mailbox_types", "read_methods"):
             self.assertIn(key, data, f"CapabilitiesData 缺少字段: {key}")
         self.assertIsInstance(data["features"], list)
 
