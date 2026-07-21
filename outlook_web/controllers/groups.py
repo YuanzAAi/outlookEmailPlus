@@ -53,6 +53,9 @@ def sanitize_input(text: str, max_length: int = 500) -> str:
 def api_get_groups() -> Any:
     """获取所有分组（含各分组邮箱数量，单次 SQL 聚合）"""
     groups = groups_repo.load_groups_with_account_count()
+    temp_counts = temp_emails_repo.get_visible_temp_email_counts_by_group()
+    for group in groups:
+        group["account_count"] = int(group.get("account_count") or 0) + temp_counts.get(int(group["id"]), 0)
     # 临时邮箱分组只展示用户可见邮箱；account-backed CF 的隐藏消息父记录不应计数。
     temp_group = next((g for g in groups if g["name"] == "临时邮箱"), None)
     if temp_group is not None:
@@ -72,6 +75,7 @@ def api_get_group(group_id: int) -> Any:
             details=f"group_id={group_id}",
         )
     group["account_count"] = groups_repo.get_group_account_count(group_id)
+    group["account_count"] += temp_emails_repo.get_visible_temp_email_counts_by_group().get(group_id, 0)
     return jsonify({"success": True, "group": group})
 
 

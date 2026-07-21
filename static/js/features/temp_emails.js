@@ -303,6 +303,10 @@
             }
 
             const colors = ['var(--clr-accent)', 'var(--clr-jade)', 'var(--clr-primary)', '#6C5CE7', '#00B894', '#E17055'];
+            const groupOptions = (Array.isArray(groups) ? groups : [])
+                .filter(group => !(typeof isTempMailboxGroup === 'function' && isTempMailboxGroup(group)))
+                .map(group => `<option value="${Number(group.id)}">${escapeHtml(group.name || '')}</option>`)
+                .join('');
 
             const cardHTML = emails.map((email, idx) => {
                 const initial = (email.email || '?')[0].toUpperCase();
@@ -314,11 +318,22 @@
                         <div class="account-avatar" style="background:${color};">${initial}</div>
                         <div class="account-info">
                             <div class="account-email" onclick="event.stopPropagation(); copyEmail('${escapeJs(email.email)}')" style="cursor:pointer;" title="点击复制">${escapeHtml(email.email)}</div>
-                            <div style="font-size:0.72rem;color:var(--text-muted);">${translateAppTextLocal('⚡ 临时邮箱')}</div>
-                        </div>
+                             <div style="font-size:0.72rem;color:var(--text-muted);">${translateAppTextLocal('⚡ 临时邮箱')}</div>
+                            <div class="temp-email-tag-list">${(email.tags || []).map(tag => `
+                                <button type="button" class="tag-badge" style="border-color:${escapeHtml(tag.color || '#888')}"
+                                    onclick="event.stopPropagation(); removeTempEmailTag('${escapeJs(email.email)}', ${Number(tag.id)})"
+                                    title="移除标签">${escapeHtml(tag.name || '')} ×</button>`).join('')}</div>
+                         </div>
                     </div>
                     <div class="account-card-bottom">
                         <div class="account-actions">
+                            <select class="form-input" style="width:110px;padding:2px 5px;font-size:0.72rem;" title="所属分组"
+                                onclick="event.stopPropagation()"
+                                onchange="event.stopPropagation(); updateTempEmailGroup('${escapeJs(email.email)}', this.value)">
+                                <option value="">临时邮箱</option>
+                                ${groupOptions.replace(`value="${Number(email.group_id)}"`, `value="${Number(email.group_id)}" selected`)}
+                            </select>
+                            <button class="btn-icon" onclick="event.stopPropagation(); addTempEmailTag('${escapeJs(email.email)}')" title="添加标签">🏷</button>
                             <button class="btn btn-sm btn-accent" onclick="event.stopPropagation(); copyVerificationInfo('${escapeJs(email.email)}', this, { source: 'temp' })" title="提取验证码" style="font-size:0.72rem;padding:2px 8px;">🔑 验证码</button>
                             <button class="btn-icon" onclick="event.stopPropagation(); copyEmail('${escapeJs(email.email)}')" title="复制">📋</button>
                             <button class="btn-icon" onclick="event.stopPropagation(); clearTempEmailMessages('${escapeJs(email.email)}')" title="清空">🧹</button>
@@ -330,6 +345,59 @@
 
             if (container) container.innerHTML = cardHTML;
             if (pageContainer) pageContainer.innerHTML = cardHTML;
+        }
+
+        async function saveTempEmailOrganization(email, groupId, tagIds) {
+            const response = await fetch(`/api/temp-emails/${encodeURIComponent(email)}/organization`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ group_id: groupId || null, tag_ids: tagIds || [] })
+            });
+            const data = await response.json();
+            if (!response.ok || !data.success) throw new Error(data.message || '更新临时邮箱失败');
+            delete accountsCache['temp'];
+            await loadTempEmails(true);
+            if (typeof loadGroups === 'function') await loadGroups();
+        }
+
+        function findTempMailbox(email) {
+            return (accountsCache['temp'] || []).find(item => String(item.email).toLowerCase() === String(email).toLowerCase());
+        }
+
+        async function updateTempEmailGroup(email, groupId) {
+            const mailbox = findTempMailbox(email) || {};
+            try {
+                await saveTempEmailOrganization(email, groupId, (mailbox.tags || []).map(tag => Number(tag.id)));
+                showToast('临时邮箱分组已更新', 'success');
+            } catch (error) {
+                showToast(error.message || '更新分组失败', 'error');
+            }
+        }
+
+        async function addTempEmailTag(email) {
+            const response = await fetch('/api/tags');
+            const data = await response.json();
+            const mailbox = findTempMailbox(email) || {};
+            const existing = new Set((mailbox.tags || []).map(tag => Number(tag.id)));
+            const available = (data.tags || []).filter(tag => !existing.has(Number(tag.id)));
+            if (!available.length) {
+                showToast('没有可添加的标签', 'warning');
+                return;
+            }
+            const chosen = window.prompt(`输入标签编号：\n${available.map(tag => `${tag.id}: ${tag.name}`).join('\n')}`);
+            if (!chosen) return;
+            const tagId = Number(chosen);
+            if (!available.some(tag => Number(tag.id) === tagId)) {
+                showToast('标签编号无效', 'error');
+                return;
+            }
+            await saveTempEmailOrganization(email, mailbox.group_id, [...existing, tagId]);
+        }
+
+        async function removeTempEmailTag(email, tagId) {
+            const mailbox = findTempMailbox(email) || {};
+            const tagIds = (mailbox.tags || []).map(tag => Number(tag.id)).filter(id => id !== Number(tagId));
+            await saveTempEmailOrganization(email, mailbox.group_id, tagIds);
         }
 
         // 生成临时邮箱
@@ -1022,4 +1090,3 @@
                 }
             }
         }
-

@@ -482,10 +482,12 @@
     chrome.tabs.create({ url });
   }
 
-  async function apiClaimRandom(config, taskId, projectKey) {
+  async function apiClaimRandom(config, taskId, projectKey, accountScope = 'all') {
     const url = `${trimUrl(config.serverUrl)}/api/external/pool/claim-random`;
     const body = { caller_id: CALLER_ID, task_id: taskId };
     if (projectKey) body.project_key = projectKey;
+    body.account_scope = accountScope;
+    if (accountScope === 'temp') body.provider = 'cloudflare_temp_mail';
 
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), ACTION_TIMEOUT_MS);
@@ -621,6 +623,7 @@
     }
 
     const projectKey = config.defaultProjectKey || '';
+    const accountScope = getEl('claim-account-scope')?.value || 'all';
     await renderMailboxState('claiming');
 
     const taskId = crypto.randomUUID();
@@ -629,6 +632,7 @@
       taskId,
       callerId: CALLER_ID,
       projectKey,
+      accountScope,
       claimedAt: new Date().toISOString(),
       code: null,
       link: null,
@@ -637,7 +641,7 @@
     await StorageApi.setCurrentTask(task);
 
     try {
-      const result = await apiClaimRandom(config, taskId, projectKey);
+      const result = await apiClaimRandom(config, taskId, projectKey, accountScope);
       if (!result || result.success === false) {
         throw new Error(result && result.message ? result.message : '申领失败，服务端无响应');
       }

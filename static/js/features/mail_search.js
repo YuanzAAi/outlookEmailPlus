@@ -44,10 +44,10 @@
             const scope = document.getElementById('mailSearchMailboxScope')?.value || 'regular';
             const groupSelect = document.getElementById('mailSearchGroup');
             if (!groupSelect) return;
-            groupSelect.disabled = scope === 'temp';
+            groupSelect.disabled = false;
             groupSelect.title = scope === 'temp'
-                ? '临时邮箱不使用普通邮箱分组'
-                : scope === 'all' ? '分组仅限定普通邮箱，临时邮箱仍会全部检索' : '限定普通邮箱分组';
+                ? '按临时邮箱所属分组筛选'
+                : scope === 'all' ? '同时限定普通邮箱和临时邮箱分组' : '限定普通邮箱分组';
         }
 
         function setMailSearchRunning(running) {
@@ -263,8 +263,19 @@
 
             return Array.from(accountMap.values()).map(account => {
                 delete account.subjectMap;
+                account.subjects.sort((left, right) => (
+                    mailSearchItemTimestamp(mailSearchLatestItem(right.items))
+                    - mailSearchItemTimestamp(mailSearchLatestItem(left.items))
+                ));
                 return account;
-            });
+            }).sort((left, right) => (
+                mailSearchItemTimestamp(mailSearchLatestItem(right.items))
+                - mailSearchItemTimestamp(mailSearchLatestItem(left.items))
+            ));
+        }
+
+        function mailSearchItemTimestamp(item) {
+            return item ? (Date.parse(item.result.received_at || '') || 0) : 0;
         }
 
         function mailSearchSelectionState(items) {

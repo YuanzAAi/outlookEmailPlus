@@ -175,4 +175,29 @@ describe('browser-extension/popup integration', () => {
     expect(firstUrl).toContain('email=claimed%40example.com');
     expect(byId('result-value').textContent).toBe('123456');
   });
+
+  test('claim request carries selected account scope', async () => {
+    await bootstrapPopup({
+      config: { serverUrl: 'http://localhost:5001', apiKey: 'test-key', defaultProjectKey: '' },
+    });
+    global.fetch = jest.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        success: true,
+        data: { email: 'temp@yuangod.cc.cd', account_id: 1, claim_token: 'claim-1' },
+      }),
+    }));
+
+    byId('claim-account-scope').value = 'temp';
+    byId('btn-claim').click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const request = global.fetch.mock.calls[0][1];
+    expect(JSON.parse(request.body)).toMatchObject({
+      account_scope: 'temp',
+      provider: 'cloudflare_temp_mail',
+    });
+  });
 });

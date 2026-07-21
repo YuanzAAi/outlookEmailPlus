@@ -266,13 +266,19 @@ def _load_temp_mailboxes(params: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], 
         view="record",
         order_by_latest_message=True,
     )
-    account_rows = get_db().execute("""
+    account_rows = (
+        get_db()
+        .execute(
+            """
         SELECT id, email, group_id, status, temp_mail_meta, created_at, updated_at
         FROM accounts
         WHERE COALESCE(status, 'active') = 'active'
           AND COALESCE(provider, '') = 'cloudflare_temp_mail'
         ORDER BY id DESC
-        """).fetchall()
+        """
+        )
+        .fetchall()
+    )
     known_emails = {str(record.get("email") or "").casefold() for record in records}
     for row in account_rows:
         email_addr = str(row["email"] or "").strip()
@@ -298,6 +304,14 @@ def _load_temp_mailboxes(params: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], 
     account_query = str(params.get("account_query") or "").casefold()
     if account_query:
         records = [record for record in records if account_query in str(record.get("email") or "").casefold()]
+    group_id = params.get("group_id")
+    if group_id not in (None, "", "all"):
+        try:
+            normalized_group_id = int(group_id)
+        except (TypeError, ValueError):
+            normalized_group_id = None
+        if normalized_group_id is not None:
+            records = [record for record in records if int(record.get("group_id") or 0) == normalized_group_id]
     max_mailboxes = int(params["max_accounts"])
     truncated = len(records) > max_mailboxes
     return records[:max_mailboxes], truncated

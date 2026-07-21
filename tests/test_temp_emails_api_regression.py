@@ -278,6 +278,32 @@ class TempEmailsApiRegressionTests(unittest.TestCase):
         self.assertEqual(data["emails"][0]["id"], "msg-cache-1")
         self.assertEqual(data["emails"][0]["subject"], "Cached subject")
 
+    def test_temp_email_organization_persists_group_and_tags(self):
+        client = self.app.test_client()
+        self._login(client)
+        email_addr = f"organized_{uuid.uuid4().hex}@temp.example"
+        self._insert_temp_email(email_addr)
+        with self.app.app_context():
+            from outlook_web.repositories import groups as groups_repo
+            from outlook_web.repositories import tags as tags_repo
+
+            group_id = groups_repo.add_group(f"temp-group-{uuid.uuid4().hex}", "", "#123456", "")
+            tag_id = tags_repo.add_tag(f"temp-tag-{uuid.uuid4().hex}", "#654321")
+
+        resp = client.patch(
+            f"/api/temp-emails/{email_addr}/organization",
+            json={"group_id": group_id, "tag_ids": [tag_id]},
+        )
+        self.assertEqual(resp.status_code, 200)
+        mailbox = resp.get_json()["mailbox"]
+        self.assertEqual(mailbox["group_id"], group_id)
+        self.assertEqual([tag["id"] for tag in mailbox["tags"]], [tag_id])
+
+        listing = client.get("/api/temp-emails").get_json()["emails"]
+        stored = next(item for item in listing if item["email"] == email_addr)
+        self.assertEqual(stored["group_id"], group_id)
+        self.assertEqual([tag["id"] for tag in stored["tags"]], [tag_id])
+
     def test_get_temp_email_message_detail_returns_404_when_refresh_if_missing_is_false_and_cache_miss(
         self,
     ):

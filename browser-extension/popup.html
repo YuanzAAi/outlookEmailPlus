@@ -798,6 +798,12 @@
             <div class="empty-icon">📬</div>
             <div>暂无进行中的申领任务<br>从邮箱池申领一个邮箱开始使用</div>
           </div>
+          <label class="form-label" for="claim-account-scope">领取范围</label>
+          <select class="form-input" id="claim-account-scope" style="margin-bottom:10px">
+            <option value="all">全部账号</option>
+            <option value="regular">仅普通账号</option>
+            <option value="temp">仅临时邮箱</option>
+          </select>
           <button class="btn btn-primary" id="btn-claim">
             <span>📧</span> 申领邮箱
           </button>

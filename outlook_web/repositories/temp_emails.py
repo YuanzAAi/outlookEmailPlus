@@ -203,6 +203,7 @@ def _serialize_temp_email_row(row: Any) -> Dict[str, Any]:
     item["provider_name"] = str(
         item["meta_json"].get("provider_name") or _default_provider_name_for_source(item.get("source"))
     )
+    item["tags"] = get_temp_email_tags(int(item.get("id") or 0)) if item.get("id") else []
     return item
 
 
@@ -225,6 +226,7 @@ def build_temp_mailbox_descriptor(record: Dict[str, Any]) -> Dict[str, Any]:
         "consumer_key": str(normalized.get("consumer_key") or "").strip(),
         "caller_id": str(normalized.get("caller_id") or "").strip(),
         "task_id": str(normalized.get("task_id") or "").strip(),
+        "group_id": normalized.get("group_id"),
         "created_at": str(normalized.get("created_at") or ""),
         "updated_at": str(normalized.get("updated_at") or ""),
         "finished_at": str(normalized.get("finished_at") or ""),
@@ -249,9 +251,54 @@ def build_temp_mailbox_public_dto(record: Dict[str, Any]) -> Dict[str, Any]:
         "task_token": descriptor["task_token"],
         "provider_name": descriptor["provider_name"],
         "capabilities": dict((descriptor.get("meta") or {}).get("provider_capabilities") or {}),
+        "group_id": stored_record.get("group_id"),
+        "tags": list(stored_record.get("tags") or []),
         "latest_message_at": int(stored_record.get("latest_message_at") or 0),
         "message_count": int(stored_record.get("message_count") or 0),
     }
+
+
+def get_temp_email_tags(temp_email_id: int) -> List[Dict[str, Any]]:
+    if temp_email_id <= 0:
+        return []
+    db = get_db()
+    rows = db.execute(
+        """
+        SELECT t.* FROM tags t
+        JOIN temp_email_tags tet ON tet.tag_id = t.id
+        WHERE tet.temp_email_id = ?
+        ORDER BY t.created_at DESC
+        """,
+        (temp_email_id,),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def update_temp_email_organization(email_addr: str, *, group_id: Optional[int], tag_ids: List[int]) -> bool:
+    db = get_db()
+    row = db.execute("SELECT id FROM temp_emails WHERE email = ? COLLATE NOCASE", (email_addr,)).fetchone()
+    if not row:
+        return False
+    temp_email_id = int(row["id"])
+    db.execute("UPDATE temp_emails SET group_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", (group_id, temp_email_id))
+    db.execute("DELETE FROM temp_email_tags WHERE temp_email_id = ?", (temp_email_id,))
+    for tag_id in sorted(set(int(value) for value in tag_ids if int(value) > 0)):
+        db.execute("INSERT OR IGNORE INTO temp_email_tags (temp_email_id, tag_id) VALUES (?, ?)", (temp_email_id, tag_id))
+    db.commit()
+    return True
+
+
+def get_visible_temp_email_counts_by_group() -> Dict[int, int]:
+    db = get_db()
+    rows = db.execute(
+        """
+        SELECT group_id, COUNT(*) AS count
+        FROM temp_emails
+        WHERE visible_in_ui = 1 AND group_id IS NOT NULL
+        GROUP BY group_id
+        """
+    ).fetchall()
+    return {int(row["group_id"]): int(row["count"] or 0) for row in rows}
 
 
 def load_temp_emails(
@@ -572,6 +619,9 @@ def delete_temp_email(email_addr: str) -> bool:
     """删除临时邮箱及其所有邮件"""
     db = get_db()
     try:
+        row = db.execute("SELECT id FROM temp_emails WHERE email = ? COLLATE NOCASE", (email_addr,)).fetchone()
+        if row:
+            db.execute("DELETE FROM temp_email_tags WHERE temp_email_id = ?", (int(row["id"]),))
         db.execute("DELETE FROM temp_email_messages WHERE email_address = ? COLLATE NOCASE", (email_addr,))
         db.execute("DELETE FROM temp_emails WHERE email = ? COLLATE NOCASE", (email_addr,))
         db.commit()

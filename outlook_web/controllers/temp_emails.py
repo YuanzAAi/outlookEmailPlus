@@ -8,7 +8,10 @@ from flask import jsonify, request
 from outlook_web.audit import log_audit
 from outlook_web.db import get_db
 from outlook_web.errors import build_error_response
+from outlook_web.repositories import groups as groups_repo
 from outlook_web.repositories import settings as settings_repo
+from outlook_web.repositories import tags as tags_repo
+from outlook_web.repositories import temp_emails as temp_emails_repo
 from outlook_web.security.auth import login_required
 from outlook_web.services.temp_email_content import (
     build_inline_resource_map,
@@ -88,6 +91,37 @@ def api_get_temp_emails() -> Any:
             "provider_name": settings_repo.get_temp_mail_runtime_provider_name(),
         }
     )
+
+
+@login_required
+def api_update_temp_email_organization(email_addr: str) -> Any:
+    data = request.get_json(silent=True) or {}
+    raw_group_id = data.get("group_id")
+    group_id = None
+    if raw_group_id not in (None, "", "temp"):
+        try:
+            group_id = int(raw_group_id)
+        except (TypeError, ValueError):
+            return build_error_response("INVALID_GROUP_ID", "分组参数无效", status=400)
+        if not groups_repo.get_group_by_id(group_id):
+            return build_error_response("GROUP_NOT_FOUND", "分组不存在", status=404)
+
+    raw_tag_ids = data.get("tag_ids") or []
+    if not isinstance(raw_tag_ids, list):
+        return build_error_response("INVALID_TAG_IDS", "标签参数无效", status=400)
+    try:
+        tag_ids = sorted({int(value) for value in raw_tag_ids if int(value) > 0})
+    except (TypeError, ValueError):
+        return build_error_response("INVALID_TAG_IDS", "标签参数无效", status=400)
+    valid_tag_ids = {int(tag["id"]) for tag in tags_repo.get_tags()}
+    if any(tag_id not in valid_tag_ids for tag_id in tag_ids):
+        return build_error_response("TAG_NOT_FOUND", "标签不存在", status=404)
+
+    if not temp_emails_repo.update_temp_email_organization(email_addr, group_id=group_id, tag_ids=tag_ids):
+        return build_error_response("TEMP_EMAIL_NOT_FOUND", "临时邮箱不存在", status=404)
+    log_audit("update", "temp_email", email_addr, f"更新分组和标签: group_id={group_id}, tags={tag_ids}")
+    mailbox = temp_emails_repo.get_temp_email_by_address(email_addr, view="public")
+    return jsonify({"success": True, "mailbox": mailbox})
 
 
 @login_required

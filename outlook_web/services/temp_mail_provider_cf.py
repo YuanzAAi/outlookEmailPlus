@@ -27,6 +27,7 @@ import json
 import logging
 import secrets
 import string
+import time
 from datetime import datetime, timezone
 from email.utils import parseaddr
 from typing import Any
@@ -267,12 +268,28 @@ class CloudflareTempMailProvider(TempMailProviderBase):
         return {"Authorization": f"Bearer {jwt}", "Content-Type": "application/json"}
 
     def _request(self, method: str, path: str, **kwargs: Any) -> requests.Response:
-        return _CF_SESSION.request(
-            method,
-            f"{self._base_url()}{path}",
-            timeout=_CF_REQUEST_TIMEOUT,
-            **kwargs,
-        )
+        normalized_method = str(method or "GET").upper()
+        attempts = 3 if normalized_method in {"GET", "HEAD"} else 1
+        last_error: requests.RequestException | None = None
+        for attempt in range(attempts):
+            try:
+                response = _CF_SESSION.request(
+                    normalized_method,
+                    f"{self._base_url()}{path}",
+                    timeout=_CF_REQUEST_TIMEOUT,
+                    **kwargs,
+                )
+            except (requests.Timeout, requests.ConnectionError) as exc:
+                last_error = exc
+                if attempt + 1 >= attempts:
+                    raise
+            else:
+                if response.status_code not in {429, 502, 503, 504} or attempt + 1 >= attempts:
+                    return response
+            time.sleep(0.2 * (attempt + 1))
+        if last_error is not None:
+            raise last_error
+        raise requests.RequestException("CF Worker request failed without response")
 
     def _read_request(self, method: str, path: str, *, operation: str, **kwargs: Any) -> requests.Response:
         try:

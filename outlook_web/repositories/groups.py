@@ -97,12 +97,14 @@ def normalize_group_verification_policy(
 def load_groups() -> List[Dict]:
     """加载所有分组（临时邮箱分组排在最前面）"""
     db = get_db()
-    cursor = db.execute("""
+    cursor = db.execute(
+        """
         SELECT * FROM groups
         ORDER BY
             CASE WHEN name = '临时邮箱' THEN 0 ELSE 1 END,
             id
-    """)
+    """
+    )
     rows = cursor.fetchall()
     return [dict(row) for row in rows]
 
@@ -245,6 +247,10 @@ def delete_group(group_id: int) -> bool:
             "UPDATE accounts SET group_id = ?, updated_at = CURRENT_TIMESTAMP WHERE group_id = ?",
             (default_group_id, group_id),
         )
+        db.execute(
+            "UPDATE temp_emails SET group_id = ?, updated_at = CURRENT_TIMESTAMP WHERE group_id = ?",
+            (default_group_id, group_id),
+        )
         db.execute("DELETE FROM groups WHERE id = ?", (group_id,))
         db.commit()
         return True
@@ -263,7 +269,8 @@ def get_group_account_count(group_id: int) -> int:
 def load_groups_with_account_count() -> List[Dict]:
     """加载所有分组并附带各分组的邮箱数量（单次 SQL 聚合，消除 N+1）"""
     db = get_db()
-    cursor = db.execute("""
+    cursor = db.execute(
+        """
         SELECT g.*,
                COALESCE(a.cnt, 0) AS account_count
         FROM groups g
@@ -275,7 +282,8 @@ def load_groups_with_account_count() -> List[Dict]:
         ORDER BY
             CASE WHEN g.name = '临时邮箱' THEN 0 ELSE 1 END,
             g.id
-    """)
+    """
+    )
     rows = cursor.fetchall()
     return [dict(row) for row in rows]
 

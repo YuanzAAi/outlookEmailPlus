@@ -21,6 +21,8 @@ from __future__ import annotations
 import unittest
 from unittest.mock import MagicMock, patch
 
+import requests
+
 from tests._import_app import clear_login_attempts, import_web_app_module
 
 # ---------------------------------------------------------------------------
@@ -574,6 +576,20 @@ class CloudflareTempMailProviderTests(unittest.TestCase):
                     provider.list_messages(self._make_mailbox())
 
         self.assertEqual(ctx.exception.code, "UPSTREAM_TIMEOUT")
+
+    def test_idempotent_get_retries_transient_connection_error(self):
+        from outlook_web.services.temp_mail_provider_cf import CloudflareTempMailProvider
+
+        provider = CloudflareTempMailProvider()
+        response = MagicMock(status_code=200)
+        with patch(
+            "outlook_web.services.temp_mail_provider_cf._CF_SESSION.request",
+            side_effect=[requests.ConnectionError("reset"), response],
+        ) as request_mock, patch("outlook_web.services.temp_mail_provider_cf.time.sleep"):
+            result = provider._request("GET", "/api/parsed_mails")
+
+        self.assertIs(result, response)
+        self.assertEqual(request_mock.call_count, 2)
 
     def test_list_messages_skips_unparseable_items_and_continues(self):
         """解析单封邮件失败时应跳过该封，不影响其他邮件。"""

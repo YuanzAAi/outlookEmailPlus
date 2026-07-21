@@ -92,6 +92,7 @@ def api_external_pool_claim_random():
     provider = body.get("provider")
     project_key = body.get("project_key")
     email_domain = body.get("email_domain")
+    account_scope = body.get("account_scope", "all")
     consumer = get_external_api_consumer() or {}
 
     try:
@@ -102,6 +103,7 @@ def api_external_pool_claim_random():
             project_key=project_key,
             email_domain=email_domain,
             allowed_emails=consumer.get("allowed_emails") or [],
+            account_scope=account_scope,
         )
         data = {
             "account_id": account["id"],
@@ -118,6 +120,7 @@ def api_external_pool_claim_random():
                 "provider": provider or "",
                 "project_key": project_key or "",
                 "email_domain": email_domain or "",
+                "account_scope": account_scope,
                 "account_id": data["account_id"],
             },
         )

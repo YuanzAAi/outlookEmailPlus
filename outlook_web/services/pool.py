@@ -28,6 +28,7 @@ REASON_MAX_LEN = 256
 DETAIL_MAX_LEN = 512
 
 VALID_RESULTS = set(pool_repo.RESULT_TO_POOL_STATUS.keys())
+VALID_ACCOUNT_SCOPES = {"all", "regular", "temp"}
 
 # CF 邮箱 complete 时需要删除远程邮箱的 result 值
 CF_DELETE_ON_RESULTS = {"success", "credential_invalid"}
@@ -178,6 +179,7 @@ def claim_random(
     project_key: Optional[str] = None,
     email_domain: Optional[str] = None,
     allowed_emails: Iterable[str] | None = None,
+    account_scope: str = "all",
 ) -> dict:
     _validate_caller_id(caller_id)
     _validate_task_id(task_id)
@@ -185,6 +187,9 @@ def claim_random(
     project_key = _validate_project_key(project_key)
     email_domain = _validate_email_domain(email_domain)
     allowed_emails = _normalize_allowed_emails(allowed_emails)
+    account_scope = str(account_scope or "all").strip().lower()
+    if account_scope not in VALID_ACCOUNT_SCOPES:
+        raise PoolServiceError("account_scope 必须是 all、regular 或 temp", "invalid_account_scope")
 
     conn = create_sqlite_connection()
     try:
@@ -192,26 +197,27 @@ def claim_random(
         default_lease = settings["pool_default_lease_seconds"]
         _validate_lease_seconds(default_lease)
 
-        try:
-            account = pool_repo.claim_atomic(
-                conn,
-                caller_id=caller_id,
-                task_id=task_id,
-                lease_seconds=default_lease,
-                provider=provider,
-                project_key=project_key,
-                email_domain=email_domain,
-                allowed_emails=allowed_emails,
-            )
-        except pool_repo.PoolRepositoryError as e:
-            # 将 Repository 层异常转换为 Service 层异常
-            raise PoolServiceError(str(e), e.error_code, http_status=500) from e
+        account = None
+        if account_scope != "temp":
+            try:
+                account = pool_repo.claim_atomic(
+                    conn,
+                    caller_id=caller_id,
+                    task_id=task_id,
+                    lease_seconds=default_lease,
+                    provider=provider,
+                    project_key=project_key,
+                    email_domain=email_domain,
+                    allowed_emails=allowed_emails,
+                )
+            except pool_repo.PoolRepositoryError as e:
+                raise PoolServiceError(str(e), e.error_code, http_status=500) from e
 
         if account is not None:
             return account
 
         # accounts 池无命中：对临时邮箱类 provider（custom/gptmail/未指定）回退到 temp_emails 池领取
-        if provider in _TEMP_ELIGIBLE_PROVIDERS:
+        if account_scope != "regular" and provider in _TEMP_ELIGIBLE_PROVIDERS:
             try:
                 temp_account = pool_repo.claim_temp_mailbox_atomic(
                     conn,
@@ -227,7 +233,7 @@ def claim_random(
                 return temp_account
 
         # 池为空：仅当显式指定 provider=cloudflare_temp_mail 时，动态创建 CF 临时邮箱
-        if provider == "cloudflare_temp_mail" and not allowed_emails:
+        if account_scope != "regular" and provider == "cloudflare_temp_mail" and not allowed_emails:
             created_email, created_meta = _create_cf_mailbox_for_pool(email_domain=email_domain)
 
             try:

@@ -27,6 +27,7 @@ def add_tag(name: str, color: str) -> Optional[int]:
 def delete_tag(tag_id: int) -> bool:
     """删除标签"""
     db = get_db()
+    db.execute("DELETE FROM temp_email_tags WHERE tag_id = ?", (tag_id,))
     cursor = db.execute("DELETE FROM tags WHERE id = ?", (tag_id,))
     db.commit()
     return cursor.rowcount > 0

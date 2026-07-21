@@ -110,6 +110,22 @@ class TempMailboxPoolTests(unittest.TestCase):
         result = self.pool_service.claim_random(caller_id="reg_bot", task_id="t_none", email_domain=domain)
         self.assertTrue(self.pool_repo.is_temp_pool_account_id(result["id"]))
 
+    def test_claim_random_temp_scope_skips_regular_accounts(self):
+        temp_id, email, domain = self._make_temp_email()
+        result = self.pool_service.claim_random(
+            caller_id="reg_bot",
+            task_id="t_temp_scope",
+            email_domain=domain,
+            account_scope="temp",
+        )
+        self.assertEqual(result["email"], email)
+        self.assertEqual(result["id"], temp_id + self.pool_repo.TEMP_POOL_ID_OFFSET)
+
+    def test_claim_random_rejects_invalid_account_scope(self):
+        with self.assertRaises(self.pool_service.PoolServiceError) as ctx:
+            self.pool_service.claim_random(caller_id="reg_bot", task_id="bad-scope", account_scope="unknown")
+        self.assertEqual(ctx.exception.error_code, "invalid_account_scope")
+
     def test_claim_random_outlook_does_not_touch_temp(self):
         # 制造一个可用临时邮箱（唯一 domain），provider=outlook 不应回退到临时邮箱池
         _, _, domain = self._make_temp_email()
