@@ -72,17 +72,20 @@
             document.getElementById('emailDetailToolbar').style.display = 'none';
 
             // 自动加载邮件列表（优先使用缓存，无缓存时自动 fetch）
-            if (typeof loadEmails === 'function') {
-                loadEmails(email);
-            }
+            var initialLoad = typeof loadEmails === 'function' ? loadEmails(email) : Promise.resolve();
 
-            // 标准模式：选中账号后自动启动轮询（如果轮询已启用且该账号尚未在轮询中）
+            // 标准模式：复用本次加载结果作为轮询基线，避免选中账号时重复抓取收件箱。
             var view = typeof mailboxViewMode !== 'undefined' ? mailboxViewMode : 'standard';
             if (view !== 'compact' && typeof pollEnabled !== 'undefined' && pollEnabled && typeof startPoll === 'function') {
-                // 如果该账号已在轮询中则跳过，避免重复启动和多余 Toast
                 var alreadyPolling = typeof pollMap !== 'undefined' && pollMap.has(email);
                 if (!alreadyPolling) {
-                    startPoll(email);
+                    Promise.resolve(initialLoad).finally(function () {
+                        if (currentAccount !== email) return;
+                        startPoll(email, {
+                            baselineEmails: Array.isArray(currentEmails) ? currentEmails : [],
+                            skipInitialFetch: true
+                        });
+                    });
                 }
             }
         }
@@ -943,4 +946,3 @@
                 showToast(translateAppTextLocal('导出失败'), 'error');
             }
         }
-

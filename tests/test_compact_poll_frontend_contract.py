@@ -174,6 +174,15 @@ class CompactPollFrontendContractTests(unittest.TestCase):
                 f"poll-engine.js 缺少函数声明: {func}",
             )
 
+    def test_standard_mailbox_reuses_initial_load_as_poll_baseline(self):
+        client = self.app.test_client()
+        accounts_js = self._get_text(client, "/static/js/features/accounts.js")
+        engine_js = self._get_text(client, "/static/js/features/poll-engine.js")
+
+        self.assertIn("baselineEmails: Array.isArray(currentEmails) ? currentEmails : []", accounts_js)
+        self.assertIn("skipInitialFetch: true", accounts_js)
+        self.assertIn("if (opts && opts.skipInitialFetch)", engine_js)
+
     # ──────────────────────────────────────────────────────
     # TC-B08：mailbox_compact.js 使用正确的行选择器 .mail-row
     # ──────────────────────────────────────────────────────

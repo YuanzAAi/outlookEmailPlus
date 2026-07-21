@@ -242,7 +242,22 @@
                 countdownTimer: null
             };
 
+            if (opts && Array.isArray(opts.baselineEmails)) {
+                opts.baselineEmails.forEach(function(item) {
+                    if (item && item.id) state.baselineIds.add(item.id);
+                });
+            }
+
             pollMap.set(email, state);
+
+            if (opts && opts.skipInitialFetch) {
+                if (_pollUICallbacks.onPollStart) {
+                    _pollUICallbacks.onPollStart(email, state.maxCount, { reapply: false, silent: !!opts.silent });
+                }
+                startGlobalCountdown();
+                state.timer = setInterval(function() { pollSingleEmail(email, state); }, state.intervalSec * 1000);
+                return;
+            }
 
             Promise.allSettled([
                 fetch('/api/emails/' + encodeURIComponent(email) + '?folder=inbox'),
