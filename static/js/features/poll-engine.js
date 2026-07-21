@@ -199,7 +199,7 @@
                         return;
                     }
 
-                    fetch('/api/extract-verification?email=' + encodeURIComponent(email) + '&latest=1')
+                    fetch('/api/emails/' + encodeURIComponent(email) + '/verification?field=code')
                         .then(function(r) { return r.ok ? r.json() : null; })
                         .then(function(res) {
                             if (res && res.success && res.data && res.data.verification_code) {

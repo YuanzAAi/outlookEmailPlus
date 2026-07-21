@@ -10,7 +10,7 @@ from outlook_web.repositories import accounts as accounts_repo
 from outlook_web.repositories import notification_state as notification_state_repo
 from outlook_web.repositories import settings as settings_repo
 from outlook_web.repositories import temp_emails as temp_emails_repo
-from outlook_web.services import email_push, webhook_push
+from outlook_web.services import email_push, mailbox_resolver, webhook_push
 from outlook_web.services.temp_mail_service import TempMailError, TempMailService
 
 logger = logging.getLogger(__name__)
@@ -63,6 +63,17 @@ def build_source_key(source_type: str, raw_key: str) -> str:
 
 
 def _normalize_account_source(account: dict[str, Any]) -> dict[str, Any]:
+    if mailbox_resolver.is_account_backed_temp_mailbox(account):
+        mailbox = mailbox_resolver.build_account_backed_temp_mailbox(account)
+        address = mailbox["email"]
+        return {
+            "source_type": SOURCE_TEMP_EMAIL,
+            "source_key": build_source_key(SOURCE_TEMP_EMAIL, address),
+            "email": address,
+            "label": address,
+            "temp_email": mailbox,
+            "account": account,
+        }
     return {
         "source_type": SOURCE_ACCOUNT,
         "source_key": build_source_key(SOURCE_ACCOUNT, account.get("email", "")),
@@ -85,8 +96,19 @@ def _normalize_temp_email_source(temp_email: dict[str, Any]) -> dict[str, Any]:
 
 def list_email_notification_sources() -> list[dict[str, Any]]:
     accounts = [acc for acc in accounts_repo.load_accounts() if (acc.get("status") or "active") == "active"]
-    temp_emails = [item for item in temp_emails_repo.load_temp_emails() if (item.get("status") or "active") == "active"]
-    return [_normalize_account_source(acc) for acc in accounts] + [_normalize_temp_email_source(item) for item in temp_emails]
+    temp_emails = temp_emails_repo.load_temp_emails(visible_only=True, status="active")
+    sources = [_normalize_account_source(acc) for acc in accounts] + [
+        _normalize_temp_email_source(item) for item in temp_emails
+    ]
+    deduped: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for source in sources:
+        key = (str(source.get("source_type") or ""), str(source.get("source_key") or ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(source)
+    return deduped
 
 
 def _is_account_notification_participant(account: dict[str, Any]) -> bool:
@@ -98,11 +120,10 @@ def _is_account_notification_participant(account: dict[str, Any]) -> bool:
 
 
 def _is_source_notification_enabled(source: dict[str, Any]) -> bool:
-    if source["source_type"] != SOURCE_ACCOUNT:
-        return True
-
     account = source.get("account") or {}
-    return _is_account_notification_participant(account)
+    if account:
+        return _is_account_notification_participant(account)
+    return True
 
 
 def bootstrap_channel_cursors(channel: str, *, cursor_value: str | None = None) -> None:
@@ -208,7 +229,9 @@ def _fetch_temp_email_messages(source: dict[str, Any], since: str) -> list[dict[
     # 忽略返回值（_message_summary 缺少 content/html_content 字段），
     # 后续直接从 DB 读取完整行数据。
     try:
-        TempMailService().list_messages(address, sync_remote=sync_remote)
+        mailbox = source.get("temp_email") if source.get("account") else address
+        mailbox = mailbox or address
+        TempMailService().list_messages(mailbox, sync_remote=sync_remote)
     except (TempMailError, Exception):
         logger.warning(
             "[notification_dispatch] temp email sync failed address=%s",
@@ -332,9 +355,6 @@ def send_business_webhook_notification(
 
 
 def _record_telegram_legacy_delivery(source: dict[str, Any], message_key: str) -> None:
-    if source["source_type"] != SOURCE_ACCOUNT:
-        return
-
     account_id = source.get("account", {}).get("id")
     if not account_id:
         return
@@ -544,7 +564,9 @@ def _build_active_channels_for_source(
             )
         )
 
-    if telegram_runtime is not None and source["source_type"] == SOURCE_ACCOUNT:
+    # 账号型 CF 临时邮箱在通知源上表现为 temp_email，但仍有 accounts.id；
+    # 保留 Telegram 能力，避免它因统一读信路由而被意外排除。
+    if telegram_runtime is not None and (source["source_type"] == SOURCE_ACCOUNT or source.get("account")):
         active_channels.append(
             (
                 CHANNEL_TELEGRAM,

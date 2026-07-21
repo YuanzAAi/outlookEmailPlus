@@ -105,6 +105,34 @@ class TestExportEnhancedV2(unittest.TestCase):
                 if "@temp.example" in line and not line.startswith("#"):
                     self.assertNotIn("----", line)
 
+    def test_build_export_text_excludes_pool_managed_cloudflare_account(self):
+        with self.app.app_context():
+            from outlook_web.controllers.accounts import _build_export_text
+
+            content = _build_export_text(
+                [
+                    {
+                        "email": "normal@outlook.com",
+                        "password": "pwd",
+                        "client_id": "cid",
+                        "refresh_token": "rt",
+                        "account_type": "outlook",
+                        "provider": "outlook",
+                    },
+                    {
+                        "email": "pool-managed@example.com",
+                        "account_type": "temp_mail",
+                        "provider": "cloudflare_temp_mail",
+                        "temp_mail_meta": '{"provider_jwt":"secret"}',
+                    },
+                ]
+            )
+
+        self.assertIn("# 账号总数：1", content)
+        self.assertIn("normal@outlook.com", content)
+        self.assertNotIn("pool-managed@example.com", content)
+        self.assertNotIn("provider_jwt", content)
+
     def test_build_export_text_v2_mixed_counts(self):
         """混合账号统计正确"""
         with self.app.app_context():

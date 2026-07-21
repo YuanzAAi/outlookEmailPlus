@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from email.utils import parseaddr
 from typing import Any
 
+from outlook_web.repositories import accounts as accounts_repo
 from outlook_web.repositories import settings as settings_repo
 from outlook_web.repositories import temp_emails as temp_emails_repo
 from outlook_web.services.temp_mail_provider_custom import TempMailProviderReadError
@@ -167,17 +168,57 @@ class TempMailService:
     def _get_mailbox_descriptor(self, email_or_mailbox: str | dict[str, Any]) -> dict[str, Any]:
         if isinstance(email_or_mailbox, dict):
             if email_or_mailbox.get("kind") == temp_emails_repo.TEMP_MAIL_KIND:
+                if str(email_or_mailbox.get("source") or "").strip() == temp_emails_repo.ACCOUNT_BACKED_TEMP_MAIL_SOURCE:
+                    account = accounts_repo.get_account_by_email(str(email_or_mailbox.get("email") or ""))
+                    if (
+                        str((account or {}).get("provider") or "").strip().lower()
+                        != settings_repo.CLOUDFLARE_TEMP_MAIL_PROVIDER
+                    ):
+                        raise TempMailError("TEMP_EMAIL_NOT_FOUND", "临时邮箱不存在", status=404)
+                    from outlook_web.services.mailbox_resolver import build_account_backed_temp_mailbox
+
+                    email_or_mailbox = build_account_backed_temp_mailbox(account, email_or_mailbox)
+                self._ensure_account_backed_message_parent(email_or_mailbox)
                 return email_or_mailbox
             if email_or_mailbox.get("record"):
-                return temp_emails_repo.build_temp_mailbox_descriptor(email_or_mailbox["record"])
+                return self._get_mailbox_descriptor(temp_emails_repo.build_temp_mailbox_descriptor(email_or_mailbox["record"]))
             if email_or_mailbox.get("email"):
-                return temp_emails_repo.build_temp_mailbox_descriptor(email_or_mailbox)
+                return self._get_mailbox_descriptor(temp_emails_repo.build_temp_mailbox_descriptor(email_or_mailbox))
 
         email_addr = str(email_or_mailbox or "").strip()
         descriptor = temp_emails_repo.get_temp_email_by_address(email_addr, view="descriptor")
+        if descriptor:
+            return self._get_mailbox_descriptor(descriptor)
         if not descriptor:
-            raise TempMailError("TEMP_EMAIL_NOT_FOUND", "临时邮箱不存在", status=404)
-        return descriptor
+            account = accounts_repo.get_account_by_email(email_addr)
+            if str((account or {}).get("provider") or "").strip().lower() == settings_repo.CLOUDFLARE_TEMP_MAIL_PROVIDER:
+                from outlook_web.services.mailbox_resolver import build_account_backed_temp_mailbox
+
+                mailbox = build_account_backed_temp_mailbox(account)
+                self._ensure_account_backed_message_parent(mailbox)
+                return mailbox
+        raise TempMailError("TEMP_EMAIL_NOT_FOUND", "临时邮箱不存在", status=404)
+
+    def _ensure_account_backed_message_parent(self, mailbox: dict[str, Any]) -> None:
+        if not mailbox.get("account_backed"):
+            return
+        email_addr = str(mailbox.get("email") or "").strip()
+        meta = mailbox.get("meta") or {}
+        record = temp_emails_repo.ensure_account_backed_temp_email(
+            email_addr,
+            meta,
+            provider_name=settings_repo.CLOUDFLARE_TEMP_MAIL_PROVIDER,
+        )
+        if not record:
+            raise TempMailError("TEMP_EMAIL_ACCOUNT_CONFLICT", "账号对应的临时邮箱记录不可用", status=409)
+        mailbox["id"] = record.get("id")
+        mailbox["record"] = record
+        mailbox["meta"] = temp_emails_repo.merge_temp_email_meta(
+            mailbox.get("meta"),
+            record.get("meta_json"),
+            source=temp_emails_repo.ACCOUNT_BACKED_TEMP_MAIL_SOURCE,
+            provider_name=settings_repo.CLOUDFLARE_TEMP_MAIL_PROVIDER,
+        )
 
     @staticmethod
     def _provider_name(provider: Any) -> str:
@@ -260,26 +301,64 @@ class TempMailService:
         provider_meta["provider_debug"] = provider_debug
 
         existing = temp_emails_repo.get_temp_email_by_address(email_addr)
+        account = accounts_repo.get_account_by_email(email_addr)
+        if (
+            existing
+            and account
+            and str(account.get("provider") or "").strip().lower() != settings_repo.CLOUDFLARE_TEMP_MAIL_PROVIDER
+        ):
+            raise TempMailError("TEMP_EMAIL_ACCOUNT_CONFLICT", "邮箱已被普通账号占用", status=409)
         if existing:
             canonical_email = str(existing.get("email") or email_addr)
-            temp_emails_repo.update_temp_email_provider_meta(
-                canonical_email,
-                provider_meta,
-                provider_name=settings_repo.CLOUDFLARE_TEMP_MAIL_PROVIDER,
-            )
+            if account:
+                if not temp_emails_repo.ensure_account_backed_temp_email(
+                    canonical_email,
+                    provider_meta,
+                    provider_name=settings_repo.CLOUDFLARE_TEMP_MAIL_PROVIDER,
+                ):
+                    raise TempMailError("TEMP_EMAIL_ACCOUNT_CONFLICT", "账号对应的临时邮箱记录不可用", status=409)
+                if not accounts_repo.update_account_temp_mail_meta(
+                    int(account["id"]),
+                    provider_meta,
+                    provider_name=settings_repo.CLOUDFLARE_TEMP_MAIL_PROVIDER,
+                ):
+                    raise TempMailError("TEMP_EMAIL_META_SAVE_FAILED", "临时邮箱凭据保存失败", status=500)
+            else:
+                temp_emails_repo.update_temp_email_provider_meta(
+                    canonical_email,
+                    provider_meta,
+                    provider_name=settings_repo.CLOUDFLARE_TEMP_MAIL_PROVIDER,
+                )
         else:
-            prefix, domain = email_addr.rsplit("@", 1)
-            self._create_or_load_mailbox_record(
-                email_addr=email_addr,
-                mailbox_type="user",
-                visible_in_ui=True,
-                source=TEMP_MAIL_SOURCE,
-                prefix=prefix,
-                domain=domain,
-                meta=provider_meta,
-                provider_name=settings_repo.CLOUDFLARE_TEMP_MAIL_PROVIDER,
-            )
-            canonical_email = email_addr
+            if account:
+                if str(account.get("provider") or "").strip().lower() != settings_repo.CLOUDFLARE_TEMP_MAIL_PROVIDER:
+                    raise TempMailError("TEMP_EMAIL_ACCOUNT_CONFLICT", "邮箱已被普通账号占用", status=409)
+                canonical_email = str(account.get("email") or email_addr)
+                if not temp_emails_repo.ensure_account_backed_temp_email(
+                    canonical_email,
+                    provider_meta,
+                    provider_name=settings_repo.CLOUDFLARE_TEMP_MAIL_PROVIDER,
+                ):
+                    raise TempMailError("TEMP_EMAIL_ACCOUNT_CONFLICT", "账号对应的临时邮箱记录不可用", status=409)
+                if not accounts_repo.update_account_temp_mail_meta(
+                    int(account["id"]),
+                    provider_meta,
+                    provider_name=settings_repo.CLOUDFLARE_TEMP_MAIL_PROVIDER,
+                ):
+                    raise TempMailError("TEMP_EMAIL_META_SAVE_FAILED", "临时邮箱凭据保存失败", status=500)
+            else:
+                prefix, domain = email_addr.rsplit("@", 1)
+                self._create_or_load_mailbox_record(
+                    email_addr=email_addr,
+                    mailbox_type="user",
+                    visible_in_ui=True,
+                    source=TEMP_MAIL_SOURCE,
+                    prefix=prefix,
+                    domain=domain,
+                    meta=provider_meta,
+                    provider_name=settings_repo.CLOUDFLARE_TEMP_MAIL_PROVIDER,
+                )
+                canonical_email = email_addr
 
         normalized_message = {
             "id": f"cf_{remote_message_id}",
@@ -298,11 +377,17 @@ class TempMailService:
         self._message_sync_at[canonical_email.casefold()] = time.monotonic()
 
         mailbox = temp_emails_repo.get_temp_email_by_address(canonical_email, view="descriptor") or {}
+        if account:
+            visible_in_ui = False
+            mailbox_type = "user"
+        else:
+            visible_in_ui = bool(mailbox.get("visible_in_ui"))
+            mailbox_type = str(mailbox.get("mailbox_type") or "")
         return {
             "email": canonical_email,
             "message_id": normalized_message["id"],
-            "visible_in_ui": bool(mailbox.get("visible_in_ui")),
-            "mailbox_type": str(mailbox.get("mailbox_type") or ""),
+            "visible_in_ui": visible_in_ui,
+            "mailbox_type": mailbox_type,
         }
 
     def _log_remote_sync_error(self, exc: Exception) -> None:
@@ -332,6 +417,27 @@ class TempMailService:
         provider_name = str(discovered.get("provider_name") or self._provider_name(provider)).strip() or None
         meta = discovered.get("meta") or {}
         existing = temp_emails_repo.get_temp_email_by_address(canonical_email)
+        account = accounts_repo.get_account_by_email(canonical_email)
+        if account:
+            if str(account.get("provider") or "").strip().lower() != settings_repo.CLOUDFLARE_TEMP_MAIL_PROVIDER:
+                raise TempMailError("TEMP_EMAIL_ACCOUNT_CONFLICT", "邮箱已被普通账号占用", status=409)
+            if not temp_emails_repo.ensure_account_backed_temp_email(
+                str(account.get("email") or canonical_email),
+                meta,
+                provider_name=provider_name,
+            ):
+                raise TempMailError("TEMP_EMAIL_ACCOUNT_CONFLICT", "账号对应的临时邮箱记录不可用", status=409)
+            if not accounts_repo.update_account_temp_mail_meta(
+                int(account["id"]),
+                meta,
+                provider_name=provider_name,
+            ):
+                raise TempMailError("TEMP_EMAIL_META_SAVE_FAILED", "临时邮箱凭据保存失败", status=500)
+            from outlook_web.services.mailbox_resolver import build_account_backed_temp_mailbox
+
+            refreshed = accounts_repo.get_account_by_id(int(account["id"])) or account
+            shadow = temp_emails_repo.get_temp_email_by_address(canonical_email, view="descriptor")
+            return build_account_backed_temp_mailbox(refreshed, shadow)
         if existing:
             temp_emails_repo.update_temp_email_provider_meta(
                 canonical_email,
@@ -421,8 +527,23 @@ class TempMailService:
                     email_addr = str(row.get("name") or row.get("address") or "").strip()
                     if not email_addr or "@" not in email_addr:
                         continue
-                    existing = temp_emails_repo.get_temp_email_by_address(email_addr)
                     meta = self._provider_meta_from_remote_row(provider, row)
+                    account = accounts_repo.get_account_by_email(email_addr)
+                    if account:
+                        if str(account.get("provider") or "").strip().lower() == settings_repo.CLOUDFLARE_TEMP_MAIL_PROVIDER:
+                            shadow = temp_emails_repo.ensure_account_backed_temp_email(
+                                str(account.get("email") or email_addr),
+                                meta,
+                                provider_name=self._provider_name(provider),
+                            )
+                            if shadow:
+                                accounts_repo.update_account_temp_mail_meta(
+                                    int(account["id"]),
+                                    meta,
+                                    provider_name=self._provider_name(provider),
+                                )
+                        continue
+                    existing = temp_emails_repo.get_temp_email_by_address(email_addr)
                     if existing:
                         temp_emails_repo.update_temp_email_provider_meta(
                             email_addr,
@@ -684,6 +805,12 @@ class TempMailService:
 
     def delete_mailbox(self, email_or_mailbox: str | dict[str, Any]) -> bool:
         mailbox = self._get_mailbox_descriptor(email_or_mailbox)
+        if mailbox.get("account_backed"):
+            raise TempMailError(
+                "TEMP_EMAIL_POOL_ACCOUNT_MANAGED",
+                "邮箱池管理的临时邮箱不能从临时邮箱接口删除",
+                status=403,
+            )
         capabilities = (mailbox.get("meta") or {}).get("provider_capabilities") or {}
         if bool(capabilities.get("delete_mailbox")):
             provider = self._get_provider(mailbox=mailbox)

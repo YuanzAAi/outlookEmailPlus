@@ -54,6 +54,50 @@ class MailboxResolverTests(unittest.TestCase):
         self.assertEqual(mailbox["email"], "user@resolver.test")
         self.assertEqual(mailbox["read_capability"], "graph")
 
+    def test_resolve_account_backed_cf_mailbox_skips_remote_discovery(self):
+        with self.app.app_context():
+            from outlook_web.db import get_db
+            from outlook_web.services import mailbox_resolver
+
+            db = get_db()
+            db.execute(
+                """
+                INSERT INTO accounts (
+                    email, password, client_id, refresh_token, group_id, status,
+                    account_type, provider, temp_mail_meta
+                ) VALUES (?, '', '', '', 1, 'active', 'temp_mail', 'cloudflare_temp_mail', ?)
+                """,
+                (
+                    "pool@resolver.test",
+                    '{"provider_name":"cloudflare_temp_mail","provider_jwt":"jwt"}',
+                ),
+            )
+            db.commit()
+            fake_service = MagicMock()
+            fake_service.is_managed_email.return_value = True
+            with patch.object(mailbox_resolver, "_temp_mail_service", return_value=fake_service):
+                mailbox = mailbox_resolver.resolve_mailbox("POOL@RESOLVER.TEST")
+
+        self.assertEqual(mailbox["kind"], "temp")
+        self.assertEqual(mailbox["read_capability"], "temp_provider")
+        fake_service.discover_user_mailbox.assert_not_called()
+
+    def test_orphan_account_backed_parent_is_not_publicly_resolvable(self):
+        with self.app.app_context():
+            from outlook_web.repositories import temp_emails as temp_emails_repo
+            from outlook_web.services import external_api, mailbox_resolver
+
+            temp_emails_repo.create_temp_email(
+                email_addr="orphan@resolver.test",
+                mailbox_type="user",
+                visible_in_ui=False,
+                source="cloudflare_account_temp_mail",
+                provider_name="cloudflare_temp_mail",
+            )
+
+            with self.assertRaises(external_api.AccountNotFoundError):
+                mailbox_resolver.resolve_mailbox("orphan@resolver.test")
+
     def test_resolve_mailbox_is_case_insensitive_and_returns_stored_account_email(self):
         with self.app.app_context():
             from outlook_web.db import get_db

@@ -266,6 +266,35 @@ def _load_temp_mailboxes(params: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], 
         view="record",
         order_by_latest_message=True,
     )
+    account_rows = get_db().execute("""
+        SELECT id, email, group_id, status, temp_mail_meta, created_at, updated_at
+        FROM accounts
+        WHERE COALESCE(status, 'active') = 'active'
+          AND COALESCE(provider, '') = 'cloudflare_temp_mail'
+        ORDER BY id DESC
+        """).fetchall()
+    known_emails = {str(record.get("email") or "").casefold() for record in records}
+    for row in account_rows:
+        email_addr = str(row["email"] or "").strip()
+        if not email_addr or email_addr.casefold() in known_emails:
+            continue
+        records.append(
+            {
+                "id": row["id"],
+                "account_id": row["id"],
+                "account_backed": True,
+                "email": email_addr,
+                "group_id": row["group_id"],
+                "status": row["status"] or "active",
+                "mailbox_type": "user",
+                "visible_in_ui": False,
+                "source": "cloudflare_temp_mail",
+                "provider_name": "cloudflare_temp_mail",
+                "meta_json": row["temp_mail_meta"] or "{}",
+                "created_at": row["created_at"] or "",
+                "updated_at": row["updated_at"] or "",
+            }
+        )
     account_query = str(params.get("account_query") or "").casefold()
     if account_query:
         records = [record for record in records if account_query in str(record.get("email") or "").casefold()]
@@ -394,11 +423,18 @@ def _scan_temp_mailbox(
     message_rows: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     email_addr = str(mailbox.get("email") or "")
+    raw_account_id = mailbox.get("account_id")
+    try:
+        account_id = int(raw_account_id) if raw_account_id is not None else None
+    except (TypeError, ValueError):
+        account_id = None
+    group_id = mailbox.get("group_id")
+    account_backed = bool(mailbox.get("account_backed") and account_id is not None)
     results: List[Dict[str, Any]] = []
     scanned_messages = 0
     if "inbox" not in set(params["folders"]):
         return {
-            "account_id": None,
+            "account_id": account_id,
             "email": email_addr,
             "results": results,
             "scanned_messages": scanned_messages,
@@ -420,9 +456,10 @@ def _scan_temp_mailbox(
         preview = re.sub(r"\s+", " ", str(row.get("content") or body)).strip()[:200]
         message = {
             "source_type": "temp",
-            "account_id": None,
+            "account_id": account_id,
             "email": email_addr,
-            "group_id": None,
+            "group_id": group_id,
+            "account_backed": account_backed,
             "message_id": str(row.get("message_id") or ""),
             "folder": "inbox",
             "from": str(row.get("from_address") or ""),
@@ -447,7 +484,7 @@ def _scan_temp_mailbox(
             results.append(message)
 
     return {
-        "account_id": None,
+        "account_id": account_id,
         "email": email_addr,
         "results": results,
         "scanned_messages": scanned_messages,

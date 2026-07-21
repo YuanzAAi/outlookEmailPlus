@@ -266,14 +266,15 @@ function renderPoolAdmin(data) {
         const statusInfo = statusLabelMap[status] || { text: status || 'NULL', cls: 'status-badge' };
         const isClaimed = status === 'claimed';
         const isNull = status === 'NULL' || !status;
-        const isInPool = !isNull;
+        const isInPool = typeof item.in_pool === 'boolean' ? item.in_pool : !isNull;
+        const isOutOfPool = !isInPool;
         const checked = __poolAdminState.selectedIds.has(item.id) ? 'checked' : '';
 
         // 行内操作：文字链接风格
         let actionsHtml = '';
         if (isClaimed) {
             actionsHtml = actionLink('强制释放', `confirmPoolAdminAction(${item.id}, 'force_release', '${item.email}')`, 'var(--clr-warn)');
-        } else if (isNull) {
+        } else if (isOutOfPool) {
             actionsHtml = actionLink('移入号池', `confirmPoolAdminAction(${item.id}, 'move_into_pool', '${item.email}')`);
         } else {
             actionsHtml = actionLink('移出号池', `confirmPoolAdminAction(${item.id}, 'move_out_of_pool', '${item.email}')`, 'var(--text-muted)');

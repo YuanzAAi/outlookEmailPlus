@@ -209,6 +209,10 @@
                 || String(result?.method_key || '').toLowerCase() === 'temp';
         }
 
+        function isAccountBackedTempMailSearchResult(result) {
+            return isTempMailSearchResult(result) && Boolean(result?.account_backed) && Number(result?.account_id) > 0;
+        }
+
         function mailSearchSourceLabel(result) {
             return isTempMailSearchResult(result) ? '临时邮箱' : '普通邮箱';
         }
@@ -601,6 +605,15 @@
         function selectedMailSearchAccountIds() {
             return Array.from(new Set(
                 selectedMailSearchResults()
+                    .filter(item => !isTempMailSearchResult(item) || isAccountBackedTempMailSearchResult(item))
+                    .map(item => Number(item.account_id))
+                    .filter(Boolean)
+            ));
+        }
+
+        function selectedMailSearchDeletableAccountIds() {
+            return Array.from(new Set(
+                selectedMailSearchResults()
                     .filter(item => !isTempMailSearchResult(item))
                     .map(item => Number(item.account_id))
                     .filter(Boolean)
@@ -612,14 +625,15 @@
             const count = document.getElementById('mailSearchSelectedCount');
             const messageCount = mailSearchState.selected.size;
             const accountCount = selectedMailSearchAccountIds().length;
+            const deletableAccountCount = selectedMailSearchDeletableAccountIds().length;
             if (bar) bar.style.display = messageCount ? 'flex' : 'none';
             if (count) count.textContent = messageCount
-                ? `已选 ${messageCount} 封 · ${accountCount} 个普通邮箱`
+                ? `已选 ${messageCount} 封 · ${accountCount} 个关联邮箱`
                 : '已选 0 封';
             const moveButton = document.getElementById('mailSearchMoveAccounts');
             const deleteAccountsButton = document.getElementById('mailSearchDeleteAccounts');
             if (moveButton) moveButton.disabled = accountCount === 0;
-            if (deleteAccountsButton) deleteAccountsButton.disabled = accountCount === 0;
+            if (deleteAccountsButton) deleteAccountsButton.disabled = deletableAccountCount === 0;
         }
 
         async function showMailSearchDetail(index) {
@@ -664,7 +678,7 @@
         async function openMailSearchMailbox(index) {
             const result = mailSearchState.results[index];
             if (!result) return;
-            if (isTempMailSearchResult(result)) {
+            if (isTempMailSearchResult(result) && !isAccountBackedTempMailSearchResult(result)) {
                 navigate('temp-emails');
                 if (typeof selectTempEmail === 'function') selectTempEmail(result.email);
                 return;
@@ -776,7 +790,7 @@
         }
 
         async function deleteSelectedMailSearchAccounts() {
-            const accountIds = selectedMailSearchAccountIds();
+            const accountIds = selectedMailSearchDeletableAccountIds();
             if (!accountIds.length || !window.confirm(`确定删除关联的 ${accountIds.length} 个邮箱账号吗？此操作不会撤销。`)) return;
             const response = await fetch('/api/accounts/batch-delete', {
                 method: 'POST',

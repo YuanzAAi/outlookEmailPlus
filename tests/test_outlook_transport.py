@@ -147,6 +147,26 @@ class OutlookTransportEndpointTests(unittest.TestCase):
             )
         self.assertEqual(row["preferred_verification_channel"], outlook_transport.IMAP_NEW)
 
+    @patch("outlook_web.controllers.accounts.outlook_transport.probe_account")
+    def test_probe_endpoint_skips_legacy_cf_provider(self, mock_probe):
+        with self.app.app_context():
+            from outlook_web.db import get_db
+
+            db = get_db()
+            db.execute(
+                "UPDATE accounts SET provider = 'cloudflare_temp_mail' WHERE email = ?",
+                (self.email,),
+            )
+            db.commit()
+
+        response = self.client.post("/api/accounts/probe-mail-methods", json={"emails": [self.email]})
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["summary"]["probed"], 0)
+        self.assertEqual(payload["summary"]["skipped"], 1)
+        mock_probe.assert_not_called()
+
     @patch("outlook_web.controllers.emails.imap_service.delete_emails_imap")
     def test_delete_endpoint_keeps_selected_imap_folder(self, mock_delete):
         with self.app.app_context():

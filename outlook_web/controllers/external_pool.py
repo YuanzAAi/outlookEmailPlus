@@ -8,13 +8,7 @@ from outlook_web.repositories import settings as settings_repo
 from outlook_web.security.auth import api_key_required, get_external_api_consumer
 from outlook_web.security.external_api_guard import external_api_guards
 from outlook_web.services import external_api as external_api_service
-from outlook_web.services.pool import (
-    PoolServiceError,
-    claim_random,
-    complete_claim,
-    get_pool_stats,
-    release_claim,
-)
+from outlook_web.services.pool import PoolServiceError, claim_random, complete_claim, get_pool_stats, release_claim
 
 
 def _audit(endpoint: str, status: str, *, details: dict[str, Any], email_addr: str = "") -> None:
@@ -98,6 +92,7 @@ def api_external_pool_claim_random():
     provider = body.get("provider")
     project_key = body.get("project_key")
     email_domain = body.get("email_domain")
+    consumer = get_external_api_consumer() or {}
 
     try:
         account = claim_random(
@@ -106,6 +101,7 @@ def api_external_pool_claim_random():
             provider=provider,
             project_key=project_key,
             email_domain=email_domain,
+            allowed_emails=consumer.get("allowed_emails") or [],
         )
         data = {
             "account_id": account["id"],
@@ -164,12 +160,14 @@ def api_external_pool_claim_release():
         return jsonify(external_api_service.fail("ACCOUNT_ID_INVALID", "account_id 必须为整数")), 400
 
     try:
+        consumer = get_external_api_consumer() or {}
         release_claim(
             account_id=account_id,
             claim_token=claim_token,
             caller_id=caller_id,
             task_id=task_id,
             reason=reason,
+            allowed_emails=consumer.get("allowed_emails") or [],
         )
         _audit(endpoint, "ok", details={"account_id": account_id})
         return jsonify(external_api_service.ok({"account_id": account_id, "pool_status": "available"}))
@@ -212,6 +210,7 @@ def api_external_pool_claim_complete():
         return jsonify(external_api_service.fail("ACCOUNT_ID_INVALID", "account_id 必须为整数")), 400
 
     try:
+        consumer = get_external_api_consumer() or {}
         new_status = complete_claim(
             account_id=account_id,
             claim_token=claim_token,
@@ -219,6 +218,7 @@ def api_external_pool_claim_complete():
             task_id=task_id,
             result=result,
             detail=detail,
+            allowed_emails=consumer.get("allowed_emails") or [],
         )
         _audit(
             endpoint,
@@ -252,7 +252,8 @@ def api_external_pool_stats():
     if access_resp is not None:
         return access_resp
     try:
-        stats = get_pool_stats()
+        consumer = get_external_api_consumer() or {}
+        stats = get_pool_stats(allowed_emails=consumer.get("allowed_emails") or [])
         _audit(endpoint, "ok", details={"snapshot": True})
         return jsonify(external_api_service.ok(stats))
     except Exception as exc:

@@ -35,6 +35,8 @@ class FrontendAccountTypeContractTests(unittest.TestCase):
         self.assertIn("const refresh = data.refresh_health || {};", overview_js)
         self.assertIn("const accountStatus = data.account_status || {};", overview_js)
         self.assertIn("最近刷新成功率", overview_js)
+        self.assertIn("今日临时收件", overview_js)
+        self.assertNotIn("ovT('今日收件')", overview_js)
         self.assertNotIn("function loadDashboard()", main_js)
 
     def test_group_cards_split_outlook_and_imap_status_rendering(self):
@@ -47,10 +49,13 @@ class FrontendAccountTypeContractTests(unittest.TestCase):
             groups_js,
         )
         self.assertIn(
-            "const defaultMethodLabel = supportsTokenRefresh ? 'Graph' : 'IMAP';",
+            "const defaultMethodLabel = isCfPoolAccount ? '临时邮箱' : (supportsTokenRefresh ? 'Graph' : 'IMAP');",
             groups_js,
         )
-        self.assertIn('let tokenBadge = `<span class="badge badge-gray">IMAP</span>`;', groups_js)
+        self.assertIn(
+            "let tokenBadge = `<span class=\"badge badge-gray\">${isCfPoolAccount ? '临时邮箱' : 'IMAP'}</span>`;",
+            groups_js,
+        )
         self.assertIn("if (supportsTokenRefresh) {", groups_js)
         self.assertIn(
             '<span class="account-api-tag">${acc.method || defaultMethodLabel}</span>',

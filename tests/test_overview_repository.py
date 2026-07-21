@@ -103,6 +103,50 @@ class OverviewSummaryRepositoryTests(OverviewRepositoryBaseTests):
             for key in ("available", "in_use", "cooldown", "total"):
                 self.assertIn(key, pool, f"pool_snapshot 缺少键: {key}")
 
+    def test_get_overview_summary_separates_account_backed_temp_and_merges_temp_pool_capacity(self):
+        with self.app.app_context():
+            from outlook_web.db import get_db
+            from outlook_web.repositories.overview import get_overview_summary
+
+            db = get_db()
+            before = get_overview_summary()
+            db.execute("""
+                INSERT INTO accounts (email, client_id, refresh_token, status, account_type, provider)
+                VALUES ('regular@overview-temp.test', 'cid', 'rt', 'active', 'outlook', 'outlook')
+                """)
+            db.execute("""
+                INSERT INTO accounts (
+                    email, client_id, refresh_token, status, account_type, provider, pool_status
+                ) VALUES ('cf@overview-temp.test', '', '', 'active', 'temp_mail', 'cloudflare_temp_mail', 'available')
+                """)
+            db.execute("""
+                INSERT INTO temp_emails (email, status, mailbox_type, visible_in_ui, pool_status)
+                VALUES
+                    ('available@overview-temp.test', 'active', 'user', 1, NULL),
+                    ('claimed@overview-temp.test', 'active', 'user', 1, 'claimed'),
+                    ('cf@overview-temp.test', 'active', 'user', 0, NULL)
+                """)
+            db.execute("""
+                UPDATE temp_emails
+                SET source = 'cloudflare_account_temp_mail',
+                    meta_json = '{"provider_name":"cloudflare_temp_mail"}'
+                WHERE email = 'cf@overview-temp.test'
+                """)
+            db.commit()
+
+            try:
+                after = get_overview_summary()
+                self.assertEqual(after["account_status"]["total"], before["account_status"]["total"] + 1)
+                self.assertEqual(after["account_status"]["active"], before["account_status"]["active"] + 1)
+                self.assertEqual(after["kpi"]["temp_emails_active"], before["kpi"]["temp_emails_active"] + 3)
+                self.assertEqual(after["pool_snapshot"]["available"], before["pool_snapshot"]["available"] + 2)
+                self.assertEqual(after["pool_snapshot"]["in_use"], before["pool_snapshot"]["in_use"] + 1)
+                self.assertEqual(after["pool_snapshot"]["total"], before["pool_snapshot"]["total"] + 3)
+            finally:
+                db.execute("DELETE FROM temp_emails WHERE email LIKE '%@overview-temp.test'")
+                db.execute("DELETE FROM accounts WHERE email LIKE '%@overview-temp.test'")
+                db.commit()
+
 
 class OverviewVerificationStatsRepositoryTests(OverviewRepositoryBaseTests):
     """R-02: get_verification_stats() 测试"""
@@ -237,6 +281,30 @@ class OverviewPoolStatsRepositoryTests(OverviewRepositoryBaseTests):
             # 至少有这些键（可以为 0）
             for op in ("claim", "complete", "release", "expire"):
                 self.assertIn(op, dist, f"operation_distribution 缺少键: {op}")
+
+    def test_get_pool_stats_merges_temp_mailbox_capacity_and_claim_duration(self):
+        with self.app.app_context():
+            from outlook_web.db import get_db
+            from outlook_web.repositories.overview import get_pool_stats
+
+            db = get_db()
+            before = get_pool_stats()["kpi"]
+            db.execute("""
+                INSERT INTO temp_emails (email, status, mailbox_type, visible_in_ui, pool_status, claimed_at)
+                VALUES
+                    ('available@overview-pool.test', 'active', 'user', 1, NULL, NULL),
+                    ('claimed@overview-pool.test', 'active', 'user', 1, 'claimed', datetime('now', '-2 minute'))
+                """)
+            db.commit()
+
+            try:
+                after = get_pool_stats()["kpi"]
+                self.assertEqual(after["available"], before["available"] + 1)
+                self.assertEqual(after["in_use"], before["in_use"] + 1)
+                self.assertGreaterEqual(after["max_claimed_duration_s"], 100)
+            finally:
+                db.execute("DELETE FROM temp_emails WHERE email LIKE '%@overview-pool.test'")
+                db.commit()
 
 
 class OverviewActivityStatsRepositoryTests(OverviewRepositoryBaseTests):

@@ -7,6 +7,8 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 
+from outlook_web.repositories import temp_emails as temp_emails_repo
+
 logger = logging.getLogger(__name__)
 
 # 邮箱池 Repository 层 — 邮箱领取/释放/完成的核心原子操作
@@ -32,6 +34,7 @@ RESULT_TO_POOL_STATUS: Dict[str, str] = {
 # 的自增 id 区分开——两张表各自自增会撞号。这里对 temp_emails.id 加一个大数偏移作为
 # 对外 account_id；claim-release / claim-complete 通过该偏移判定应操作哪张表。
 TEMP_POOL_ID_OFFSET = 1_000_000_000
+ACCOUNT_BACKED_TEMP_MAIL_SOURCE = temp_emails_repo.ACCOUNT_BACKED_TEMP_MAIL_SOURCE
 
 
 def is_temp_pool_account_id(account_id: int) -> bool:
@@ -215,6 +218,7 @@ def claim_atomic(
     exclude_recent_minutes: Optional[int] = None,
     project_key: Optional[str] = None,
     email_domain: Optional[str] = None,
+    allowed_emails: Optional[List[str]] = None,
 ) -> Optional[dict]:
     sql = """
         SELECT a.* FROM accounts a
@@ -251,6 +255,14 @@ def claim_atomic(
     if email_domain:
         sql += " AND a.email_domain = ? COLLATE NOCASE"
         params.append(email_domain.strip().lower())
+
+    normalized_allowed_emails = sorted(
+        {str(email or "").strip().lower() for email in (allowed_emails or []) if str(email or "").strip()}
+    )
+    if normalized_allowed_emails:
+        placeholders = ",".join("?" for _ in normalized_allowed_emails)
+        sql += f" AND LOWER(a.email) IN ({placeholders})"
+        params.extend(normalized_allowed_emails)
 
     # PR#27 + v22 语义变更: project_key 防同项目复用
     # v22 前：NOT EXISTS 即排除（含 claim trace），导致 release 后需删 usage 行（Bug #28）
@@ -365,9 +377,9 @@ def get_claim_context(
         """
         SELECT id, email, domain, claimed_at, pool_status
         FROM temp_emails
-        WHERE claim_token = ?
+        WHERE claim_token = ? AND COALESCE(source, '') != ?
         """,
-        (claim_token,),
+        (claim_token, ACCOUNT_BACKED_TEMP_MAIL_SOURCE),
     ).fetchone()
     if temp_row is None:
         return None
@@ -617,7 +629,7 @@ def recover_cooldown(conn: sqlite3.Connection, cooldown_seconds: int) -> int:
     return cursor.rowcount
 
 
-def get_stats(conn: sqlite3.Connection) -> dict:
+def get_stats(conn: sqlite3.Connection, *, allowed_emails: Optional[List[str]] = None) -> dict:
     pool_counts: dict = {
         "available": 0,
         "claimed": 0,
@@ -626,10 +638,21 @@ def get_stats(conn: sqlite3.Connection) -> dict:
         "frozen": 0,
         "retired": 0,
     }
-    rows = conn.execute("""
+    normalized_allowed_emails = sorted(
+        {str(email or "").strip().lower() for email in (allowed_emails or []) if str(email or "").strip()}
+    )
+
+    account_sql = """
         SELECT pool_status, COUNT(*) as cnt FROM accounts
-        GROUP BY pool_status
-        """).fetchall()
+        WHERE pool_status IS NOT NULL
+    """
+    account_params: list[str] = []
+    if normalized_allowed_emails:
+        placeholders = ",".join("?" for _ in normalized_allowed_emails)
+        account_sql += f" AND LOWER(email) IN ({placeholders})"
+        account_params.extend(normalized_allowed_emails)
+    account_sql += " GROUP BY pool_status"
+    rows = conn.execute(account_sql, account_params).fetchall()
     for row in rows:
         # external API 只暴露池内状态；NULL/池外账号不应出现在契约里。
         key = row["pool_status"]
@@ -637,11 +660,18 @@ def get_stats(conn: sqlite3.Connection) -> dict:
             pool_counts[key] = row["cnt"]
 
     # 临时邮箱池：所有 active 临时邮箱均视为可领取，未领取（pool_status 为 NULL）计入 available
-    temp_rows = conn.execute(f"""
+    temp_sql = f"""
         SELECT pool_status, COUNT(*) as cnt FROM temp_emails
         WHERE status = 'active' AND mailbox_type = '{_TEMP_POOL_MAILBOX_TYPE}'
-        GROUP BY pool_status
-        """).fetchall()
+          AND COALESCE(source, '') != ?
+    """
+    temp_params: list[str] = [ACCOUNT_BACKED_TEMP_MAIL_SOURCE]
+    if normalized_allowed_emails:
+        placeholders = ",".join("?" for _ in normalized_allowed_emails)
+        temp_sql += f" AND LOWER(email) IN ({placeholders})"
+        temp_params.extend(normalized_allowed_emails)
+    temp_sql += " GROUP BY pool_status"
+    temp_rows = conn.execute(temp_sql, temp_params).fetchall()
     for row in temp_rows:
         key = row["pool_status"] or "available"
         if key in pool_counts:
@@ -671,6 +701,7 @@ def claim_temp_mailbox_atomic(
     task_id: str,
     lease_seconds: int,
     email_domain: Optional[str] = None,
+    allowed_emails: Optional[List[str]] = None,
 ) -> Optional[dict]:
     """从 temp_emails 表原子领取一个可用临时邮箱，返回与 claim_atomic 一致结构的 dict 或 None。"""
     sql = f"""
@@ -678,12 +709,20 @@ def claim_temp_mailbox_atomic(
         WHERE status = 'active'
           AND mailbox_type = '{_TEMP_POOL_MAILBOX_TYPE}'
           AND (pool_status IS NULL OR pool_status = 'available')
+          AND COALESCE(source, '') != ?
     """
-    params: list = []
+    params: list = [ACCOUNT_BACKED_TEMP_MAIL_SOURCE]
     if email_domain:
         # 兼容 domain 为空的历史行：回退用 email 的 @ 后缀派生域名匹配
         sql += " AND lower(COALESCE(NULLIF(domain, '')," " substr(email, instr(email, '@') + 1))) = ?"
         params.append(email_domain.strip().lower())
+    normalized_allowed_emails = sorted(
+        {str(email or "").strip().lower() for email in (allowed_emails or []) if str(email or "").strip()}
+    )
+    if normalized_allowed_emails:
+        placeholders = ",".join("?" for _ in normalized_allowed_emails)
+        sql += f" AND LOWER(email) IN ({placeholders})"
+        params.extend(normalized_allowed_emails)
     sql += " ORDER BY RANDOM() LIMIT 1"
 
     conn.execute("BEGIN IMMEDIATE")
@@ -751,9 +790,9 @@ def get_temp_mailbox_pool_row(conn: sqlite3.Connection, temp_id: int) -> Optiona
         """
         SELECT id, email, claim_token, claimed_by, pool_status
         FROM temp_emails
-        WHERE id = ?
+        WHERE id = ? AND COALESCE(source, '') != ?
         """,
-        (temp_id,),
+        (temp_id, ACCOUNT_BACKED_TEMP_MAIL_SOURCE),
     ).fetchone()
     return dict(row) if row is not None else None
 
@@ -778,9 +817,9 @@ def release_temp_mailbox(
             lease_expires_at = NULL,
             claim_token = NULL,
             updated_at = ?
-        WHERE id = ?
+        WHERE id = ? AND COALESCE(source, '') != ?
         """,
-        (now_str, temp_id),
+        (now_str, temp_id, ACCOUNT_BACKED_TEMP_MAIL_SOURCE),
     )
     conn.execute("COMMIT")
 
@@ -808,9 +847,9 @@ def complete_temp_mailbox(
             claim_token = NULL,
             last_result = ?,
             updated_at = ?
-        WHERE id = ?
+        WHERE id = ? AND COALESCE(source, '') != ?
         """,
-        (new_pool_status, result, now_str, temp_id),
+        (new_pool_status, result, now_str, temp_id, ACCOUNT_BACKED_TEMP_MAIL_SOURCE),
     )
     conn.execute("COMMIT")
     return new_pool_status
@@ -830,8 +869,9 @@ def expire_stale_temp_claims(conn: sqlite3.Connection) -> int:
             last_result = 'lease_expired',
             updated_at = ?
         WHERE pool_status = 'claimed' AND lease_expires_at < ?
+          AND COALESCE(source, '') != ?
         """,
-        (now_str, now_str),
+        (now_str, now_str, ACCOUNT_BACKED_TEMP_MAIL_SOURCE),
     )
     conn.commit()
     return cursor.rowcount
@@ -845,8 +885,9 @@ def recover_cooldown_temp(conn: sqlite3.Connection, cooldown_seconds: int) -> in
         """
         UPDATE temp_emails SET pool_status = 'available', updated_at = ?
         WHERE pool_status = 'cooldown' AND updated_at < ?
+          AND COALESCE(source, '') != ?
         """,
-        (now_str, cutoff_str),
+        (now_str, cutoff_str, ACCOUNT_BACKED_TEMP_MAIL_SOURCE),
     )
     conn.commit()
     return cursor.rowcount

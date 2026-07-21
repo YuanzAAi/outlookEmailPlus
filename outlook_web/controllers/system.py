@@ -17,7 +17,6 @@ from outlook_web.db import (
     DB_SCHEMA_VERSION_KEY,
     create_sqlite_connection,
 )
-from outlook_web.repositories import accounts as accounts_repo
 from outlook_web.repositories import settings as settings_repo
 from outlook_web.security.auth import api_key_required, login_required
 from outlook_web.security.external_api_guard import external_api_guards
@@ -373,6 +372,7 @@ def api_external_health() -> Any:
             "server_time_utc": utcnow().isoformat() + "Z",
             "database": "ok" if db_ok else "error",
             "upstream_probe_ok": probe_summary.get("upstream_probe_ok"),
+            "probe_method": probe_summary.get("probe_method") or "",
             "last_probe_at": probe_summary.get("last_probe_at") or "",
             "last_probe_error": probe_summary.get("last_probe_error") or "",
         }
@@ -1100,18 +1100,51 @@ def api_external_capabilities() -> Any:
     public_mode = settings_repo.get_external_api_public_mode()
     restricted = []
     all_features = [
+        "health",
         "message_list",
+        "message_latest",
         "message_detail",
         "raw_content",
         "verification_code",
         "verification_link",
         "wait_message",
+        "async_probe",
+        "account_status",
+        "temp_mail_tasks",
+        "mailbox_pool",
+        "temp_mail_inbound",
+        "temp_mail_apply",
+        "temp_mail_finish",
+        "temp_mail_send",
+        "temp_mail_sent",
+        "pool_claim_random",
+        "pool_claim_release",
+        "pool_claim_complete",
+        "pool_stats",
     ]
+    if not settings_repo.get_pool_external_enabled():
+        restricted.extend(
+            [
+                "mailbox_pool",
+                "pool_claim_random",
+                "pool_claim_release",
+                "pool_claim_complete",
+                "pool_stats",
+            ]
+        )
     if public_mode:
         if settings_repo.get_external_api_disable_raw_content():
             restricted.append("raw_content")
         if settings_repo.get_external_api_disable_wait_message():
             restricted.append("wait_message")
+        pool_feature_settings = {
+            "pool_claim_random": settings_repo.get_external_api_disable_pool_claim_random,
+            "pool_claim_release": settings_repo.get_external_api_disable_pool_claim_release,
+            "pool_claim_complete": settings_repo.get_external_api_disable_pool_claim_complete,
+            "pool_stats": settings_repo.get_external_api_disable_pool_stats,
+        }
+        restricted.extend(feature for feature, getter in pool_feature_settings.items() if getter())
+    restricted = list(dict.fromkeys(restricted))
     available = [f for f in all_features if f not in restricted]
     data = {
         "service": "outlook-email-plus",
@@ -1119,6 +1152,8 @@ def api_external_capabilities() -> Any:
         "public_mode": public_mode,
         "features": available,
         "restricted_features": restricted,
+        "mailbox_types": ["account", "temp"],
+        "read_methods": ["graph", "imap_generic", "temp_mail"],
     }
     external_api_service.audit_external_api_access(
         action="external_api_access",
@@ -1145,7 +1180,7 @@ def api_external_account_status() -> Any:
         )
         return jsonify(external_api_service.fail("INVALID_PARAM", "email 参数不合法")), 400
     try:
-        external_api_service.ensure_external_email_scope(email_addr)
+        data = external_api_service.get_mailbox_status_for_external(email_addr)
     except external_api_service.ExternalApiError as exc:
         external_api_service.audit_external_api_access(
             action="external_api_access",
@@ -1156,52 +1191,14 @@ def api_external_account_status() -> Any:
         )
         return jsonify(external_api_service.fail(exc.code, exc.message, data=exc.data)), exc.status
 
-    account = accounts_repo.get_account_by_email(email_addr)
-    if not account:
-        external_api_service.audit_external_api_access(
-            action="external_api_access",
-            email_addr=email_addr,
-            endpoint="/api/external/account-status",
-            status="error",
-            details={"code": "ACCOUNT_NOT_FOUND"},
-        )
-        return jsonify(external_api_service.fail("ACCOUNT_NOT_FOUND", "账号不存在", data={"email": email_addr})), 404
-
-    account_type = (account.get("account_type") or "outlook").strip().lower()
-    provider = (account.get("provider") or account_type or "outlook").strip().lower()
-    preferred_method = "imap_generic" if account_type == "imap" else "graph"
-    can_read = external_api_service.can_account_read(account)
-
-    data = {
-        "email": email_addr,
-        "exists": True,
-        "account_type": account_type,
-        "provider": provider,
-        "email_domain": account.get("email_domain") or "",
-        "group_id": account.get("group_id"),
-        "status": account.get("status"),
-        "last_refresh_at": account.get("last_refresh_at"),
-        "preferred_method": preferred_method,
-        "can_read": can_read,
-        "upstream_probe_ok": None,
-        "probe_method": "",
-        "last_probe_at": "",
-        "last_probe_error": "",
-    }
-    if can_read:
-        probe_summary = external_api_service.probe_account_upstream(account)
-        data["upstream_probe_ok"] = probe_summary.get("upstream_probe_ok")
-        data["probe_method"] = probe_summary.get("probe_method") or preferred_method
-        data["last_probe_at"] = probe_summary.get("last_probe_at") or ""
-        data["last_probe_error"] = probe_summary.get("last_probe_error") or ""
     external_api_service.audit_external_api_access(
         action="external_api_access",
         email_addr=email_addr,
         endpoint="/api/external/account-status",
         status="ok",
         details={
-            "preferred_method": preferred_method,
-            "can_read": can_read,
+            "preferred_method": data["preferred_method"],
+            "can_read": data["can_read"],
             "upstream_probe_ok": data["upstream_probe_ok"],
         },
     )

@@ -120,14 +120,12 @@ def load_accounts(group_id: int = None) -> List[Dict]:
             (group_id,),
         )
     else:
-        cursor = db.execute(
-            """
+        cursor = db.execute("""
             SELECT a.*, g.name as group_name, g.color as group_color
             FROM accounts a
             LEFT JOIN groups g ON a.group_id = g.id
             ORDER BY a.created_at DESC
-        """
-        )
+        """)
     rows = cursor.fetchall()
     return _hydrate_accounts(rows, db)
 
@@ -148,8 +146,7 @@ def _build_account_list_where(
     normalized_search = str(search or "").strip().lower()
     if normalized_search:
         like_value = f"%{normalized_search}%"
-        where_clauses.append(
-            """
+        where_clauses.append("""
             (
                 LOWER(COALESCE(a.email, '')) LIKE ?
                 OR LOWER(COALESCE(a.remark, '')) LIKE ?
@@ -161,23 +158,20 @@ def _build_account_list_where(
                       AND LOWER(COALESCE(t_search.name, '')) LIKE ?
                 )
             )
-            """
-        )
+            """)
         params.extend([like_value, like_value, like_value])
 
     normalized_tag_ids = [int(tag_id) for tag_id in tag_ids if int(tag_id) > 0]
     if normalized_tag_ids:
         placeholders = ",".join(["?"] * len(normalized_tag_ids))
-        where_clauses.append(
-            f"""
+        where_clauses.append(f"""
             EXISTS (
                 SELECT 1
                 FROM account_tags at_filter
                 WHERE at_filter.account_id = a.id
                   AND at_filter.tag_id IN ({placeholders})
             )
-            """
-        )
+            """)
         params.extend(normalized_tag_ids)
 
     if not where_clauses:
@@ -368,6 +362,42 @@ def update_refresh_token_if_changed(account_id: int, new_refresh_token: str) -> 
         return True
     except Exception:
         return False
+
+
+def update_account_temp_mail_meta(
+    account_id: int,
+    meta: Dict[str, Any],
+    *,
+    provider_name: Optional[str] = None,
+) -> bool:
+    """合并 account-backed 临时邮箱的 Provider 元数据。"""
+    from outlook_web.repositories import temp_emails as temp_emails_repo
+
+    db = get_db()
+    row = db.execute(
+        "SELECT provider, temp_mail_meta FROM accounts WHERE id = ?",
+        (account_id,),
+    ).fetchone()
+    if not row:
+        return False
+
+    source = str(row["provider"] or temp_emails_repo.DEFAULT_TEMP_MAIL_SOURCE).strip()
+    merged = temp_emails_repo.merge_temp_email_meta(
+        row["temp_mail_meta"],
+        meta,
+        source=source,
+        provider_name=provider_name,
+    )
+    cursor = db.execute(
+        """
+        UPDATE accounts
+        SET temp_mail_meta = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        """,
+        (temp_emails_repo.serialize_temp_email_meta(merged, source=source), account_id),
+    )
+    db.commit()
+    return cursor.rowcount > 0
 
 
 def touch_last_refresh_at(account_id: int) -> bool:
@@ -716,13 +746,13 @@ def update_telegram_cursor(account_id: int, checked_at: str) -> None:
 def get_telegram_push_accounts() -> List[Dict]:
     """返回所有 telegram_push_enabled=1 且处于 active 状态的账号。"""
     db = get_db()
-    rows = db.execute(
-        """SELECT a.id, a.email, a.account_type, a.provider, a.client_id, a.refresh_token,
+    rows = db.execute("""SELECT a.id, a.email, a.account_type, a.provider, a.client_id, a.refresh_token,
                   a.imap_host, a.imap_port, a.imap_password,
                   a.telegram_last_checked_at, a.group_id,
                   g.proxy_url
            FROM accounts a
            LEFT JOIN groups g ON a.group_id = g.id
-           WHERE a.telegram_push_enabled = 1 AND a.status = 'active'"""
-    ).fetchall()
+           WHERE a.telegram_push_enabled = 1
+             AND a.status = 'active'
+             AND COALESCE(a.provider, '') != 'cloudflare_temp_mail'""").fetchall()
     return [dict(r) for r in rows]

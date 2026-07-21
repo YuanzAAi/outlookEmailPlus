@@ -365,6 +365,14 @@ class MailSearchFrontendContractTests(unittest.TestCase):
         self.assertIn("/api/temp-emails/${encodeURIComponent(result.email)}/messages/", self.script)
         self.assertIn(".filter(item => !isTempMailSearchResult(item))", self.script)
 
+    def test_account_backed_temp_results_support_group_actions_without_account_deletion(self):
+        self.assertIn("function isAccountBackedTempMailSearchResult(result)", self.script)
+        self.assertIn("selectedMailSearchDeletableAccountIds", self.script)
+        self.assertIn(
+            "!isTempMailSearchResult(item) || isAccountBackedTempMailSearchResult(item)",
+            self.script,
+        )
+
 
 class MailSearchEndpointTests(unittest.TestCase):
     @classmethod
@@ -380,6 +388,7 @@ class MailSearchEndpointTests(unittest.TestCase):
             db = get_db()
             db.execute("DELETE FROM temp_email_messages WHERE email_address LIKE '%@search-temp.test'")
             db.execute("DELETE FROM temp_emails WHERE email LIKE '%@search-temp.test'")
+            db.execute("DELETE FROM accounts WHERE email LIKE '%@search-temp.test'")
             db.commit()
         self.client = self.app.test_client()
         with self.client.session_transaction() as session:
@@ -456,6 +465,65 @@ class MailSearchEndpointTests(unittest.TestCase):
         regular_scanner.assert_not_called()
         http_session.assert_not_called()
         per_mailbox_loader.assert_not_called()
+
+    def test_temp_scope_includes_local_messages_for_account_backed_cf_mailbox(self):
+        email_addr = "pool-only@search-temp.test"
+        with self.app.app_context():
+            from outlook_web.db import get_db
+
+            db = get_db()
+            cursor = db.execute(
+                """
+                INSERT INTO accounts (
+                    email, password, client_id, refresh_token, group_id,
+                    status, account_type, provider, pool_status, temp_mail_meta
+                ) VALUES (?, '', '', '', 1, 'active', 'temp_mail', 'cloudflare_temp_mail', 'claimed', ?)
+                """,
+                (email_addr, '{"provider_name":"cloudflare_temp_mail","provider_jwt":"jwt"}'),
+            )
+            account_id = int(cursor.lastrowid)
+            db.execute(
+                """
+                INSERT INTO temp_emails (
+                    email, status, mailbox_type, visible_in_ui, source, prefix, domain, meta_json
+                ) VALUES (?, 'active', 'user', 0, 'cloudflare_account_temp_mail', ?, ?, ?)
+                """,
+                (email_addr, "pool-only", "search-temp.test", '{"provider_name":"cloudflare_temp_mail"}'),
+            )
+            db.execute(
+                """
+                INSERT INTO temp_email_messages
+                    (message_id, email_address, from_address, subject, content, html_content, has_html, timestamp, raw_content)
+                VALUES (?, ?, ?, ?, ?, '', 0, ?, '{}')
+                """,
+                ("pool-only-message", email_addr, "sender@example.com", "Pool marker", "PoolOnly-9933", 1784462400),
+            )
+            db.commit()
+        params = mail_search._normalize_params(
+            {
+                "query": "PoolOnly-9933",
+                "fields": ["body"],
+                "folders": ["inbox"],
+                "mailbox_scope": "temp",
+                "account_query": email_addr,
+            }
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir, patch(
+            "outlook_web.services.mail_search._job_dir", return_value=Path(temp_dir)
+        ):
+            job_id = "e" * 32
+            mail_search._atomic_write(mail_search._job_path(job_id), self._queued_job(job_id, params))
+            mail_search._run_job(self.app, job_id)
+            result = mail_search.get_job(job_id)
+
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["progress"]["total_accounts"], 1)
+        self.assertEqual(result["results"][0]["email"], email_addr)
+        self.assertEqual(result["results"][0]["source_type"], "temp")
+        self.assertEqual(result["results"][0]["account_id"], account_id)
+        self.assertEqual(result["results"][0]["group_id"], 1)
+        self.assertTrue(result["results"][0]["account_backed"])
 
     def test_all_scope_job_merges_temp_and_regular_results(self):
         email_addr = "all-scope@search-temp.test"

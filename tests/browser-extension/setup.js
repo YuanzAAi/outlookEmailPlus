@@ -90,4 +90,5 @@ beforeEach(() => {
 
 afterEach(() => {
   delete global.chrome;
+  delete global.fetch;
 });

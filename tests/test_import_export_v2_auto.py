@@ -492,6 +492,7 @@ class ImportExportV2AutoTests(unittest.TestCase):
         imap_email = f"exp_g_{unique}@gmail.com"
         tmp1 = f"tmp_{unique}_1@temp.example"
         tmp2 = f"tmp_{unique}_2@temp.example"
+        hidden_task = f"hidden_{unique}@temp.example"
 
         conn = self.module.create_sqlite_connection()
         try:
@@ -534,9 +535,17 @@ class ImportExportV2AutoTests(unittest.TestCase):
             )
             conn.execute("INSERT OR IGNORE INTO temp_emails (email) VALUES (?)", (tmp1,))
             conn.execute("INSERT OR IGNORE INTO temp_emails (email) VALUES (?)", (tmp2,))
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO temp_emails
+                    (email, status, mailbox_type, visible_in_ui, task_token, consumer_key)
+                VALUES (?, 'active', 'task', 0, ?, ?)
+                """,
+                (hidden_task, f"task_{unique}", "consumer:test"),
+            )
             conn.commit()
 
-            temp_total = conn.execute("SELECT COUNT(*) as c FROM temp_emails").fetchone()["c"]
+            temp_total = conn.execute("SELECT COUNT(*) as c FROM temp_emails WHERE visible_in_ui = 1").fetchone()["c"]
             acc_total = conn.execute("SELECT COUNT(*) as c FROM accounts WHERE group_id = ?", (group_id,)).fetchone()["c"]
         finally:
             conn.close()
@@ -572,6 +581,7 @@ class ImportExportV2AutoTests(unittest.TestCase):
         self.assertIn("# === 临时邮箱（自建）===", body2)
         self.assertIn(tmp1, body2)
         self.assertIn(tmp2, body2)
+        self.assertNotIn(hidden_task, body2)
         self.assertIn(outlook_email, body2)
         self.assertIn(imap_email, body2)
         self.assertTrue(body2.endswith("\n"))

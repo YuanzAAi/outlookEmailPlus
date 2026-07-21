@@ -279,16 +279,15 @@
                 const initial = (acc.email || '?')[0].toUpperCase();
                 const supportsTokenRefresh = isRefreshableOutlookAccount(acc);
                 const isFailed = supportsTokenRefresh && acc.last_refresh_status === 'failed';
-                const defaultMethodLabel = supportsTokenRefresh ? 'Graph' : 'IMAP';
+                const isCfPoolAccount = String(acc.provider || '').toLowerCase() === 'cloudflare_temp_mail';
+                const defaultMethodLabel = isCfPoolAccount ? '临时邮箱' : (supportsTokenRefresh ? 'Graph' : 'IMAP');
                 const gradient = avatarGradients[index % avatarGradients.length];
                 const providerLabel = getProviderLabel(acc.provider || acc.account_type || 'outlook');
                 const providerTagHtml = `<span class="account-provider-tag">${escapeHtml(providerLabel)}</span>`;
                 const notificationEnabled = acc.notification_enabled !== undefined
                     ? !!acc.notification_enabled
                     : !!acc.telegram_push_enabled;
-                const isCfPoolAccount = String(acc.provider || '').toLowerCase() === 'cloudflare_temp_mail';
-
-                let tokenBadge = `<span class="badge badge-gray">IMAP</span>`;
+                let tokenBadge = `<span class="badge badge-gray">${isCfPoolAccount ? '临时邮箱' : 'IMAP'}</span>`;
                 if (supportsTokenRefresh) {
                     tokenBadge = `<span class="badge badge-gray">– ${translateAppTextLocal('未知')}</span>`;
                     if (acc.token_status === 'valid') {
@@ -1017,4 +1016,3 @@
                 renderAccountList(accountsCache[currentGroupId]);
             }
         });
-

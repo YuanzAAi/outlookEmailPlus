@@ -63,7 +63,7 @@ class OverviewSummaryApiTests(OverviewApiBaseTests):
 
     def test_get_summary_unauthorized_returns_401(self):
         """A-01 鉴权: 未登录时返回 401"""
-        resp = self.client.get(self._URL)
+        resp = self.app.test_client().get(self._URL)
         self.assertEqual(resp.status_code, 401)
 
     def test_get_summary_authed_returns_200(self):
@@ -95,7 +95,7 @@ class OverviewVerificationApiTests(OverviewApiBaseTests):
 
     def test_get_verification_unauthorized_returns_401(self):
         """A-02 鉴权: 未登录时返回 401"""
-        resp = self.client.get(self._URL)
+        resp = self.app.test_client().get(self._URL)
         self.assertEqual(resp.status_code, 401)
 
     def test_get_verification_authed_returns_200(self):
@@ -134,7 +134,7 @@ class OverviewExternalApiTests(OverviewApiBaseTests):
 
     def test_get_external_api_unauthorized_returns_401(self):
         """A-03 鉴权: 未登录时返回 401"""
-        resp = self.client.get(self._URL)
+        resp = self.app.test_client().get(self._URL)
         self.assertEqual(resp.status_code, 401)
 
     def test_get_external_api_authed_returns_200(self):
@@ -165,7 +165,7 @@ class OverviewPoolApiTests(OverviewApiBaseTests):
 
     def test_get_pool_unauthorized_returns_401(self):
         """A-04 鉴权: 未登录时返回 401"""
-        resp = self.client.get(self._URL)
+        resp = self.app.test_client().get(self._URL)
         self.assertEqual(resp.status_code, 401)
 
     def test_get_pool_authed_returns_200(self):
@@ -190,7 +190,7 @@ class OverviewActivityApiTests(OverviewApiBaseTests):
 
     def test_get_activity_unauthorized_returns_401(self):
         """A-05 鉴权: 未登录时返回 401"""
-        resp = self.client.get(self._URL)
+        resp = self.app.test_client().get(self._URL)
         self.assertEqual(resp.status_code, 401)
 
     def test_get_activity_authed_returns_200(self):

@@ -21,6 +21,13 @@
             window.sortEmailsByNewestFirst = sortEmailsByNewestFirst;
         }
 
+        function resolveMailboxMethodKey(method) {
+            const normalized = String(method || '').trim().toLowerCase();
+            if (normalized === 'graph' || normalized === 'graph api') return 'graph';
+            if (normalized === 'temp' || normalized === 'temp mail' || normalized === 'temp_mail') return 'temp';
+            return normalized || 'imap';
+        }
+
         // 加载邮件列表
         async function loadEmails(email, forceRefresh = false) {
             const container = document.getElementById('emailList');
@@ -75,7 +82,7 @@
                 if (data.success) {
                     const sortedEmails = sortEmailsByNewestFirst(data.emails || []);
                     currentEmails = sortedEmails;
-                    currentMethod = data.method === 'Graph API' ? 'graph' : 'imap';
+                    currentMethod = resolveMailboxMethodKey(data.method);
                     hasMoreEmails = data.has_more;
                     if (typeof syncAccountSummaryToAccountCache === 'function' && data.account_summary) {
                         syncAccountSummaryToAccountCache(email, data.account_summary);
@@ -1083,4 +1090,3 @@
                 window.location.href = '/logout';
             }
         }
-

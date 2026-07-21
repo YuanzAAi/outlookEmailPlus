@@ -125,7 +125,7 @@
         '最近耗时': 'Last Duration',
         '今日快捷数字': 'Today Snapshot',
         '当天': 'Today',
-        '今日收件': 'Emails Received Today',
+        '今日临时收件': 'Temp Emails Received Today',
         '验证码提取': 'Verification Extracts',
         '活跃临时邮箱': 'Active Temp Mailboxes',
         '近 7 天提取次数': 'Extracts in Last 7 Days',

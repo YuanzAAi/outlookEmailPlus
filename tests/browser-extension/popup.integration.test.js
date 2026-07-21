@@ -116,4 +116,63 @@ describe('browser-extension/popup integration', () => {
     expect(byId('profile-password').value).toHaveLength(14);
     expect(byId('profile-full-name').value).toMatch(/\S+\s+\S+/);
   });
+
+  test('verification request carries claim token and retries a temporary miss', async () => {
+    await bootstrapPopup({
+      config: {
+        serverUrl: 'http://localhost:5001',
+        apiKey: 'test-key',
+        defaultProjectKey: '',
+      },
+      currentTask: {
+        email: 'claimed@example.com',
+        taskId: 'task-1',
+        claimToken: 'clm_test_token',
+        claimedAt: '2026-04-20T00:00:00.000Z',
+      },
+    });
+
+    let calls = 0;
+    global.fetch = jest.fn(async () => {
+      calls += 1;
+      if (calls === 1) {
+        return {
+          ok: false,
+          status: 404,
+          json: async () => ({
+            success: false,
+            code: 'VERIFICATION_CODE_NOT_FOUND',
+            message: '未找到验证码',
+          }),
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          success: true,
+          data: { verification_code: '123456' },
+        }),
+      };
+    });
+
+    jest.useFakeTimers();
+    try {
+      byId('btn-get-code').click();
+      await Promise.resolve();
+      await Promise.resolve();
+      await jest.advanceTimersByTimeAsync(2000);
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    } finally {
+      jest.useRealTimers();
+    }
+
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+    const firstUrl = global.fetch.mock.calls[0][0];
+    expect(firstUrl).toContain('claim_token=clm_test_token');
+    expect(firstUrl).toContain('email=claimed%40example.com');
+    expect(byId('result-value').textContent).toBe('123456');
+  });
 });
