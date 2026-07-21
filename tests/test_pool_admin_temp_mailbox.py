@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from pathlib import Path
 import unittest
 import uuid
+from pathlib import Path
 
 from tests._import_app import clear_login_attempts, import_web_app_module
 
@@ -107,10 +107,14 @@ class PoolAdminTempMailboxTests(unittest.TestCase):
         with self.app.app_context():
             from outlook_web.db import get_db
 
-            row = get_db().execute(
-                "SELECT pool_status, claimed_by, claimed_at, lease_expires_at, claim_token FROM temp_emails WHERE email = ?",
-                (email_addr,),
-            ).fetchone()
+            row = (
+                get_db()
+                .execute(
+                    "SELECT pool_status, claimed_by, claimed_at, lease_expires_at, claim_token FROM temp_emails WHERE email = ?",
+                    (email_addr,),
+                )
+                .fetchone()
+            )
         self.assertEqual(row["pool_status"], "available")
         self.assertIsNone(row["claimed_by"])
         self.assertIsNone(row["claimed_at"])
