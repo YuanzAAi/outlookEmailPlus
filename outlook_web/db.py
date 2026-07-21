@@ -9,12 +9,7 @@ from flask import g
 
 from outlook_web import config
 from outlook_web.errors import generate_trace_id, sanitize_error_details
-from outlook_web.security.crypto import (
-    encrypt_data,
-    hash_password,
-    is_encrypted,
-    is_password_hashed,
-)
+from outlook_web.security.crypto import encrypt_data, hash_password, is_encrypted, is_password_hashed
 
 # 数据库 Schema 版本（用于升级可验证/可诊断）
 # v3：对齐 PRD-00005 / FD-00005 / TDD-00005（accounts 表新增多邮箱字段：account_type/provider/imap_host/imap_port/imap_password）
