@@ -113,6 +113,18 @@ jobs:
         if: steps.detect.outputs.updated == 'true'
         run: git push origin HEAD:main
 
+      - name: Dispatch verified image release
+        if: steps.detect.outputs.updated == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'docker-build-push.yml',
+              ref: 'main',
+            });
+
   report-sync-status:
     if: always() && (needs.sync.result == 'failure' || needs.sync.outputs.updated == 'true')
     needs: sync

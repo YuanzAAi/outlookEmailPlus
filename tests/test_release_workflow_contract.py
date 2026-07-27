@@ -14,13 +14,20 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertIn("report-publish-status:", workflow)
         self.assertIn("if: always()", workflow)
 
-    def test_upstream_sync_pushes_only_after_candidate_verification_without_manual_duplicate_build(self):
+    def test_upstream_sync_dispatches_release_after_verified_push(self):
         workflow = (REPO_ROOT / ".github" / "workflows" / "upstream-sync.yml").read_text(encoding="utf-8")
 
         self.assertIn("docker build --pull -t outlook-email-plus:upstream-sync .", workflow)
         self.assertIn("Push verified merge", workflow)
         self.assertIn("git push origin HEAD:main", workflow)
+        self.assertIn("Dispatch verified image release", workflow)
+        self.assertIn("github.rest.actions.createWorkflowDispatch", workflow)
+        self.assertIn("workflow_id: 'docker-build-push.yml'", workflow)
         self.assertNotIn("gh workflow run docker-build-push.yml", workflow)
+        self.assertLess(
+            workflow.index("git push origin HEAD:main"),
+            workflow.index("github.rest.actions.createWorkflowDispatch"),
+        )
         self.assertIn("report-sync-status:", workflow)
 
     def test_sonar_workflow_skips_cleanly_when_fork_secrets_are_missing(self):
