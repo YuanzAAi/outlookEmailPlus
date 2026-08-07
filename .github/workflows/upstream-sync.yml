@@ -25,6 +25,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Configure Git
         run: |
@@ -46,6 +47,17 @@ jobs:
           else
             echo "updated=true" >> "$GITHUB_OUTPUT"
             echo "Upstream changes detected: $(git rev-parse --short upstream/main)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Verify sync push token
+        if: steps.detect.outputs.updated == 'true'
+        shell: bash
+        env:
+          UPSTREAM_SYNC_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
+        run: |
+          if [ -z "${UPSTREAM_SYNC_TOKEN:-}" ]; then
+            echo "::error::UPSTREAM_SYNC_TOKEN is required to sync GitHub workflow files"
+            exit 1
           fi
 
       - name: Merge upstream into fork
@@ -111,7 +123,16 @@ jobs:
 
       - name: Push verified merge
         if: steps.detect.outputs.updated == 'true'
-        run: git push origin HEAD:main
+        shell: bash
+        env:
+          UPSTREAM_SYNC_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
+        run: |
+          set -euo pipefail
+          auth_header="$(printf 'x-access-token:%s' "$UPSTREAM_SYNC_TOKEN" | base64 | tr -d '\n')"
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0=http.extraheader
+          export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${auth_header}"
+          git push origin HEAD:main
 
       - name: Dispatch verified image release
         if: steps.detect.outputs.updated == 'true'
