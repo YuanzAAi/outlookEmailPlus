@@ -147,7 +147,7 @@ jobs:
             });
 
   report-sync-status:
-    if: always() && (needs.sync.result == 'failure' || needs.sync.outputs.updated == 'true')
+    if: always()
     needs: sync
     runs-on: ubuntu-latest
     permissions:
