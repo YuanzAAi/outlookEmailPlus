@@ -18,16 +18,34 @@ jobs:
   refresh:
     runs-on: ubuntu-latest
     steps:
+      - name: Check Daytona configuration
+        id: config
+        shell: bash
+        env:
+          DAYTONA_API_KEY: ${{ secrets.DAYTONA_API_KEY }}
+          OEMP_SECRET_KEY: ${{ secrets.OEMP_SECRET_KEY }}
+          OEMP_LOGIN_PASSWORD: ${{ secrets.OEMP_LOGIN_PASSWORD }}
+        run: |
+          if [ -z "$DAYTONA_API_KEY" ] || [ -z "$OEMP_SECRET_KEY" ] || [ -z "$OEMP_LOGIN_PASSWORD" ]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "Daytona snapshot refresh skipped because fork secrets are not configured." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "configured=true" >> "$GITHUB_OUTPUT"
+
       - name: Checkout repository
+        if: steps.config.outputs.configured == 'true'
         uses: actions/checkout@v4
 
       - name: Install Daytona CLI
+        if: steps.config.outputs.configured == 'true'
         run: |
           curl -fL https://github.com/daytona/clients/releases/latest/download/daytona-linux-amd64 -o /tmp/daytona
           chmod +x /tmp/daytona
           sudo mv /tmp/daytona /usr/local/bin/daytona
 
       - name: Login to Daytona
+        if: steps.config.outputs.configured == 'true'
         env:
           DAYTONA_API_KEY: ${{ secrets.DAYTONA_API_KEY }}
         run: |
@@ -38,9 +56,11 @@ jobs:
           daytona login --api-key "$DAYTONA_API_KEY"
 
       - name: Refresh snapshot
+        if: steps.config.outputs.configured == 'true'
         run: bash daytona/snapshot.sh
 
       - name: Refresh sandbox and start app
+        if: steps.config.outputs.configured == 'true'
         env:
           OEMP_SECRET_KEY: ${{ secrets.OEMP_SECRET_KEY }}
           OEMP_LOGIN_PASSWORD: ${{ secrets.OEMP_LOGIN_PASSWORD }}

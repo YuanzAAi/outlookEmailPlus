@@ -37,6 +37,13 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertIn("SONAR_TOKEN or SONAR_HOST_URL is not configured for this fork.", workflow)
         self.assertIn("if: steps.config.outputs.enabled == 'true'", workflow)
 
+    def test_daytona_workflow_skips_cleanly_when_fork_secrets_are_missing(self):
+        workflow = (REPO_ROOT / ".github" / "workflows" / "daytona-snapshot.yml").read_text(encoding="utf-8")
+
+        self.assertIn("Check Daytona configuration", workflow)
+        self.assertIn("Daytona snapshot refresh skipped because fork secrets are not configured.", workflow)
+        self.assertIn("if: steps.config.outputs.configured == 'true'", workflow)
+
 
 if __name__ == "__main__":
     unittest.main()
