@@ -84,6 +84,7 @@ def insert_claimed_account(
     lease_seconds: int,
     provider: str,
     account_type: str = "temp_mail",
+    group_id: Optional[int] = None,
     project_key: Optional[str] = None,
     temp_mail_meta: Optional[dict] = None,
     claim_log_detail: str = "动态创建",
@@ -125,12 +126,12 @@ def insert_claimed_account(
                 account_type, provider, status,
                 pool_status, claimed_by, claimed_at, lease_expires_at, claim_token,
                 claimed_project_key, last_claimed_at, temp_mail_meta, email_domain,
-                created_at, updated_at
+                group_id, created_at, updated_at
             ) VALUES (?, '', '', '',
                       ?, ?, 'active',
                       'claimed', ?, ?, ?, ?,
-                      ?, ?, ?, ?,
-                      ?, ?)
+                       ?, ?, ?, ?,
+                       ?, ?, ?)
             """,
             (
                 normalized_email,
@@ -144,6 +145,7 @@ def insert_claimed_account(
                 now_str,
                 temp_mail_meta_json,
                 extracted_domain,
+                group_id,
                 now_str,
                 now_str,
             ),
@@ -192,6 +194,7 @@ def insert_claimed_account(
             "lease_expires_at": lease_expires_at_str,
             "temp_mail_meta": temp_mail_meta_json,
             "email_domain": extracted_domain,
+            "group_id": group_id,
         }
     except sqlite3.IntegrityError as e:
         try:
@@ -240,8 +243,17 @@ def claim_atomic(
         params.append(provider)
 
     if group_id is not None:
-        sql += " AND a.group_id = ?"
-        params.append(group_id)
+        sql += """
+            AND (
+                a.group_id = ?
+                OR (
+                    ? = (SELECT id FROM groups WHERE name = '临时邮箱' LIMIT 1)
+                    AND a.group_id IS NULL
+                    AND (a.provider = 'cloudflare_temp_mail' OR a.account_type = 'temp_mail')
+                )
+            )
+        """
+        params.extend([group_id, group_id])
 
     if tags:
         for tag_name in tags:
@@ -709,6 +721,7 @@ def claim_temp_mailbox_atomic(
     task_id: str,
     lease_seconds: int,
     email_domain: Optional[str] = None,
+    group_id: Optional[int] = None,
     allowed_emails: Optional[List[str]] = None,
 ) -> Optional[dict]:
     """从 temp_emails 表原子领取一个可用临时邮箱，返回与 claim_atomic 一致结构的 dict 或 None。"""
@@ -720,6 +733,9 @@ def claim_temp_mailbox_atomic(
           AND COALESCE(source, '') != ?
     """
     params: list = [ACCOUNT_BACKED_TEMP_MAIL_SOURCE]
+    if group_id is not None:
+        sql += " AND (group_id = ? OR (? = (SELECT id FROM groups WHERE name = '临时邮箱' LIMIT 1) AND group_id IS NULL))"
+        params.extend([group_id, group_id])
     if email_domain:
         # 兼容 domain 为空的历史行：回退用 email 的 @ 后缀派生域名匹配
         sql += " AND lower(COALESCE(NULLIF(domain, '')," " substr(email, instr(email, '@') + 1))) = ?"

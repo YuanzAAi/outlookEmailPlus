@@ -16,6 +16,7 @@ from typing import Iterable, Optional
 
 from outlook_web.db import create_sqlite_connection
 from outlook_web.repositories import pool as pool_repo
+from outlook_web.repositories import settings as settings_repo
 from outlook_web.services.providers import MAIL_PROVIDERS
 
 logger = logging.getLogger(__name__)
@@ -38,7 +39,7 @@ VALID_PROVIDERS = set(MAIL_PROVIDERS) | {"imap", "gptmail", "cloudflare_temp_mai
 
 # 这些 provider（含未指定）在 accounts 池无命中时，回退到 temp_emails 临时邮箱池领取。
 # custom/gptmail 对应「通用 API (GPTMail)」临时邮箱；None 表示不限 provider。
-_TEMP_ELIGIBLE_PROVIDERS = {None, "custom", "gptmail"}
+_TEMP_ELIGIBLE_PROVIDERS = {None, "custom", "gptmail", "cloudflare_temp_mail"}
 
 
 def _validate_provider(provider: Optional[str]) -> Optional[str]:
@@ -124,6 +125,18 @@ def _normalize_allowed_emails(allowed_emails: Iterable[str] | None) -> list[str]
     )
 
 
+def _normalize_group_id(group_id: int | str | None) -> Optional[int]:
+    if group_id in (None, "", 0, "0"):
+        return None
+    try:
+        value = int(group_id)
+    except (TypeError, ValueError) as exc:
+        raise PoolServiceError("group_id 必须为正整数", "invalid_group_id") from exc
+    if value <= 0:
+        raise PoolServiceError("group_id 必须为正整数", "invalid_group_id")
+    return value
+
+
 def _ensure_allowed_email(email_addr: str, allowed_emails: Iterable[str] | None) -> None:
     normalized_allowed_emails = _normalize_allowed_emails(allowed_emails)
     if normalized_allowed_emails and str(email_addr or "").strip().lower() not in normalized_allowed_emails:
@@ -178,6 +191,7 @@ def claim_random(
     provider: Optional[str] = None,
     project_key: Optional[str] = None,
     email_domain: Optional[str] = None,
+    group_id: int | str | None = None,
     allowed_emails: Iterable[str] | None = None,
     account_scope: str = "all",
 ) -> dict:
@@ -186,6 +200,7 @@ def claim_random(
     provider = _validate_provider(provider)
     project_key = _validate_project_key(project_key)
     email_domain = _validate_email_domain(email_domain)
+    group_id = _normalize_group_id(group_id)
     allowed_emails = _normalize_allowed_emails(allowed_emails)
     account_scope = str(account_scope or "all").strip().lower()
     if account_scope not in VALID_ACCOUNT_SCOPES:
@@ -193,6 +208,8 @@ def claim_random(
 
     conn = create_sqlite_connection()
     try:
+        if group_id is not None and conn.execute("SELECT 1 FROM groups WHERE id = ?", (group_id,)).fetchone() is None:
+            raise PoolServiceError("group_id 不存在", "invalid_group_id")
         settings = _read_settings_via_conn(conn)
         default_lease = settings["pool_default_lease_seconds"]
         _validate_lease_seconds(default_lease)
@@ -206,6 +223,7 @@ def claim_random(
                 provider=provider,
                 project_key=project_key,
                 email_domain=email_domain,
+                group_id=group_id,
                 allowed_emails=allowed_emails,
                 account_scope=account_scope,
             )
@@ -224,6 +242,7 @@ def claim_random(
                     task_id=task_id,
                     lease_seconds=default_lease,
                     email_domain=email_domain,
+                    group_id=group_id,
                     allowed_emails=allowed_emails,
                 )
             except pool_repo.PoolRepositoryError as e:
@@ -234,6 +253,7 @@ def claim_random(
         # 池为空：仅当显式指定 provider=cloudflare_temp_mail 时，动态创建 CF 临时邮箱
         if account_scope != "regular" and provider == "cloudflare_temp_mail" and not allowed_emails:
             created_email, created_meta = _create_cf_mailbox_for_pool(email_domain=email_domain)
+            dynamic_group_id = group_id or _resolve_group_id_by_name(conn, "临时邮箱")
 
             try:
                 inserted = pool_repo.insert_claimed_account(
@@ -244,6 +264,7 @@ def claim_random(
                     lease_seconds=default_lease,
                     provider="cloudflare_temp_mail",
                     account_type="temp_mail",
+                    group_id=dynamic_group_id,
                     project_key=project_key,
                     temp_mail_meta=created_meta,
                     claim_log_detail="CF邮箱动态创建",
@@ -530,5 +551,134 @@ def get_pool_stats(*, allowed_emails: Iterable[str] | None = None) -> dict:
     conn = create_sqlite_connection()
     try:
         return pool_repo.get_stats(conn, allowed_emails=_normalize_allowed_emails(allowed_emails))
+    finally:
+        conn.close()
+
+
+def _resolve_group_id_by_name(conn, name: str) -> Optional[int]:
+    row = conn.execute("SELECT id FROM groups WHERE name = ? LIMIT 1", (name,)).fetchone()
+    return int(row["id"]) if row is not None else None
+
+
+def _option_type(value: object, *, temp: bool = False) -> str:
+    text = str(value or "").strip().lower()
+    if temp:
+        # All user temp mailboxes are consumed through the CF-compatible URL/API
+        # reader, regardless of the historical source label in temp_emails.
+        return "cloudflare_temp_mail"
+    if text == "temp_mail":
+        return "cloudflare_temp_mail"
+    return text or "outlook"
+
+
+def _domain_option_entries(conn) -> tuple[list[dict], str]:
+    raw_entries = settings_repo.get_cf_worker_domains() or settings_repo.get_temp_mail_domains() or []
+    default_domain = (
+        settings_repo.get_cf_worker_default_domain().strip()
+        or settings_repo.get_temp_mail_default_domain().strip()
+    )
+    domains: list[dict] = []
+    seen: set[str] = set()
+    for item in raw_entries:
+        if isinstance(item, dict):
+            name = str(item.get("name") or item.get("domain") or "").strip().lower()
+            enabled = bool(item.get("enabled", True))
+        else:
+            name = str(item or "").strip().lower()
+            enabled = True
+        if not name or name in seen or not enabled:
+            continue
+        seen.add(name)
+        domains.append({"name": name, "enabled": True, "is_default": name == default_domain})
+    if not domains:
+        rows = conn.execute(
+            """
+            SELECT DISTINCT lower(COALESCE(NULLIF(domain, ''), substr(email, instr(email, '@') + 1))) AS domain
+            FROM temp_emails
+            WHERE status = 'active' AND mailbox_type = 'user'
+              AND COALESCE(source, '') != ? AND domain IS NOT NULL
+            ORDER BY domain
+            """,
+            (pool_repo.ACCOUNT_BACKED_TEMP_MAIL_SOURCE,),
+        ).fetchall()
+        for row in rows:
+            name = str(row["domain"] or "").strip().lower()
+            if name and name not in seen:
+                seen.add(name)
+                domains.append({"name": name, "enabled": True, "is_default": name == default_domain})
+    if default_domain and default_domain not in seen:
+        domains.insert(0, {"name": default_domain, "enabled": True, "is_default": True})
+    if not default_domain and domains:
+        default_domain = str(domains[0]["name"])
+        domains[0]["is_default"] = True
+    return domains, default_domain
+
+
+def get_pool_options(*, allowed_emails: Iterable[str] | None = None) -> dict:
+    """返回只读的池选择元数据，不 claim、不创建邮箱、不暴露账号地址。"""
+    allowed = _normalize_allowed_emails(allowed_emails)
+    conn = create_sqlite_connection()
+    try:
+        group_rows = conn.execute("SELECT id, name FROM groups ORDER BY CASE WHEN name = '临时邮箱' THEN 0 ELSE 1 END, id").fetchall()
+        groups: dict[int, dict] = {
+            int(row["id"]): {"id": int(row["id"]), "name": str(row["name"] or ""), "types": {}, "available": 0}
+            for row in group_rows
+        }
+        temp_group_id = _resolve_group_id_by_name(conn, "临时邮箱")
+        account_sql = """
+            SELECT group_id, provider, account_type, email
+            FROM accounts
+            WHERE status = 'active' AND pool_status = 'available'
+        """
+        account_params: list[str] = []
+        if allowed:
+            placeholders = ",".join("?" for _ in allowed)
+            account_sql += f" AND lower(email) IN ({placeholders})"
+            account_params.extend(allowed)
+        for row in conn.execute(account_sql, account_params).fetchall():
+            provider = _option_type(row["provider"] or row["account_type"])
+            group_id = int(row["group_id"]) if row["group_id"] is not None else None
+            if provider == "cloudflare_temp_mail" or str(row["account_type"] or "") == "temp_mail":
+                group_id = group_id or temp_group_id
+            if group_id is None or group_id not in groups:
+                continue
+            entry = groups[group_id]["types"].setdefault(provider, {"value": provider, "available": 0})
+            entry["available"] += 1
+            groups[group_id]["available"] += 1
+
+        temp_sql = """
+            SELECT group_id, source, email
+            FROM temp_emails
+            WHERE status = 'active' AND mailbox_type = 'user'
+              AND (pool_status IS NULL OR pool_status = 'available')
+              AND COALESCE(source, '') != ?
+        """
+        temp_params: list[str] = [pool_repo.ACCOUNT_BACKED_TEMP_MAIL_SOURCE]
+        if allowed:
+            placeholders = ",".join("?" for _ in allowed)
+            temp_sql += f" AND lower(email) IN ({placeholders})"
+            temp_params.extend(allowed)
+        for row in conn.execute(temp_sql, temp_params).fetchall():
+            if temp_group_id is None:
+                continue
+            provider = _option_type(row["source"], temp=True)
+            entry = groups[temp_group_id]["types"].setdefault(provider, {"value": provider, "available": 0})
+            entry["available"] += 1
+            groups[temp_group_id]["available"] += 1
+
+        normalized_groups = []
+        type_totals: dict[str, int] = {}
+        for group in groups.values():
+            types = sorted(group["types"].values(), key=lambda item: item["value"])
+            for item in types:
+                type_totals[item["value"]] = type_totals.get(item["value"], 0) + int(item["available"])
+            normalized_groups.append({"id": group["id"], "name": group["name"], "available": group["available"], "types": types})
+        domains, default_domain = _domain_option_entries(conn)
+        return {
+            "groups": normalized_groups,
+            "types": [{"value": key, "available": value} for key, value in sorted(type_totals.items())],
+            "domains": domains,
+            "default_domain": default_domain,
+        }
     finally:
         conn.close()

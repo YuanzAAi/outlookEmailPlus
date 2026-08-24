@@ -8,7 +8,14 @@ from outlook_web.repositories import settings as settings_repo
 from outlook_web.security.auth import api_key_required, get_external_api_consumer
 from outlook_web.security.external_api_guard import external_api_guards
 from outlook_web.services import external_api as external_api_service
-from outlook_web.services.pool import PoolServiceError, claim_random, complete_claim, get_pool_stats, release_claim
+from outlook_web.services.pool import (
+    PoolServiceError,
+    claim_random,
+    complete_claim,
+    get_pool_options,
+    get_pool_stats,
+    release_claim,
+)
 
 
 def _audit(endpoint: str, status: str, *, details: dict[str, Any], email_addr: str = "") -> None:
@@ -90,6 +97,18 @@ def _claim_pool_account(endpoint: str, *, require_email_domain: bool = False):
     project_key = body.get("project_key")
     email_domain = body.get("email_domain")
     account_scope = body.get("account_scope", "all")
+    group_id = body.get("group_id")
+    if group_id in (None, "", 0, "0"):
+        group_id = None
+    else:
+        try:
+            group_id = int(group_id)
+        except (TypeError, ValueError):
+            _audit(endpoint, "error", details={"code": "GROUP_ID_INVALID"})
+            return jsonify(external_api_service.fail("GROUP_ID_INVALID", "group_id 必须为正整数")), 400
+        if group_id <= 0:
+            _audit(endpoint, "error", details={"code": "GROUP_ID_INVALID"})
+            return jsonify(external_api_service.fail("GROUP_ID_INVALID", "group_id 必须为正整数")), 400
     consumer = get_external_api_consumer() or {}
 
     if require_email_domain and not str(email_domain or "").strip():
@@ -103,6 +122,7 @@ def _claim_pool_account(endpoint: str, *, require_email_domain: bool = False):
             provider=provider,
             project_key=project_key,
             email_domain=email_domain,
+            group_id=group_id,
             allowed_emails=consumer.get("allowed_emails") or [],
             account_scope=account_scope,
         )
@@ -122,6 +142,7 @@ def _claim_pool_account(endpoint: str, *, require_email_domain: bool = False):
                 "project_key": project_key or "",
                 "email_domain": email_domain or "",
                 "account_scope": account_scope,
+                "group_id": group_id,
                 "account_id": data["account_id"],
             },
         )
@@ -278,4 +299,25 @@ def api_external_pool_stats():
             "error",
             details={"code": "INTERNAL_ERROR", "err": type(exc).__name__},
         )
+        return jsonify(external_api_service.fail("INTERNAL_ERROR", "服务内部错误")), 500
+
+
+@api_key_required
+@external_api_guards(feature="pool_stats")
+def api_external_pool_options():
+    """返回可用于外部 claim 的分组、类型和临时邮箱域名选项。"""
+    endpoint = "/api/external/pool/options"
+    disabled_resp = _check_pool_external_enabled(endpoint)
+    if disabled_resp is not None:
+        return disabled_resp
+    access_resp = _check_pool_access(endpoint)
+    if access_resp is not None:
+        return access_resp
+    try:
+        consumer = get_external_api_consumer() or {}
+        options = get_pool_options(allowed_emails=consumer.get("allowed_emails") or [])
+        _audit(endpoint, "ok", details={"snapshot": True})
+        return jsonify(external_api_service.ok(options))
+    except Exception:
+        _audit(endpoint, "error", details={"code": "INTERNAL_ERROR"})
         return jsonify(external_api_service.fail("INTERNAL_ERROR", "服务内部错误")), 500
