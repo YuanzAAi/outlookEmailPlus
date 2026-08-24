@@ -15,7 +15,11 @@ from outlook_web.repositories import accounts as accounts_repo
 from outlook_web.repositories import settings as settings_repo
 from outlook_web.repositories import temp_emails as temp_emails_repo
 from outlook_web.services.temp_mail_provider_custom import TempMailProviderReadError
-from outlook_web.services.temp_mail_provider_factory import TempMailProviderFactoryError, get_temp_mail_provider
+from outlook_web.services.temp_mail_provider_factory import (
+    TempMailProviderFactoryError,
+    get_available_providers,
+    get_temp_mail_provider,
+)
 from outlook_web.services.verification_extract_log import (
     encode_temp_mail_log_account_id,
     resolve_extract_log_outcome,
@@ -36,6 +40,38 @@ INBOUND_PUSH_CACHE_TTL_SECONDS = 300
 MESSAGE_SYNC_STATE_MAX_ENTRIES = 256
 
 logger = logging.getLogger(__name__)
+
+_PROVIDER_CAPABILITY_KEYS = (
+    "create_mailbox",
+    "list_messages",
+    "get_message_detail",
+    "delete_mailbox",
+    "delete_message",
+    "clear_messages",
+)
+_BUILTIN_PROVIDER_NAMES = {
+    settings_repo.DEFAULT_TEMP_MAIL_PROVIDER,
+    settings_repo.LEGACY_TEMP_MAIL_PROVIDER,
+    settings_repo.CLOUDFLARE_TEMP_MAIL_PROVIDER,
+}
+
+
+def _normalize_provider_capabilities(provider: Any, options: dict[str, Any]) -> dict[str, bool]:
+    raw_capabilities = options.get("capabilities") or options.get("provider_capabilities")
+    if not isinstance(raw_capabilities, dict):
+        raw_capabilities = getattr(provider, "provider_capabilities", {})
+    if not isinstance(raw_capabilities, dict):
+        raw_capabilities = {}
+    return {key: bool(raw_capabilities.get(key, callable(getattr(provider, key, None)))) for key in _PROVIDER_CAPABILITY_KEYS}
+
+
+def _provider_is_configured(options: dict[str, Any], enabled: bool) -> bool:
+    configured = options.get("configured")
+    if configured is not None:
+        return bool(configured) and enabled
+    if "api_base_url" in options:
+        return enabled and bool(str(options.get("api_base_url") or "").strip())
+    return enabled
 
 
 class TempMailError(Exception):
@@ -697,9 +733,49 @@ class TempMailService:
         """
         normalized_pn = str(provider_name or "").strip() or None
         provider = self._get_provider(provider_name=normalized_pn, purpose="options")
-        options = provider.get_options()
-        options.setdefault("provider_name", str(options.get("provider") or ""))
-        options.setdefault("provider_label", "temp_mail")
+        options = dict(provider.get_options() or {})
+        resolved_name = str(
+            options.get("provider_name") or options.get("provider") or getattr(provider, "provider_name", "")
+        ).strip()
+        active_provider = settings_repo.get_temp_mail_runtime_provider_name()
+        catalog: list[dict[str, Any]] = []
+        selected_meta: dict[str, Any] = {}
+        for provider_meta in get_available_providers():
+            item = dict(provider_meta)
+            name = str(item.get("name") or "").strip()
+            item["kind"] = "builtin" if name in _BUILTIN_PROVIDER_NAMES else "plugin"
+            item["active"] = name == active_provider
+            item["selected"] = name == resolved_name
+            if item["selected"]:
+                selected_meta = item
+            catalog.append(item)
+
+        enabled = options.get("success") is not False and options.get("enabled") is not False
+        configured = _provider_is_configured(options, enabled)
+        if not enabled:
+            status = "disabled"
+            status_message = str(options.get("error") or options.get("message") or "临时邮箱服务未启用")
+        elif not configured:
+            status = "not_configured"
+            status_message = "临时邮箱 Provider 尚未完成配置"
+        else:
+            status = "ready"
+            status_message = "临时邮箱服务已启用"
+
+        options.update(
+            {
+                "provider_name": resolved_name,
+                "provider_label": str(selected_meta.get("label") or options.get("provider_label") or resolved_name),
+                "provider_kind": str(selected_meta.get("kind") or "plugin"),
+                "active_provider": active_provider,
+                "providers": catalog,
+                "capabilities": _normalize_provider_capabilities(provider, options),
+                "enabled": enabled,
+                "configured": configured,
+                "status": status,
+                "status_message": status_message,
+            }
+        )
         return options
 
     def _validate_prefix_and_domain(

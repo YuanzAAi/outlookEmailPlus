@@ -2,11 +2,25 @@ from __future__ import annotations
 
 import json
 import secrets
+import sqlite3
 from datetime import datetime, timezone
 from typing import Any, Iterable
 
 from outlook_web.db import get_db
 from outlook_web.security.crypto import decrypt_data, encrypt_data
+
+
+class ExternalApiKeyNameConflictError(RuntimeError):
+    """Raised when the database rejects a duplicate API Key name."""
+
+
+def _execute_key_write(db: sqlite3.Connection, sql: str, params: tuple[Any, ...]) -> sqlite3.Cursor:
+    try:
+        return db.execute(sql, params)
+    except sqlite3.IntegrityError as exc:
+        if "idx_external_api_keys_name_unique" in str(exc):
+            raise ExternalApiKeyNameConflictError("external_api_key_name_conflict") from exc
+        raise
 
 
 def _mask_secret_value(value: str, head: int = 4, tail: int = 4) -> str:
@@ -74,9 +88,28 @@ def _decrypt_api_key(value: str) -> str:
         return ""
 
 
+def _normalize_expires_at(value: Any) -> str | None:
+    text = str(value or "").strip()
+    return text or None
+
+
+def _is_expired(value: Any) -> bool:
+    expires_at = _normalize_expires_at(value)
+    if not expires_at:
+        return False
+    try:
+        parsed = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed <= datetime.now(timezone.utc)
+
+
 def _serialize_row(row: Any) -> dict[str, Any]:
     api_key_plain = _decrypt_api_key(row["api_key_encrypted"] or "")
     allowed_emails = _parse_allowed_emails(row["allowed_emails_json"] or "[]")
+    expires_at = row["expires_at"] or ""
     return {
         "id": row["id"],
         "consumer_key": _build_consumer_key(row["id"]),
@@ -85,6 +118,8 @@ def _serialize_row(row: Any) -> dict[str, Any]:
         "allowed_emails": allowed_emails,
         "pool_access": bool(row["pool_access"]),
         "api_key_masked": _mask_secret_value(api_key_plain) if api_key_plain else "",
+        "expires_at": expires_at,
+        "expired": _is_expired(expires_at),
         "last_used_at": row["last_used_at"] or "",
         "created_at": row["created_at"] or "",
         "updated_at": row["updated_at"] or "",
@@ -94,7 +129,8 @@ def _serialize_row(row: Any) -> dict[str, Any]:
 def list_external_api_keys(*, include_disabled: bool = True) -> list[dict[str, Any]]:
     db = get_db()
     sql = """
-        SELECT id, name, api_key_encrypted, allowed_emails_json, pool_access, enabled, last_used_at, created_at, updated_at
+        SELECT id, name, api_key_encrypted, allowed_emails_json, pool_access,
+               enabled, expires_at, last_used_at, created_at, updated_at
         FROM external_api_keys
     """
     params: list[Any] = []
@@ -109,7 +145,8 @@ def get_external_api_key_by_id(key_id: int) -> dict[str, Any] | None:
     db = get_db()
     row = db.execute(
         """
-        SELECT id, name, api_key_encrypted, allowed_emails_json, pool_access, enabled, last_used_at, created_at, updated_at
+        SELECT id, name, api_key_encrypted, allowed_emails_json, pool_access,
+               enabled, expires_at, last_used_at, created_at, updated_at
         FROM external_api_keys
         WHERE id = ?
         """,
@@ -125,13 +162,18 @@ def create_external_api_key(
     allowed_emails: Iterable[str] | None = None,
     pool_access: bool = False,
     enabled: bool = True,
+    expires_at: str | None = None,
     commit: bool = True,
 ) -> dict[str, Any]:
     db = get_db()
-    db.execute(
+    cursor = _execute_key_write(
+        db,
         """
-        INSERT INTO external_api_keys (name, api_key_encrypted, allowed_emails_json, pool_access, enabled, updated_at)
-        VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        INSERT INTO external_api_keys (
+            name, api_key_encrypted, allowed_emails_json, pool_access,
+            enabled, expires_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
         """,
         (
             str(name or "").strip(),
@@ -139,11 +181,12 @@ def create_external_api_key(
             _allowed_emails_json(allowed_emails),
             1 if _coerce_bool(pool_access, False) else 0,
             1 if _coerce_bool(enabled, True) else 0,
+            _normalize_expires_at(expires_at),
         ),
     )
     if commit:
         db.commit()
-    row_id = db.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+    row_id = cursor.lastrowid
     return get_external_api_key_by_id(row_id) or {}
 
 
@@ -155,6 +198,7 @@ def update_external_api_key(
     allowed_emails: Iterable[str] | None = None,
     pool_access: bool | None = None,
     enabled: bool | None = None,
+    expires_at: str | None = None,
     commit: bool = True,
 ) -> dict[str, Any] | None:
     existing = get_external_api_key_by_id(int(key_id))
@@ -162,7 +206,8 @@ def update_external_api_key(
         return None
 
     db = get_db()
-    db.execute(
+    _execute_key_write(
+        db,
         """
         UPDATE external_api_keys
         SET name = ?,
@@ -170,6 +215,7 @@ def update_external_api_key(
             allowed_emails_json = ?,
             pool_access = ?,
             enabled = ?,
+            expires_at = ?,
             updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
         """,
@@ -196,6 +242,7 @@ def update_external_api_key(
                     bool(existing["enabled"]),
                 )
             ),
+            _normalize_expires_at(existing["expires_at"] if expires_at is None else expires_at),
             int(key_id),
         ),
     )
@@ -224,6 +271,7 @@ def replace_external_api_keys(items: list[dict[str, Any]], *, commit: bool = Tru
         allowed_emails = raw_item.get("allowed_emails")
         pool_access = _coerce_bool(raw_item.get("pool_access", False), False)
         enabled = _coerce_bool(raw_item.get("enabled", True), True)
+        expires_at = _normalize_expires_at(raw_item.get("expires_at"))
 
         if item_id in (None, ""):
             create_external_api_key(
@@ -232,6 +280,7 @@ def replace_external_api_keys(items: list[dict[str, Any]], *, commit: bool = Tru
                 allowed_emails=_parse_allowed_emails(allowed_emails),
                 pool_access=pool_access,
                 enabled=enabled,
+                expires_at=expires_at,
                 commit=False,
             )
             continue
@@ -250,6 +299,7 @@ def replace_external_api_keys(items: list[dict[str, Any]], *, commit: bool = Tru
             allowed_emails=_parse_allowed_emails(allowed_emails) if allowed_emails is not None else existing["allowed_emails"],
             pool_access=pool_access,
             enabled=enabled,
+            expires_at=expires_at,
             commit=False,
         )
 
@@ -268,7 +318,10 @@ def has_any_external_api_key_configured(*, enabled_only: bool = False) -> bool:
     sql = "SELECT COUNT(*) AS c FROM external_api_keys"
     params: list[Any] = []
     if enabled_only:
-        sql += " WHERE enabled = 1"
+        sql += """
+            WHERE enabled = 1
+              AND (expires_at IS NULL OR TRIM(expires_at) = '' OR datetime(expires_at) > CURRENT_TIMESTAMP)
+        """
     row = db.execute(sql, params).fetchone()
     return bool(row and int(row["c"] or 0) > 0)
 
@@ -280,9 +333,11 @@ def find_external_api_key_by_plaintext(provided_key: str) -> dict[str, Any] | No
 
     db = get_db()
     rows = db.execute("""
-        SELECT id, name, api_key_encrypted, allowed_emails_json, pool_access, enabled, last_used_at, created_at, updated_at
+        SELECT id, name, api_key_encrypted, allowed_emails_json, pool_access,
+               enabled, expires_at, last_used_at, created_at, updated_at
         FROM external_api_keys
         WHERE enabled = 1
+          AND (expires_at IS NULL OR TRIM(expires_at) = '' OR datetime(expires_at) > CURRENT_TIMESTAMP)
         ORDER BY id ASC
         """).fetchall()
 

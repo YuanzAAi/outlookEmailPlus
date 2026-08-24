@@ -6,6 +6,15 @@ from typing import Any
 
 from outlook_web.temp_mail_registry import _REGISTRY, get_registry_snapshot
 
+DEFAULT_PROVIDER_CAPABILITIES = {
+    "create_mailbox": True,
+    "list_messages": True,
+    "get_message_detail": True,
+    "delete_mailbox": True,
+    "delete_message": True,
+    "clear_messages": True,
+}
+
 
 def register_provider(cls: type["TempMailProviderBase"]) -> type["TempMailProviderBase"]:
     """类装饰器：将 Provider 注册到全局注册表。"""
@@ -44,6 +53,7 @@ class TempMailProviderBase(ABC):
     provider_version: str = "0.0.0"
     provider_author: str = ""
     config_schema: dict[str, Any] = {}
+    provider_capabilities: dict[str, bool] = dict(DEFAULT_PROVIDER_CAPABILITIES)
 
     @abstractmethod
     def get_options(self) -> dict[str, Any]:

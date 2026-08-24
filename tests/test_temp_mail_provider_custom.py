@@ -34,8 +34,13 @@ class CustomTempMailProviderTests(unittest.TestCase):
             from outlook_web.services.temp_mail_provider_custom import CustomTempMailProvider
 
             provider = CustomTempMailProvider()
-            options = provider.get_options()
+            with patch(
+                "outlook_web.services.temp_mail_provider_custom.settings_repo.get_temp_mail_api_key",
+                return_value="test-api-key",
+            ):
+                options = provider.get_options()
 
+        self.assertTrue(options["configured"])
         self.assertEqual(options["domain_strategy"], "auto_or_manual")
         self.assertEqual(options["default_mode"], "auto")
         self.assertEqual(options["provider"], "custom_domain_temp_mail")
@@ -51,6 +56,19 @@ class CustomTempMailProviderTests(unittest.TestCase):
             options["prefix_rules"],
             {"min_length": 2, "max_length": 16, "pattern": "^[a-z0-9-]+$"},
         )
+
+    def test_get_options_is_not_configured_without_api_key(self):
+        with self.app.app_context():
+            from outlook_web.services.temp_mail_provider_custom import CustomTempMailProvider
+
+            provider = CustomTempMailProvider()
+            with patch(
+                "outlook_web.services.temp_mail_provider_custom.settings_repo.get_temp_mail_api_key",
+                return_value="",
+            ):
+                options = provider.get_options()
+
+        self.assertFalse(options["configured"])
 
     def test_generate_mailbox_maps_bridge_errors_to_stable_codes(self):
         cases = [

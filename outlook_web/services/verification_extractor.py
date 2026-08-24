@@ -18,6 +18,7 @@ import requests
 
 from outlook_web.repositories import settings as settings_repo
 from outlook_web.services import verification_code_extraction as vce
+from outlook_web.services.performance_metrics import record_ai_call
 
 # 向后兼容：旧代码从此模块导入常量与工具
 VERIFICATION_KEYWORDS = vce.VERIFICATION_KEYWORDS
@@ -190,12 +191,100 @@ def build_verification_ai_input_payload(
 
 
 def _normalize_verification_ai_endpoint(base_url: str) -> str:
-    value = str(base_url or "").strip()
+    value = str(base_url or "").strip().rstrip("/")
     if not value:
         return ""
     if value.lower().endswith("/chat/completions"):
         return value
-    return value.rstrip("/") + "/chat/completions"
+    return value + "/chat/completions"
+
+
+def _normalize_verification_ai_models_endpoint(base_url: str) -> str:
+    value = str(base_url or "").strip().rstrip("/")
+    if not value:
+        return ""
+    suffix = "/chat/completions"
+    if value.lower().endswith(suffix):
+        value = value[: -len(suffix)].rstrip("/")
+    return value + "/models"
+
+
+def list_verification_ai_models(base_url: str, api_key: str, *, timeout: int = 8) -> Dict[str, Any]:
+    endpoint = _normalize_verification_ai_models_endpoint(base_url)
+    token = str(api_key or "").strip()
+    if not endpoint or not token:
+        return {
+            "ok": False,
+            "error": "config_incomplete",
+            "message": "请填写 Base URL 和 API Key",
+            "endpoint": endpoint,
+            "models": [],
+        }
+
+    started_at = time.perf_counter()
+    try:
+        response = requests.get(
+            endpoint,
+            headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+            timeout=timeout,
+        )
+        latency_ms = round((time.perf_counter() - started_at) * 1000)
+        if not 200 <= response.status_code < 300:
+            return {
+                "ok": False,
+                "error": "http_error",
+                "message": f"模型列表请求失败（HTTP {response.status_code}）",
+                "endpoint": endpoint,
+                "http_status": response.status_code,
+                "latency_ms": latency_ms,
+                "models": [],
+            }
+
+        payload = response.json()
+        rows = payload.get("data") if isinstance(payload, dict) else None
+        models = sorted(
+            {
+                str(item.get("id") or "").strip()
+                for item in (rows or [])
+                if isinstance(item, dict) and str(item.get("id") or "").strip()
+            }
+        )
+        if not models:
+            return {
+                "ok": False,
+                "error": "invalid_response_format",
+                "message": "服务已响应，但未返回可用模型名称",
+                "endpoint": endpoint,
+                "http_status": response.status_code,
+                "latency_ms": latency_ms,
+                "models": [],
+            }
+        return {
+            "ok": True,
+            "message": f"已加载 {len(models)} 个模型",
+            "endpoint": endpoint,
+            "http_status": response.status_code,
+            "latency_ms": latency_ms,
+            "models": models,
+        }
+    except (TypeError, ValueError) as exc:
+        return {
+            "ok": False,
+            "error": "invalid_response_format",
+            "message": f"模型列表响应解析失败：{exc}",
+            "endpoint": endpoint,
+            "latency_ms": round((time.perf_counter() - started_at) * 1000),
+            "models": [],
+        }
+    except requests.RequestException as exc:
+        return {
+            "ok": False,
+            "error": "request_failed",
+            "message": f"模型列表请求失败：{exc}",
+            "endpoint": endpoint,
+            "latency_ms": round((time.perf_counter() - started_at) * 1000),
+            "models": [],
+        }
 
 
 def _parse_verification_ai_content(raw_content: str) -> Optional[Dict[str, Any]]:
@@ -291,6 +380,8 @@ def _call_verification_ai(ai_config: Dict[str, Any], ai_input: Dict[str, Any]) -
         ],
     }
 
+    started_at = time.monotonic()
+    succeeded = False
     try:
         response = requests.post(endpoint, headers=headers, json=body, timeout=6)
         response.raise_for_status()
@@ -302,10 +393,18 @@ def _call_verification_ai(ai_config: Dict[str, Any], ai_input: Dict[str, Any]) -
         content = message.get("content") if isinstance(message, dict) else None
         if not isinstance(content, str):
             return None
-        return _parse_verification_ai_content(content)
+        parsed = _parse_verification_ai_content(content)
+        succeeded = parsed is not None
+        return parsed
     except Exception as exc:
         _LOGGER.warning("verification_ai_call_failed: %s", exc)
         return None
+    finally:
+        record_ai_call(
+            success=succeeded,
+            duration_ms=(time.monotonic() - started_at) * 1000,
+            model=model,
+        )
 
 
 def probe_verification_ai_runtime(

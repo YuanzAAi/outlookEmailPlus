@@ -27,6 +27,8 @@ ENV/
 
 # Node / Jest
 node_modules/
+**/node_modules/
+**/dist/
 tests/
 
 # 数据库文件（使用 volume 挂载）

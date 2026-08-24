@@ -29,6 +29,10 @@ class SmokeContractTests(unittest.TestCase):
         # 新增字段：用于前端判断是否发生重启
         self.assertTrue(data.get("boot_id"))
         self.assertTrue(data.get("version"))
+        # 构建身份字段没有部署元数据时也应稳定返回占位值。
+        self.assertIn("git_sha", data)
+        self.assertIn("git_branch", data)
+        self.assertIn("build_time", data)
 
     def test_pages_are_accessible(self):
         client = self.app.test_client()

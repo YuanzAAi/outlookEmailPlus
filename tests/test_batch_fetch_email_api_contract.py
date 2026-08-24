@@ -100,6 +100,10 @@ class BatchFetchEmailApiContractTests(unittest.TestCase):
         self.assertIsInstance(data.get("emails"), list)
         self.assertIsInstance(data.get("account_summary"), dict)
 
+    @patch(
+        "outlook_web.controllers.emails.groups_repo.get_group_by_id",
+        return_value={"proxy_url": "http://proxy.test:8080"},
+    )
     @patch("outlook_web.controllers.emails.imap_service.get_emails_imap_with_server")
     @patch(
         "outlook_web.controllers.emails.graph_service.get_emails_graph",
@@ -119,10 +123,13 @@ class BatchFetchEmailApiContractTests(unittest.TestCase):
         mock_get_account_by_email,
         _mock_graph_get_emails,
         mock_imap_get_emails,
+        _mock_get_group_by_id,
     ):
         """TDD C-03：失败响应应继续遵循统一错误结构。"""
         email_addr = "batch-failure@example.com"
-        mock_get_account_by_email.return_value = self._build_outlook_account(email_addr)
+        account = self._build_outlook_account(email_addr)
+        account["group_id"] = 1
+        mock_get_account_by_email.return_value = account
 
         client = self.app.test_client()
         self._login(client)

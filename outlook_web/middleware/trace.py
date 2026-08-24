@@ -10,15 +10,17 @@ Trace ID 中间件
 from __future__ import annotations
 
 import json
-from typing import Any, Dict
+import time
 
 from flask import g, request
 
 from outlook_web.errors import build_error_payload, generate_trace_id, resolve_message_en
+from outlook_web.services.performance_metrics import record_server_request
 
 
 def ensure_trace_id():
     """为每个请求生成/透传 trace_id，便于前后端统一追踪"""
+    g.request_started_at = time.monotonic()
     incoming = request.headers.get("X-Trace-Id") or request.headers.get("X-Request-Id")
     if incoming:
         incoming = incoming.strip()
@@ -115,5 +117,24 @@ def attach_trace_id_and_normalize_errors(response):
             return response
     except Exception:
         return response
+    finally:
+        try:
+            started_at = getattr(g, "request_started_at", None)
+            if started_at is not None:
+                duration_ms = max(0.0, (time.monotonic() - started_at) * 1000)
+                response.headers.setdefault("X-Response-Time-Ms", f"{duration_ms:.1f}")
+                server_timing = response.headers.get("Server-Timing")
+                app_timing = f"app;dur={duration_ms:.1f}"
+                response.headers["Server-Timing"] = f"{server_timing}, {app_timing}" if server_timing else app_timing
+                route = request.url_rule.rule if request.url_rule is not None else request.path
+                record_server_request(
+                    route=route,
+                    method=request.method,
+                    status=response.status_code,
+                    duration_ms=duration_ms,
+                    trace_id=trace_id_value,
+                )
+        except Exception:
+            pass
 
     return response

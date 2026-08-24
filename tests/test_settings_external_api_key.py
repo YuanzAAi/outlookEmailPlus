@@ -1,4 +1,7 @@
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
+from unittest.mock import patch
 
 from tests._import_app import clear_login_attempts, import_web_app_module
 
@@ -221,6 +224,146 @@ class ExternalApiKeySettingsTests(unittest.TestCase):
         settings = resp2.get_json().get("settings", {})
         self.assertEqual(settings.get("external_api_keys_count"), 1)
         self.assertFalse(settings.get("external_api_keys", [])[0]["enabled"])
+
+    def test_post_external_api_key_generates_secret_and_expiration(self):
+        client = self.app.test_client()
+        self._login(client)
+
+        resp = client.post(
+            "/api/settings/external-api-keys",
+            json={
+                "name": "automation",
+                "expires_in_days": 30,
+                "allowed_emails": ["user@example.com"],
+                "pool_access": True,
+                "enabled": True,
+            },
+        )
+
+        self.assertEqual(resp.status_code, 201)
+        payload = resp.get_json()
+        self.assertTrue(payload.get("success"))
+        generated_key = payload.get("api_key")
+        self.assertRegex(generated_key, r"^oep_[A-Za-z0-9_-]{40,}$")
+        self.assertEqual(payload.get("item", {}).get("name"), "automation")
+        self.assertTrue(payload.get("item", {}).get("expires_at"))
+        self.assertFalse(payload.get("item", {}).get("expired"))
+
+        settings_resp = client.get("/api/settings")
+        stored_item = settings_resp.get_json().get("settings", {}).get("external_api_keys", [])[0]
+        self.assertNotEqual(stored_item.get("api_key_masked"), generated_key)
+        self.assertNotIn("api_key", stored_item)
+
+        with self.app.app_context():
+            from outlook_web.repositories import external_api_keys as external_api_keys_repo
+
+            matched = external_api_keys_repo.find_external_api_key_by_plaintext(generated_key)
+            self.assertIsNotNone(matched)
+
+    def test_post_external_api_key_supports_never_expiring_key(self):
+        client = self.app.test_client()
+        self._login(client)
+
+        resp = client.post(
+            "/api/settings/external-api-keys",
+            json={"name": "permanent", "expires_in_days": None},
+        )
+
+        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(resp.get_json().get("item", {}).get("expires_at"), "")
+
+    def test_post_external_api_key_rejects_duplicate_name(self):
+        client = self.app.test_client()
+        self._login(client)
+
+        first = client.post(
+            "/api/settings/external-api-keys",
+            json={"name": "automation", "expires_in_days": 7},
+        )
+        duplicate = client.post(
+            "/api/settings/external-api-keys",
+            json={"name": "AUTOMATION", "expires_in_days": 7},
+        )
+
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(duplicate.status_code, 409)
+        self.assertEqual(
+            duplicate.get_json().get("error", {}).get("code"),
+            "EXTERNAL_API_KEY_NAME_CONFLICT",
+        )
+
+    def test_concurrent_create_allows_only_one_case_insensitive_name(self):
+        clients = [self.app.test_client(), self.app.test_client()]
+        for client in clients:
+            self._login(client)
+
+        with self.app.app_context():
+            from outlook_web.repositories import external_api_keys as external_api_keys_repo
+
+            original_list = external_api_keys_repo.list_external_api_keys
+
+        barrier = threading.Barrier(2)
+
+        def synchronized_list(*args, **kwargs):
+            result = original_list(*args, **kwargs)
+            barrier.wait(timeout=5)
+            return result
+
+        def create_key(client, name):
+            return client.post(
+                "/api/settings/external-api-keys",
+                json={"name": name, "expires_in_days": 7},
+            )
+
+        with patch.object(external_api_keys_repo, "list_external_api_keys", side_effect=synchronized_list):
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                futures = [
+                    executor.submit(create_key, clients[0], "Concurrent Key"),
+                    executor.submit(create_key, clients[1], "concurrent key"),
+                ]
+                responses = [future.result(timeout=10) for future in futures]
+
+        self.assertEqual(sorted(response.status_code for response in responses), [201, 409])
+        conflict = next(response for response in responses if response.status_code == 409)
+        self.assertEqual(
+            conflict.get_json().get("error", {}).get("code"),
+            "EXTERNAL_API_KEY_NAME_CONFLICT",
+        )
+
+        settings_resp = clients[0].get("/api/settings")
+        keys = settings_resp.get_json().get("settings", {}).get("external_api_keys", [])
+        self.assertEqual(len(keys), 1)
+
+    def test_post_external_api_key_rejects_invalid_email_scope(self):
+        client = self.app.test_client()
+        self._login(client)
+
+        resp = client.post(
+            "/api/settings/external-api-keys",
+            json={
+                "name": "invalid-scope",
+                "allowed_emails": ["valid@example.com", "not-an-email"],
+            },
+        )
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(
+            resp.get_json().get("error", {}).get("code"),
+            "EXTERNAL_API_KEY_EMAIL_SCOPE_INVALID",
+        )
+
+    def test_expired_external_api_key_is_not_accepted(self):
+        with self.app.app_context():
+            from outlook_web.repositories import external_api_keys as external_api_keys_repo
+
+            external_api_keys_repo.create_external_api_key(
+                name="expired",
+                api_key="expired-key",
+                expires_at="2000-01-01T00:00:00Z",
+            )
+
+            self.assertIsNone(external_api_keys_repo.find_external_api_key_by_plaintext("expired-key"))
+            self.assertFalse(external_api_keys_repo.has_any_external_api_key_configured(enabled_only=True))
 
     def test_get_settings_exposes_pool_external_enabled(self):
         with self.app.app_context():

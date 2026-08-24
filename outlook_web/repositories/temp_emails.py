@@ -27,6 +27,9 @@ DEFAULT_TEMP_MAIL_PROVIDER_NAME = "custom_domain_temp_mail"
 LEGACY_TEMP_MAIL_PROVIDER_NAME = "legacy_bridge"
 
 DEFAULT_PROVIDER_CAPABILITIES = {
+    "create_mailbox": True,
+    "list_messages": True,
+    "get_message_detail": True,
     "delete_mailbox": False,
     "delete_message": True,
     "clear_messages": True,
@@ -126,25 +129,7 @@ def deserialize_temp_email_meta(raw_meta: Any, *, source: str | None = None) -> 
         "provider_cursor": str(meta.get("provider_cursor") or "").strip(),
         "provider_labels": [str(item).strip() for item in provider_labels if str(item or "").strip()],
         "provider_capabilities": {
-            "delete_mailbox": bool(
-                provider_capabilities.get("delete_mailbox", DEFAULT_PROVIDER_CAPABILITIES["delete_mailbox"])
-            ),
-            "delete_message": bool(
-                provider_capabilities.get("delete_message", DEFAULT_PROVIDER_CAPABILITIES["delete_message"])
-            ),
-            "clear_messages": bool(
-                provider_capabilities.get("clear_messages", DEFAULT_PROVIDER_CAPABILITIES["clear_messages"])
-            ),
-            "send_message": bool(provider_capabilities.get("send_message", DEFAULT_PROVIDER_CAPABILITIES["send_message"])),
-            "list_sent_messages": bool(
-                provider_capabilities.get("list_sent_messages", DEFAULT_PROVIDER_CAPABILITIES["list_sent_messages"])
-            ),
-            "delete_sent_message": bool(
-                provider_capabilities.get("delete_sent_message", DEFAULT_PROVIDER_CAPABILITIES["delete_sent_message"])
-            ),
-            "clear_sent_messages": bool(
-                provider_capabilities.get("clear_sent_messages", DEFAULT_PROVIDER_CAPABILITIES["clear_sent_messages"])
-            ),
+            key: bool(provider_capabilities.get(key, default)) for key, default in DEFAULT_PROVIDER_CAPABILITIES.items()
         },
         "provider_debug": provider_debug,
     }
@@ -239,18 +224,28 @@ def build_temp_mailbox_descriptor(record: Dict[str, Any]) -> Dict[str, Any]:
 def build_temp_mailbox_public_dto(record: Dict[str, Any]) -> Dict[str, Any]:
     descriptor = build_temp_mailbox_descriptor(record)
     stored_record = descriptor.get("record") or {}
+    provider_name = descriptor["provider_name"]
+    provider_capabilities = dict((descriptor.get("meta") or {}).get("provider_capabilities") or {})
+    compatibility_mode = (
+        "legacy"
+        if descriptor["source"] == LEGACY_TEMP_MAIL_SOURCE or provider_name == LEGACY_TEMP_MAIL_PROVIDER_NAME
+        else "native"
+    )
     return {
         "email": descriptor["email"],
         "prefix": descriptor["prefix"],
         "domain": descriptor["domain"],
         "source": descriptor["source"],
+        "provider_name": provider_name,
+        "provider_capabilities": provider_capabilities,
+        "compatibility_mode": compatibility_mode,
+        "read_capability": descriptor["read_capability"],
         "mailbox_type": descriptor["mailbox_type"],
         "visible_in_ui": descriptor["visible_in_ui"],
         "status": descriptor["status"],
         "created_at": descriptor["created_at"],
         "task_token": descriptor["task_token"],
-        "provider_name": descriptor["provider_name"],
-        "capabilities": dict((descriptor.get("meta") or {}).get("provider_capabilities") or {}),
+        "capabilities": provider_capabilities,
         "group_id": stored_record.get("group_id"),
         "tags": list(stored_record.get("tags") or []),
         "latest_message_at": int(stored_record.get("latest_message_at") or 0),
@@ -290,14 +285,12 @@ def update_temp_email_organization(email_addr: str, *, group_id: Optional[int], 
 
 def get_visible_temp_email_counts_by_group() -> Dict[int, int]:
     db = get_db()
-    rows = db.execute(
-        """
+    rows = db.execute("""
         SELECT group_id, COUNT(*) AS count
         FROM temp_emails
         WHERE visible_in_ui = 1 AND group_id IS NOT NULL
         GROUP BY group_id
-        """
-    ).fetchall()
+        """).fetchall()
     return {int(row["group_id"]): int(row["count"] or 0) for row in rows}
 
 

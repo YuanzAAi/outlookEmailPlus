@@ -243,6 +243,7 @@ def api_key_required(f):
                 "allowed_emails": matched_consumer.get("allowed_emails") or [],
                 "pool_access": bool(matched_consumer.get("pool_access", False)),
                 "enabled": bool(matched_consumer.get("enabled", True)),
+                "expires_at": matched_consumer.get("expires_at") or "",
                 "is_legacy": False,
             }
             return f(*args, **kwargs)

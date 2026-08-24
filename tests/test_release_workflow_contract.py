@@ -19,6 +19,12 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
 
         self.assertIn("docker build --pull -t outlook-email-plus:upstream-sync .", workflow)
         self.assertIn("Push verified merge", workflow)
+        self.assertIn("Check upstream mergeability", workflow)
+        self.assertIn("git merge-tree --write-tree HEAD upstream/main", workflow)
+        self.assertIn("blocked: ${{ steps.sync_gate.outputs.blocked }}", workflow)
+        self.assertIn("id: sync_gate", workflow)
+        self.assertIn("UPSTREAM_SYNC_TOKEN is not configured", workflow)
+        self.assertIn("SYNC_BLOCKED", workflow)
         self.assertIn("git push origin HEAD:main", workflow)
         self.assertIn("Dispatch verified image release", workflow)
         self.assertIn("github.rest.actions.createWorkflowDispatch", workflow)
@@ -27,6 +33,10 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertLess(
             workflow.index("git push origin HEAD:main"),
             workflow.index("github.rest.actions.createWorkflowDispatch"),
+        )
+        self.assertLess(
+            workflow.index("Check upstream mergeability"),
+            workflow.index("Verify sync push token"),
         )
         self.assertIn("report-sync-status:", workflow)
 
@@ -43,6 +53,8 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertIn("Check Daytona configuration", workflow)
         self.assertIn("Daytona snapshot refresh skipped because fork secrets are not configured.", workflow)
         self.assertIn("if: steps.config.outputs.configured == 'true'", workflow)
+        self.assertIn("- 'scripts/**'", workflow)
+        self.assertIn("group: daytona-snapshot-${{ github.ref }}", workflow)
 
 
 if __name__ == "__main__":

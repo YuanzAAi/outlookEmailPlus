@@ -3,10 +3,11 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from flask import jsonify
+from flask import jsonify, request
 
 from outlook_web.repositories import overview as overview_repo
 from outlook_web.security.auth import login_required
+from outlook_web.services.performance_metrics import get_performance_snapshot, record_client_metrics
 
 # ==================== 概览 summary 进程级 TTL 缓存 ====================
 # summary 是 dashboard 首屏加载的聚合查询（6 条 SQL），
@@ -46,3 +47,16 @@ def api_get_overview_pool() -> Any:
 @login_required
 def api_get_overview_activity() -> Any:
     return jsonify(overview_repo.get_activity_stats())
+
+
+@login_required
+def api_get_overview_performance() -> Any:
+    window_seconds = request.args.get("window_seconds", default=3600, type=int)
+    return jsonify(get_performance_snapshot(window_seconds))
+
+
+@login_required
+def api_report_client_performance() -> Any:
+    payload = request.get_json(silent=True) or {}
+    accepted = record_client_metrics(payload.get("metrics"))
+    return jsonify({"success": True, "accepted": accepted}), 202

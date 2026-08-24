@@ -19,6 +19,8 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       updated: ${{ steps.detect.outputs.updated }}
+      mergeable: ${{ steps.mergeability.outputs.mergeable }}
+      blocked: ${{ steps.sync_gate.outputs.blocked }}
 
     steps:
       - name: Checkout fork
@@ -49,36 +51,56 @@ jobs:
             echo "Upstream changes detected: $(git rev-parse --short upstream/main)" >> "$GITHUB_STEP_SUMMARY"
           fi
 
-      - name: Verify sync push token
+      - name: Check upstream mergeability
+        id: mergeability
         if: steps.detect.outputs.updated == 'true'
+        shell: bash
+        run: |
+          set +e
+          merge_output="$(git merge-tree --write-tree HEAD upstream/main 2>&1)"
+          merge_status=$?
+          if [ "$merge_status" -ne 0 ]; then
+            echo "mergeable=false" >> "$GITHUB_OUTPUT"
+            echo "上游包含与 fork 本地功能冲突的文件，本次自动同步跳过；不会修改 main 或生产镜像。" >> "$GITHUB_STEP_SUMMARY"
+            printf '%s\n' "$merge_output" | grep '^CONFLICT' | head -20 >> "$GITHUB_STEP_SUMMARY" || true
+          else
+            echo "mergeable=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Verify sync push token
+        id: sync_gate
+        if: steps.detect.outputs.updated == 'true' && steps.mergeability.outputs.mergeable == 'true'
         shell: bash
         env:
           UPSTREAM_SYNC_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
         run: |
           if [ -z "${UPSTREAM_SYNC_TOKEN:-}" ]; then
-            echo "::error::UPSTREAM_SYNC_TOKEN is required to sync GitHub workflow files"
-            exit 1
+            echo "blocked=true" >> "$GITHUB_OUTPUT"
+            echo "::warning::UPSTREAM_SYNC_TOKEN is not configured; upstream sync is blocked without failing the workflow"
+            echo "上游同步已暂停：缺少 UPSTREAM_SYNC_TOKEN。配置后将恢复包含 workflow 文件的自动同步。" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
           fi
+          echo "blocked=false" >> "$GITHUB_OUTPUT"
 
       - name: Merge upstream into fork
-        if: steps.detect.outputs.updated == 'true'
+        if: steps.detect.outputs.updated == 'true' && steps.mergeability.outputs.mergeable == 'true' && steps.sync_gate.outputs.blocked != 'true'
         run: git merge --no-ff --no-edit upstream/main
 
       - name: Set up Python
-        if: steps.detect.outputs.updated == 'true'
+        if: steps.detect.outputs.updated == 'true' && steps.mergeability.outputs.mergeable == 'true' && steps.sync_gate.outputs.blocked != 'true'
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
       - name: Install quality dependencies
-        if: steps.detect.outputs.updated == 'true'
+        if: steps.detect.outputs.updated == 'true' && steps.mergeability.outputs.mergeable == 'true' && steps.sync_gate.outputs.blocked != 'true'
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
           python -m pip install coverage flake8 black isort mypy bandit[toml]
 
       - name: Run quality gate
-        if: steps.detect.outputs.updated == 'true'
+        if: steps.detect.outputs.updated == 'true' && steps.mergeability.outputs.mergeable == 'true' && steps.sync_gate.outputs.blocked != 'true'
         run: |
           python -m compileall -q outlook_web web_outlook_app.py outlook_mail_reader.py start.py tests
           FORMAT_BASE_SHA=HEAD^1 bash scripts/check-changed-python-format.sh
@@ -90,7 +112,7 @@ jobs:
           coverage report
 
       - name: Build and verify candidate image
-        if: steps.detect.outputs.updated == 'true'
+        if: steps.detect.outputs.updated == 'true' && steps.mergeability.outputs.mergeable == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -116,13 +138,13 @@ jobs:
           exit 1
 
       - name: Clean candidate resources
-        if: always() && steps.detect.outputs.updated == 'true'
+        if: always() && steps.detect.outputs.updated == 'true' && steps.mergeability.outputs.mergeable == 'true' && steps.sync_gate.outputs.blocked != 'true'
         run: |
           docker rm -f outlook-email-plus-upstream-sync 2>/dev/null || true
           docker image rm outlook-email-plus:upstream-sync 2>/dev/null || true
 
       - name: Push verified merge
-        if: steps.detect.outputs.updated == 'true'
+        if: steps.detect.outputs.updated == 'true' && steps.mergeability.outputs.mergeable == 'true' && steps.sync_gate.outputs.blocked != 'true'
         shell: bash
         env:
           UPSTREAM_SYNC_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
@@ -135,7 +157,7 @@ jobs:
           git push origin HEAD:main
 
       - name: Dispatch verified image release
-        if: steps.detect.outputs.updated == 'true'
+        if: steps.detect.outputs.updated == 'true' && steps.mergeability.outputs.mergeable == 'true' && steps.sync_gate.outputs.blocked != 'true'
         uses: actions/github-script@v7
         with:
           script: |
@@ -158,6 +180,8 @@ jobs:
         uses: actions/github-script@v7
         env:
           SYNC_RESULT: ${{ needs.sync.result }}
+          SYNC_MERGEABLE: ${{ needs.sync.outputs.mergeable }}
+          SYNC_BLOCKED: ${{ needs.sync.outputs.blocked }}
         with:
           script: |
             const title = '[上游同步失败] 需要人工处理';
@@ -170,17 +194,26 @@ jobs:
               per_page: 100,
             });
             const existing = issues.find((issue) => !issue.pull_request && issue.title === title);
-            const details = `Workflow: ${context.workflow}\nRun: ${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}\nFork commit: ${context.sha}`;
+            const mergeable = process.env.SYNC_MERGEABLE || 'n/a';
+            const blockedByConfig = process.env.SYNC_BLOCKED === 'true';
+            const blockedByConflict = !failed && mergeable === 'false';
+            const blocked = blockedByConfig || blockedByConflict;
+            const details = `Workflow: ${context.workflow}\nRun: ${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}\nFork commit: ${context.sha}\nMergeable: ${mergeable}\nBlocked: ${blockedByConfig ? 'missing UPSTREAM_SYNC_TOKEN' : 'no'}`;
 
-            if (failed) {
+            if (failed || blocked) {
+              const message = blockedByConfig
+                ? '上游同步因缺少 UPSTREAM_SYNC_TOKEN 暂停；本次未修改 main 或生产镜像。配置该 Secret 后将恢复同步。'
+                : blockedByConflict
+                  ? '上游变更与 fork 的本地功能发生冲突，本次已跳过自动合并；main 与生产镜像保持不变，需要人工拆分处理。'
+                : '自动合并、测试、镜像健康检查或推送失败。main 与生产镜像均不会被本次失败流程替换。';
               if (existing) {
-                await github.rest.issues.createComment({ owner, repo, issue_number: existing.number, body: details });
+                await github.rest.issues.createComment({ owner, repo, issue_number: existing.number, body: `${message}\n\n${details}` });
               } else {
                 await github.rest.issues.create({
                   owner,
                   repo,
                   title,
-                  body: `自动合并、测试、镜像健康检查或推送失败。main 与生产镜像均不会被本次失败流程替换。\n\n${details}`,
+                  body: `${message}\n\n${details}`,
                 });
               }
               return;

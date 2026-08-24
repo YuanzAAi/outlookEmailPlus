@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -11,6 +12,9 @@ from outlook_web.services.http import get_response_details
 TOKEN_URL_TEMPLATE = "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
 TOKEN_URL_GRAPH = TOKEN_URL_TEMPLATE.format(tenant="common")
 DEFAULT_GRAPH_SCOPE = "https://graph.microsoft.com/.default"
+# 部分历史 refresh token 只允许重新申请原始的委托权限集合；
+# 对这类 token 请求 .default 会返回 AADSTS90023。
+DEFAULT_GRAPH_NAMED_SCOPE = "https://graph.microsoft.com/Mail.Read offline_access"
 GRAPH_MAIL_READ_SCOPES = ("Mail.Read", "Mail.ReadWrite")
 
 # Graph API 返回 401 时表示账号授权失效（与 token endpoint 失败不同）
@@ -30,6 +34,33 @@ def build_token_url(tenant: str | None = None) -> str:
     return TOKEN_URL_TEMPLATE.format(tenant=normalized_tenant)
 
 
+def _is_aadsts90023_response(response: Any) -> bool:
+    """判断 token endpoint 是否返回需要命名 scope 的 AADSTS90023。"""
+    try:
+        payload = response.json()
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        return False
+
+    error_code = str(payload.get("error") or "").strip().lower()
+    raw_error_codes = payload.get("error_codes")
+    if isinstance(raw_error_codes, (list, tuple, set)):
+        error_codes = raw_error_codes
+    elif raw_error_codes:
+        error_codes = [raw_error_codes]
+    else:
+        error_codes = []
+    description = str(payload.get("error_description") or "").lower()
+    exact_code = re.compile(r"(?<!\d)(?:aadsts)?90023(?!\d)", re.IGNORECASE)
+    return (
+        bool(exact_code.search(description))
+        or bool(exact_code.search(error_code))
+        or 90023 in error_codes
+        or "90023" in {str(item).strip() for item in error_codes}
+    )
+
+
 def get_access_token_graph_result(
     client_id: str,
     refresh_token: str,
@@ -42,17 +73,31 @@ def get_access_token_graph_result(
     try:
         proxies = build_proxies(proxy_url)
         http = session or requests
+        requested_scope = DEFAULT_GRAPH_SCOPE
+        token_data = {
+            "client_id": client_id,
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+            "scope": requested_scope,
+        }
         res = http.post(
             TOKEN_URL_GRAPH,
-            data={
-                "client_id": client_id,
-                "grant_type": "refresh_token",
-                "refresh_token": refresh_token,
-                "scope": DEFAULT_GRAPH_SCOPE,
-            },
+            data=token_data,
             timeout=timeout,
             proxies=proxies,
         )
+
+        # 保留 .default 作为首选，兼容现有账号；仅在 Microsoft 明确返回
+        # AADSTS90023 时改用委托 Mail.Read，避免改变其它错误的语义。
+        if res.status_code != 200 and _is_aadsts90023_response(res):
+            requested_scope = DEFAULT_GRAPH_NAMED_SCOPE
+            token_data["scope"] = requested_scope
+            res = http.post(
+                TOKEN_URL_GRAPH,
+                data=token_data,
+                timeout=timeout,
+                proxies=proxies,
+            )
 
         if res.status_code != 200:
             details = get_response_details(res)
@@ -369,6 +414,10 @@ def test_refresh_token_with_rotation(
     for attempt in range(max_retries + 1):
         try:
             res = requests.post(url, data=data, timeout=15, proxies=proxies)
+
+            if res.status_code != 200 and resolved_scope == DEFAULT_GRAPH_SCOPE and _is_aadsts90023_response(res):
+                data["scope"] = DEFAULT_GRAPH_NAMED_SCOPE
+                res = requests.post(url, data=data, timeout=15, proxies=proxies)
 
             if res.status_code == 200:
                 try:

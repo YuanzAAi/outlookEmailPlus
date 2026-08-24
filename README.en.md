@@ -36,7 +36,7 @@ The repository already includes some screenshots, and more can be added later.
 
 ## Version Highlights
 
-Current stable version: `v2.2.2`
+Current stable version: `v2.9.10`
 
 ### Recent Version Overview
 

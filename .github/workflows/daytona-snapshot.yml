@@ -11,8 +11,13 @@ on:
       - 'templates/**'
       - 'static/**'
       - 'daytona/**'
+      - 'scripts/**'
       - '.github/workflows/daytona-snapshot.yml'
   workflow_dispatch:
+
+concurrency:
+  group: daytona-snapshot-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   refresh:

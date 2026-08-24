@@ -4,6 +4,44 @@ All notable changes to OutlookMail Plus are documented in this file.
 
 ## [Unreleased]
 
+## [v2.9.10] - 2026-08-24
+
+本地 legacy fork 后端整合版：跟进上游后端修复与服务能力，不包含上游 Ant Design Pro SPA、双前端镜像及部署迁移。
+
+### 跟进内容
+
+- 完善 Graph 权限 scope 回退、无代理错误分类与 Graph/IMAP 邮件检索回退。
+- 保留并完善临时邮箱 provider 能力元数据、Cloudflare/GPTMail/自定义 provider 配置，以及现有扩展的发送/已发送能力。
+- 跟进 API Key 创建、过期与名称唯一性、AI 连通性配置、性能链路观测和 Webhook 投递诊断。
+- 增加 `/healthz` 构建身份信息，并修复同步工作流的冲突、令牌阻塞与 Daytona 删除/创建竞态处理。
+
+### 兼容性声明
+
+- 保留 fork 现有旧前端、URL 取码、邮件检索、账号管理和临时邮箱/API Key 业务逻辑；上游 SPA/双前端迁移不在本版本范围内。
+
+## [v2.9.6] - 2026-08-08
+
+### 新增功能 / New Features
+
+- **ZER-539 前后端性能链路观测**：统一采集页面加载、浏览器端到端 API、Flask 路由、邮件链路与真实 AI 调用耗时；新增滚动窗口聚合、P50/P95、错误率、瓶颈判断和优化建议。
+- **新前端性能看板**：概览页新增“性能链路”标签页，按服务端接口、浏览器请求和页面维度展示关键数据，并支持 30 秒自动刷新。
+
+### 重要变更 / Important Changes
+
+- **低开销与隐私边界**：采集器使用每类 2000 条的进程内有界队列；仅保存路由模板、耗时、状态码和 trace ID，不保存查询参数、请求体、响应体、AI 端点或密钥。
+- **版本号**：后端升级至 `2.9.6`，SPA 前端升级至 `6.0.3`。
+
+### 测试/验证 / Testing & Verification
+
+- 待完成本地前后端质量门禁后补充。
+
+## [v2.9.5] - 2026-08-05
+
+### 修复 / Bug Fixes
+
+- **ZER-381 无代理场景错误误分类**：仅在分组明确配置 `proxy_url` 时，才将 Graph 的 `ProxyError`/`ConnectionError` 判定为 `EMAIL_PROXY_CONNECTION_FAILED` / `PROXY_ERROR` 并跳过 IMAP 回退；无代理时继续 Graph → IMAP 回退。覆盖 `/api/emails`、external messages 与删除邮件回退路径。
+- **主题抽屉开关语义**：修正 Ant Design Pro `SettingDrawer` 的 `collapse` 开合状态接线。
+
 ## [v2.8.0] - 2026-07-26
 
 旧前端紧急版本（Issue #115）。在 SPA 新前端迁移（#109）之前，先发布一个范围受控、可回滚的稳定旧前端版本，合入近期关键缺陷修复与验证码能力增强。

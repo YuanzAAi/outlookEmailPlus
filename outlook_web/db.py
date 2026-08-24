@@ -33,7 +33,8 @@ from outlook_web.security.crypto import encrypt_data, hash_password, is_encrypte
 # v22：2026-04-16 邮箱池项目维度成功复用（accounts.claimed_project_key + account_project_usage.success_*）
 # v23：2026-04-19 数据概览大盘（verification_extract_logs + overview 兼容字段）
 # v24：2026-07-01 临时邮箱接入邮箱池（temp_emails 新增池生命周期字段：pool_status/claimed_by/...，可被 claim-random 领取）
-DB_SCHEMA_VERSION = 24
+# v25：ZER-537 — external_api_keys 新增 expires_at，支持 API Key 生命周期管理
+DB_SCHEMA_VERSION = 25
 DB_SCHEMA_VERSION_KEY = "db_schema_version"
 DB_SCHEMA_LAST_UPGRADE_TRACE_ID_KEY = "db_schema_last_upgrade_trace_id"
 DB_SCHEMA_LAST_UPGRADE_ERROR_KEY = "db_schema_last_upgrade_error"
@@ -951,6 +952,7 @@ def init_db(database_path: Optional[str] = None):
                 allowed_emails_json TEXT NOT NULL DEFAULT '[]',
                 pool_access INTEGER NOT NULL DEFAULT 0,
                 enabled INTEGER NOT NULL DEFAULT 1,
+                expires_at TIMESTAMP,
                 last_used_at TIMESTAMP,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -960,14 +962,88 @@ def init_db(database_path: Optional[str] = None):
         external_api_keys_columns = [col[1] for col in cursor.fetchall()]
         if "pool_access" not in external_api_keys_columns:
             cursor.execute("ALTER TABLE external_api_keys ADD COLUMN pool_access INTEGER NOT NULL DEFAULT 0")
+        if "expires_at" not in external_api_keys_columns:
+            cursor.execute("ALTER TABLE external_api_keys ADD COLUMN expires_at TIMESTAMP")
+        expected_enabled_index_columns = ["enabled", "expires_at", "updated_at"]
+        enabled_index_columns = [
+            row[2] for row in cursor.execute("PRAGMA index_info('idx_external_api_keys_enabled')").fetchall()
+        ]
+        if enabled_index_columns and enabled_index_columns != expected_enabled_index_columns:
+            cursor.execute("DROP INDEX idx_external_api_keys_enabled")
         cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_external_api_keys_enabled
-            ON external_api_keys(enabled, updated_at)
+            ON external_api_keys(enabled, expires_at, updated_at)
             """)
-        cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_external_api_keys_name
-            ON external_api_keys(name)
-            """)
+
+        # API Key 名称必须由数据库保证原子唯一，避免并发请求绕过应用层预检查。
+        # 旧库若已有大小写不敏感的重复名称，遵循既有迁移纪律：中止并给出修复 SQL，
+        # 不自动删除、禁用或重命名仍可能有效的凭据。
+        unique_name_index_row = cursor.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_external_api_keys_name_unique'"
+        ).fetchone()
+        unique_name_index_sql = str(unique_name_index_row["sql"] or "") if unique_name_index_row else ""
+        normalized_unique_name_index_sql = "".join(unique_name_index_sql.lower().split())
+        if unique_name_index_row and "onexternal_api_keys(lower(trim(name)))" not in normalized_unique_name_index_sql:
+            cursor.execute("DROP INDEX idx_external_api_keys_name_unique")
+            unique_name_index_row = None
+
+        if not unique_name_index_row:
+            duplicate_name_sample = cursor.execute("""
+                SELECT LOWER(TRIM(name)) AS normalized_name, COUNT(*) AS c
+                FROM external_api_keys
+                GROUP BY LOWER(TRIM(name))
+                HAVING COUNT(*) > 1
+                LIMIT 5
+                """).fetchall()
+            if duplicate_name_sample:
+                duplicate_name_count_row = cursor.execute("""
+                    SELECT COUNT(*) AS c
+                    FROM (
+                        SELECT LOWER(TRIM(name)) AS normalized_name
+                        FROM external_api_keys
+                        GROUP BY LOWER(TRIM(name))
+                        HAVING COUNT(*) > 1
+                    )
+                    """).fetchone()
+                duplicate_name_count = int(
+                    duplicate_name_count_row["c"]
+                    if duplicate_name_count_row and duplicate_name_count_row["c"] is not None
+                    else 0
+                )
+                trace_text = str(migration_trace_id or "").strip()
+                sql_hint = (
+                    "-- 1) 找出大小写不敏感的重复名称\n"
+                    "SELECT LOWER(TRIM(name)) AS normalized_name, COUNT(*) AS c\n"
+                    "FROM external_api_keys\n"
+                    "GROUP BY LOWER(TRIM(name))\n"
+                    "HAVING COUNT(*) > 1;\n\n"
+                    "-- 2) 查看重复名称对应的 Key；请备份后人工决定新名称\n"
+                    "SELECT id, name, enabled, created_at, updated_at\n"
+                    "FROM external_api_keys\n"
+                    "WHERE LOWER(TRIM(name)) IN (\n"
+                    "  SELECT LOWER(TRIM(name))\n"
+                    "  FROM external_api_keys\n"
+                    "  GROUP BY LOWER(TRIM(name))\n"
+                    "  HAVING COUNT(*) > 1\n"
+                    ")\n"
+                    "ORDER BY LOWER(TRIM(name)), id;\n\n"
+                    "-- 3) 示例：为指定重复项设置人工确认后的唯一名称\n"
+                    "UPDATE external_api_keys SET name = '<unique-name>' WHERE id = <duplicate-id>;\n"
+                )
+                raise Exception(
+                    "数据库升级被中止：检测到 external_api_keys.name 存在大小写不敏感的重复值，"
+                    "无法创建唯一索引。"
+                    f" duplicate_external_api_key_name_count={duplicate_name_count or len(duplicate_name_sample)}"
+                    + (f" trace_id={trace_text}" if trace_text else "")
+                    + "\n请先备份数据库并重命名重复 API Key 后重试。参考 SQL：\n"
+                    + sql_hint
+                )
+            cursor.execute("""
+                CREATE UNIQUE INDEX idx_external_api_keys_name_unique
+                ON external_api_keys(LOWER(TRIM(name)))
+                """)
+
+        cursor.execute("DROP INDEX IF EXISTS idx_external_api_keys_name")
 
         # v10: 调用方日级使用统计（PRD-00008 P2）
         cursor.execute("""

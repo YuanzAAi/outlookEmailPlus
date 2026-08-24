@@ -144,7 +144,9 @@ def list_messages(
                     "error": result.get("error") or result,
                     "errors": errors,
                 }
-            if isinstance(result.get("error"), dict) and result["error"].get("type") in (
+            # 直连失败仍应继续尝试 IMAP；只有明确配置了分组代理时，
+            # ProxyError/ConnectionError 才代表代理链路需要立即终止。
+            if proxy_url and isinstance(result.get("error"), dict) and result["error"].get("type") in (
                 "ProxyError",
                 "ConnectionError",
             ):

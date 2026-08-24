@@ -37,6 +37,32 @@ def _make_error_response(status: int = 400):
     return resp
 
 
+def _make_aadsts90023_response():
+    resp = MagicMock()
+    resp.status_code = 400
+    resp.json.return_value = {
+        "error": "invalid_request",
+        "error_description": "AADSTS90023: No applicable permissions were found for this user.",
+        "error_codes": [90023],
+    }
+    resp.text = "AADSTS90023"
+    resp.headers = {}
+    return resp
+
+
+def _make_aadsts9002313_response():
+    resp = MagicMock()
+    resp.status_code = 400
+    resp.json.return_value = {
+        "error": "invalid_grant",
+        "error_description": "AADSTS9002313: Invalid request. Request is malformed or invalid.",
+        "error_codes": [9002313],
+    }
+    resp.text = "AADSTS9002313"
+    resp.headers = {}
+    return resp
+
+
 class TestGraphPermissionPrecheck(unittest.TestCase):
     """Graph API 权限预检测试"""
 
@@ -101,6 +127,53 @@ class TestGraphPermissionPrecheck(unittest.TestCase):
         result = get_access_token_graph_result("cid", "rt", proxy_url=None)
         self.assertFalse(result.get("success"))
         self.assertIsNone(result.get("scope"))
+
+    @patch("outlook_web.services.graph.requests.post")
+    def test_aadsts90023_retries_with_named_graph_scope(self, mock_post):
+        """历史委托 token 遇到 90023 时应自动改用 Mail.Read scope。"""
+        from outlook_web.services.graph import DEFAULT_GRAPH_NAMED_SCOPE, get_access_token_graph_result
+
+        mock_post.side_effect = [
+            _make_aadsts90023_response(),
+            _make_graph_token_response("at-named", scope="Mail.Read offline_access"),
+        ]
+
+        result = get_access_token_graph_result("cid", "rt", proxy_url=None)
+
+        self.assertTrue(result.get("success"))
+        self.assertEqual(result.get("access_token"), "at-named")
+        self.assertEqual(mock_post.call_count, 2)
+        self.assertEqual(mock_post.call_args_list[1].kwargs["data"]["scope"], DEFAULT_GRAPH_NAMED_SCOPE)
+
+    @patch("outlook_web.services.graph.requests.post")
+    def test_aadsts9002313_does_not_retry_as_aadsts90023(self, mock_post):
+        """其它 invalid_grant 错误不能误触发命名 scope 重试。"""
+        from outlook_web.services.graph import get_access_token_graph_result
+
+        mock_post.return_value = _make_aadsts9002313_response()
+
+        result = get_access_token_graph_result("cid", "rt", proxy_url=None)
+
+        self.assertFalse(result.get("success"))
+        self.assertEqual(mock_post.call_count, 1)
+
+    @patch("outlook_web.services.graph.requests.post")
+    def test_refresh_rotation_retries_with_named_graph_scope(self, mock_post):
+        """批量刷新与单账号刷新共用同一 scope 兼容策略。"""
+        from outlook_web.services.graph import DEFAULT_GRAPH_NAMED_SCOPE, test_refresh_token_with_rotation
+
+        mock_post.side_effect = [
+            _make_aadsts90023_response(),
+            _make_graph_token_response("at-named", scope="Mail.Read offline_access", refresh_token="rt-new"),
+        ]
+
+        success, error, new_refresh_token = test_refresh_token_with_rotation("cid", "rt", max_retries=0)
+
+        self.assertTrue(success)
+        self.assertIsNone(error)
+        self.assertEqual(new_refresh_token, "rt-new")
+        self.assertEqual(mock_post.call_count, 2)
+        self.assertEqual(mock_post.call_args_list[1].kwargs["data"]["scope"], DEFAULT_GRAPH_NAMED_SCOPE)
 
     # ------------------------------------------------------------------
     # get_emails_graph 跳过无权限调用

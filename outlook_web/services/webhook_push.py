@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
+from time import perf_counter
 from typing import Any
 from urllib.parse import urlparse
 
@@ -23,6 +24,9 @@ class WebhookPushError(Exception):
         message_en: str,
         status: int = 502,
         details: Any = None,
+        status_code: int | None = None,
+        duration_ms: int | None = None,
+        attempts: int | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
@@ -30,6 +34,9 @@ class WebhookPushError(Exception):
         self.message_en = message_en
         self.status = status
         self.details = details
+        self.status_code = status_code
+        self.duration_ms = duration_ms
+        self.attempts = attempts
 
 
 def validate_webhook_url(url: str) -> str:
@@ -102,7 +109,7 @@ def send_webhook_message(
     text_body: str,
     timeout_sec: int = 10,
     retry: int = 1,
-) -> None:
+) -> dict[str, Any]:
     target_url = validate_webhook_url(url)
     headers = {
         "Content-Type": "text/plain; charset=utf-8",
@@ -111,8 +118,10 @@ def send_webhook_message(
         headers["X-Webhook-Token"] = str(token).strip()
 
     attempts = max(0, int(retry)) + 1
+    started_at = perf_counter()
     last_error: Exception | None = None
-    for _ in range(attempts):
+    last_status_code: int | None = None
+    for attempt in range(1, attempts + 1):
         try:
             response = requests.post(
                 target_url,
@@ -120,22 +129,28 @@ def send_webhook_message(
                 headers=headers,
                 timeout=timeout_sec,
             )
+            last_status_code = int(response.status_code)
             if 200 <= response.status_code < 300:
-                return
+                return {
+                    "status_code": int(response.status_code),
+                    "duration_ms": round((perf_counter() - started_at) * 1000),
+                    "attempts": attempt,
+                }
             last_error = WebhookPushError(
                 "WEBHOOK_SEND_FAILED",
                 "Webhook 发送失败",
                 message_en="Failed to send webhook message",
                 status=502,
-                details=f"status={response.status_code} body={(response.text or '')[:200]}",
+                details=(f"attempt={attempt}/{attempts} " f"status={response.status_code} body={(response.text or '')[:200]}"),
             )
         except requests.RequestException as exc:
+            last_status_code = None
             last_error = WebhookPushError(
                 "WEBHOOK_SEND_FAILED",
                 "Webhook 发送失败",
                 message_en="Failed to send webhook message",
                 status=502,
-                details=str(exc),
+                details=f"attempt={attempt}/{attempts} error={exc}",
             )
 
     logger.warning(
@@ -144,13 +159,26 @@ def send_webhook_message(
         attempts,
         getattr(last_error, "details", str(last_error) if last_error else "unknown"),
     )
+    failure_duration_ms = round((perf_counter() - started_at) * 1000)
     if isinstance(last_error, WebhookPushError):
+        last_error.status_code = last_status_code
+        last_error.duration_ms = failure_duration_ms
+        last_error.attempts = attempts
+        details_text = str(last_error.details or "").strip()
+        last_error.details = (
+            f"{details_text}; attempts={attempts} duration_ms={failure_duration_ms}"
+            if details_text
+            else f"attempts={attempts} duration_ms={failure_duration_ms}"
+        )
         raise last_error
     raise WebhookPushError(
         "WEBHOOK_SEND_FAILED",
         "Webhook 发送失败",
         message_en="Failed to send webhook message",
         status=502,
+        status_code=last_status_code,
+        duration_ms=failure_duration_ms,
+        attempts=attempts,
     )
 
 
@@ -197,7 +225,13 @@ def send_test_webhook_message() -> dict[str, Any]:
     text_body = build_business_webhook_text(test_source, test_message)
 
     try:
-        send_webhook_message(url=url, token=token, text_body=text_body, timeout_sec=10, retry=1)
+        delivery = send_webhook_message(
+            url=url,
+            token=token,
+            text_body=text_body,
+            timeout_sec=10,
+            retry=1,
+        )
     except WebhookPushError as exc:
         raise WebhookPushError(
             "WEBHOOK_TEST_SEND_FAILED",
@@ -205,8 +239,12 @@ def send_test_webhook_message() -> dict[str, Any]:
             message_en="Failed to send webhook test message",
             status=exc.status,
             details=exc.details,
+            status_code=exc.status_code,
+            duration_ms=exc.duration_ms,
+            attempts=exc.attempts,
         ) from exc
 
     return {
         "url": _safe_url_for_log(url),
+        **(delivery if isinstance(delivery, dict) else {}),
     }
