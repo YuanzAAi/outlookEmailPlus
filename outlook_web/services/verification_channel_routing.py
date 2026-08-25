@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any, Dict, List, Optional
@@ -178,6 +179,7 @@ def fetch_emails_for_channel(
     account: Dict[str, Any],
     channel: str,
     proxy_url: str = "",
+    graph_access_token: str = "",
     folder: str = "",
     skip: int = 0,
     top: int = 20,
@@ -194,14 +196,22 @@ def fetch_emails_for_channel(
 
     if normalized in (CHANNEL_GRAPH_INBOX, CHANNEL_GRAPH_JUNK):
         folder_name = "junkemail" if normalized == CHANNEL_GRAPH_JUNK else "inbox"
-        graph_result = graph_service.get_emails_graph(
-            str(account.get("client_id") or ""),
-            str(account.get("refresh_token") or ""),
-            folder=folder_name,
-            skip=int(skip or 0),
-            top=int(top or 20),
-            proxy_url=proxy_url,
-        )
+        if graph_access_token and int(skip or 0) == 0:
+            graph_result = graph_service.get_emails_graph_with_access_token(
+                graph_access_token,
+                folder=folder_name,
+                top=int(top or 20),
+                proxy_url=proxy_url,
+            )
+        else:
+            graph_result = graph_service.get_emails_graph(
+                str(account.get("client_id") or ""),
+                str(account.get("refresh_token") or ""),
+                folder=folder_name,
+                skip=int(skip or 0),
+                top=int(top or 20),
+                proxy_url=proxy_url,
+            )
         if not graph_result.get("success"):
             return {
                 "success": False,
@@ -382,6 +392,53 @@ def fetch_emails_and_detail_for_channel(
     }
 
 
+def _fetch_imap_folders_for_channel(
+    *,
+    account: Dict[str, Any],
+    channel: str,
+    proxy_url: str,
+    folders: List[str],
+    top: int,
+) -> List[tuple[str, Dict[str, Any]]]:
+    """并行读取 IMAP 文件夹，并按既有文件夹顺序返回结果。
+
+    Inbox 和 Junk 是相互独立的 IMAP 连接操作。这里只改变等待方式，
+    不改变后续的错误聚合、候选合并、时间排序或 folder 标记。
+    """
+    if len(folders) <= 1:
+        return [
+            (
+                folder,
+                fetch_emails_and_detail_for_channel(
+                    account=dict(account),
+                    channel=channel,
+                    proxy_url=proxy_url,
+                    folder=folder,
+                    top=top,
+                ),
+            )
+            for folder in folders
+        ]
+
+    with ThreadPoolExecutor(max_workers=len(folders), thread_name_prefix="imap-folder") as executor:
+        futures = [
+            (
+                folder,
+                executor.submit(
+                    fetch_emails_and_detail_for_channel,
+                    account=dict(account),
+                    channel=channel,
+                    proxy_url=proxy_url,
+                    folder=folder,
+                    top=top,
+                ),
+            )
+            for folder in folders
+        ]
+        # 按提交顺序读取 Future，保持原有 inbox -> junkemail 处理顺序。
+        return [(folder, future.result()) for folder, future in futures]
+
+
 def _get_channel_display_name(channel: str) -> str:
     return {
         "graph_inbox": "Graph (Inbox)",
@@ -539,6 +596,7 @@ def extract_verification_for_outlook(
     preferred = normalize_verification_channel(account.get("preferred_verification_channel"))
     channel_plan = build_verification_channel_plan(preferred)
     channel_plan = channel_capability_cache.filter_channel_plan(account_email, channel_plan)
+    graph_access_token = ""
 
     if preferred in (CHANNEL_IMAP_NEW, CHANNEL_IMAP_OLD):
         channel_plan = [preferred] if preferred in channel_plan else []
@@ -553,8 +611,11 @@ def extract_verification_for_outlook(
             )
             if precheck.get("new_refresh_token"):
                 account["refresh_token"] = str(precheck.get("new_refresh_token") or "")
-            if precheck.get("success") and not graph_service.has_mail_read_permission(precheck.get("scope", "")):
-                channel_plan = [ch for ch in channel_plan if not ch.startswith("graph_")]
+            if precheck.get("success"):
+                if graph_service.has_mail_read_permission(precheck.get("scope", "")):
+                    graph_access_token = str(precheck.get("access_token") or "")
+                else:
+                    channel_plan = [ch for ch in channel_plan if not ch.startswith("graph_")]
         except Exception:
             pass
 
@@ -575,23 +636,31 @@ def extract_verification_for_outlook(
             last_log_channel = channel or last_log_channel
             channel_available = False
             channel_folders = _candidate_folders_for_channel(channel) or ["inbox"]
-            for folder in channel_folders:
-                if _channel_group(channel) == "imap":
-                    channel_result = fetch_emails_and_detail_for_channel(
-                        account=account,
-                        channel=channel,
-                        proxy_url=proxy_url,
-                        folder=folder,
-                        top=VERIFICATION_FETCH_TOP,
+            if _channel_group(channel) == "imap":
+                channel_folder_results = _fetch_imap_folders_for_channel(
+                    account=account,
+                    channel=channel,
+                    proxy_url=proxy_url,
+                    folders=channel_folders,
+                    top=VERIFICATION_FETCH_TOP,
+                )
+            else:
+                channel_folder_results = [
+                    (
+                        folder,
+                        fetch_emails_for_channel(
+                            account=account,
+                            channel=channel,
+                            proxy_url=proxy_url,
+                            graph_access_token=graph_access_token,
+                            folder=folder,
+                            top=VERIFICATION_FETCH_TOP,
+                        ),
                     )
-                else:
-                    channel_result = fetch_emails_for_channel(
-                        account=account,
-                        channel=channel,
-                        proxy_url=proxy_url,
-                        folder=folder,
-                        top=VERIFICATION_FETCH_TOP,
-                    )
+                    for folder in channel_folders
+                ]
+
+            for folder, channel_result in channel_folder_results:
 
                 if not channel_result.get("success"):
                     error_key = channel if len(channel_folders) == 1 else f"{channel}:{folder}"

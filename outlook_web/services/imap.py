@@ -27,6 +27,7 @@ IMAP_PORT = 993
 
 _token_cache: Dict[str, tuple] = {}
 _token_cache_lock = threading.Lock()
+_token_request_locks: Dict[str, threading.Lock] = {}
 
 
 def decode_header_value(header_value: str) -> str:
@@ -224,14 +225,29 @@ def _make_cache_key(client_id: str, refresh_token: str) -> str:
     return f"{client_id}:{rt_hash}"
 
 
+def _get_token_request_lock(cache_key: str) -> threading.Lock:
+    with _token_cache_lock:
+        lock = _token_request_locks.get(cache_key)
+        if lock is None:
+            lock = threading.Lock()
+            _token_request_locks[cache_key] = lock
+        return lock
+
+
 def clear_imap_token_cache(client_id: str = None) -> None:
     with _token_cache_lock:
         if client_id is None:
             _token_cache.clear()
+            _token_request_locks.clear()
         else:
-            keys_to_remove = [k for k in _token_cache if k.startswith(f"{client_id}:")]
+            keys_to_remove = {
+                key
+                for key in (*_token_cache.keys(), *_token_request_locks.keys())
+                if key.startswith(f"{client_id}:")
+            }
             for key in keys_to_remove:
-                del _token_cache[key]
+                _token_cache.pop(key, None)
+                _token_request_locks.pop(key, None)
 
 
 def get_access_token_imap_result(client_id: str, refresh_token: str) -> Dict[str, Any]:
@@ -244,62 +260,71 @@ def get_access_token_imap_result(client_id: str, refresh_token: str) -> Dict[str
             if time.monotonic() < expires_at:
                 return {"success": True, "access_token": access_token}
 
-    try:
-        res = requests.post(
-            TOKEN_URL_IMAP,
-            data={
-                "client_id": client_id,
-                "grant_type": "refresh_token",
-                "refresh_token": refresh_token,
-                "scope": "https://outlook.office.com/IMAP.AccessAsUser.All offline_access",
-            },
-            timeout=30,
-        )
-
-        if res.status_code != 200:
-            details = get_response_details(res)
-            return {
-                "success": False,
-                "error": build_error_payload(
-                    "IMAP_TOKEN_FAILED",
-                    "获取访问令牌失败",
-                    "IMAPError",
-                    res.status_code,
-                    details,
-                ),
-            }
-
-        payload = res.json()
-        access_token = payload.get("access_token")
-        if not access_token:
-            return {
-                "success": False,
-                "error": build_error_payload(
-                    "IMAP_TOKEN_MISSING",
-                    "获取访问令牌失败",
-                    "IMAPError",
-                    res.status_code,
-                    payload,
-                ),
-            }
-
-        expires_in = int(payload.get("expires_in", 3599))
-        ttl = max(0, expires_in - 60)
+    # 同一账号冷启动时只允许一个线程兑换 token；等待线程随后直接命中缓存。
+    with _get_token_request_lock(cache_key):
         with _token_cache_lock:
-            _token_cache[cache_key] = (access_token, time.monotonic() + ttl)
+            cached = _token_cache.get(cache_key)
+            if cached:
+                access_token, expires_at = cached
+                if time.monotonic() < expires_at:
+                    return {"success": True, "access_token": access_token}
 
-        return {"success": True, "access_token": access_token}
-    except Exception as exc:
-        return {
-            "success": False,
-            "error": build_error_payload(
-                "IMAP_TOKEN_EXCEPTION",
-                "获取访问令牌失败",
-                type(exc).__name__,
-                500,
-                str(exc),
-            ),
-        }
+        try:
+            res = requests.post(
+                TOKEN_URL_IMAP,
+                data={
+                    "client_id": client_id,
+                    "grant_type": "refresh_token",
+                    "refresh_token": refresh_token,
+                    "scope": "https://outlook.office.com/IMAP.AccessAsUser.All offline_access",
+                },
+                timeout=30,
+            )
+
+            if res.status_code != 200:
+                details = get_response_details(res)
+                return {
+                    "success": False,
+                    "error": build_error_payload(
+                        "IMAP_TOKEN_FAILED",
+                        "获取访问令牌失败",
+                        "IMAPError",
+                        res.status_code,
+                        details,
+                    ),
+                }
+
+            payload = res.json()
+            access_token = payload.get("access_token")
+            if not access_token:
+                return {
+                    "success": False,
+                    "error": build_error_payload(
+                        "IMAP_TOKEN_MISSING",
+                        "获取访问令牌失败",
+                        "IMAPError",
+                        res.status_code,
+                        payload,
+                    ),
+                }
+
+            expires_in = int(payload.get("expires_in", 3599))
+            ttl = max(0, expires_in - 60)
+            with _token_cache_lock:
+                _token_cache[cache_key] = (access_token, time.monotonic() + ttl)
+
+            return {"success": True, "access_token": access_token}
+        except Exception as exc:
+            return {
+                "success": False,
+                "error": build_error_payload(
+                    "IMAP_TOKEN_EXCEPTION",
+                    "获取访问令牌失败",
+                    type(exc).__name__,
+                    500,
+                    str(exc),
+                ),
+            }
 
 
 def get_access_token_imap(client_id: str, refresh_token: str) -> Optional[str]:
