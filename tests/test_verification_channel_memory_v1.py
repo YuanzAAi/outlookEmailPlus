@@ -7,6 +7,20 @@ from tests._import_app import clear_login_attempts, import_web_app_module
 
 
 class VerificationChannelMemoryV1Tests(unittest.TestCase):
+    def test_channel_email_object_keeps_graph_body_preview(self):
+        from outlook_web.services import verification_channel_routing as routing
+
+        result = routing._build_email_obj_from_channel_detail(
+            detail={
+                "subject": "ChatGPT の一時的な認証コード",
+                "body": {"contentType": "html", "content": ""},
+                "bodyPreview": "この一時検証コードを入力してください: 123456",
+            },
+            latest={},
+        )
+
+        self.assertEqual(result.get("body_preview"), "この一時検証コードを入力してください: 123456")
+
     @classmethod
     def setUpClass(cls):
         cls.module = import_web_app_module()

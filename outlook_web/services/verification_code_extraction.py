@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from typing import Any, Dict, List, Optional
 
-# 验证码关键词列表（支持中英文）
+# 验证码关键词列表（支持中英文及常见日文模板）
 VERIFICATION_KEYWORDS = [
     "验证码",
     "code",
@@ -30,6 +30,8 @@ VERIFICATION_KEYWORDS = [
     "code is",
     "激活码",
     "短信验证码",
+    "認証コード",
+    "検証コード",
 ]
 
 VERIFICATION_PATTERN = r"\b[A-Z0-9]{4,8}\b"
@@ -123,7 +125,12 @@ class VerificationInput:
         return cls(
             subject=str(payload.get("subject") or "").strip(),
             body=str(payload.get("body") or "").strip(),
-            body_preview=str(payload.get("body_preview") or "").strip(),
+            body_preview=str(
+                payload.get("body_preview")
+                or payload.get("bodyPreview")
+                or payload.get("content_preview")
+                or ""
+            ).strip(),
             body_html=str(payload.get("body_html") or payload.get("html_content") or "").strip(),
             html_content=str(payload.get("html_content") or "").strip(),
             body_content=str(payload.get("bodyContent") or "").strip(),
@@ -191,10 +198,7 @@ def extract_content_text_without_subject(email_input: VerificationInput) -> str:
             return html_to_visible_text(email_input.body_content)
         return email_input.body_content
 
-    if email_input.body_preview:
-        return email_input.body_preview
-
-    return ""
+    return email_input.body_preview
 
 
 def extract_email_text(email: Dict[str, Any]) -> str:

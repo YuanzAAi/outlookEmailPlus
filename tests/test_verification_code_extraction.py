@@ -31,6 +31,31 @@ class VerificationCodeExtractionModuleTests(unittest.TestCase):
 
         self.assertEqual(result.get("verification_code"), "Ab12Cd")
 
+    def test_extract_japanese_chatgpt_code_from_body_preview(self):
+        email = VerificationInput(
+            subject="ChatGPT の一時的な認証コード",
+            body_preview="この一時検証コードを入力して続行してください: 123456",
+        )
+        policy = VerificationPolicy(code_length="6-6", code_source="all")
+
+        result = extract_verification(email, policy)
+
+        self.assertEqual(result.get("verification_code"), "123456")
+        self.assertEqual(result.get("code_confidence"), "high")
+
+    def test_extract_preview_when_graph_body_is_empty(self):
+        result = extract_verification_from_email_dict(
+            {
+                "subject": "ChatGPT の一時的な認証コード",
+                "bodyPreview": "この一時検証コードを入力してください: 123456",
+            },
+            code_length="6-6",
+            code_source="all",
+        )
+
+        self.assertEqual(result.get("verification_code"), "123456")
+        self.assertEqual(result.get("code_confidence"), "high")
+
     def test_extract_html_ignores_css_color_and_keeps_hyphen_code(self):
         email = VerificationInput(
             subject="Verification",

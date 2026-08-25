@@ -417,6 +417,16 @@ def _should_try_older_email_after_failed_extraction(
 
 
 def _build_email_obj_from_channel_detail(*, detail: Dict[str, Any], latest: Dict[str, Any]) -> Dict[str, Any]:
+    body_preview = str(
+        detail.get("bodyPreview")
+        or detail.get("body_preview")
+        or detail.get("content_preview")
+        or latest.get("bodyPreview")
+        or latest.get("body_preview")
+        or latest.get("content_preview")
+        or ""
+    )
+
     # Graph 详情
     if "body" in detail and isinstance(detail.get("body"), dict):
         body_content = detail.get("body") or {}
@@ -432,6 +442,7 @@ def _build_email_obj_from_channel_detail(*, detail: Dict[str, Any], latest: Dict
         return {
             "subject": str(detail.get("subject") or latest.get("subject") or ""),
             "body": body_content_text if content_type == "text" else "",
+            "body_preview": body_preview,
             "body_html": body_content_text if content_type == "html" else "",
             "raw_content": str(detail.get("raw_content") or ""),
             "from": str(from_addr or latest.get("from") or ""),
@@ -441,6 +452,7 @@ def _build_email_obj_from_channel_detail(*, detail: Dict[str, Any], latest: Dict
     return {
         "subject": str(detail.get("subject") or latest.get("subject") or ""),
         "body": str(detail.get("body") or ""),
+        "body_preview": body_preview,
         "body_html": str(detail.get("body_html") or ""),
         "raw_content": str(detail.get("raw_content") or ""),
         "from": str(detail.get("from") or latest.get("from") or ""),
