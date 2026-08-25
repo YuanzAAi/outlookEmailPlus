@@ -1,0 +1,16 @@
+name = "outlook-email-code-webhook"
+main = "src/worker.js"
+compatibility_date = "2026-06-29"
+workers_dev = false
+
+routes = [
+  { pattern = "email.yuangod.cc.cd", custom_domain = true }
+]
+
+[vars]
+CATCHALL_EMAIL_DOMAINS = "yuangod.cc.cd"
+BACKEND_BASE_URL = "https://outlook-api.yuangod.cc.cd"
+
+[[kv_namespaces]]
+binding = "EMAIL_CODES"
+id = "61a817941efb44739653b1b769ae20fd"
