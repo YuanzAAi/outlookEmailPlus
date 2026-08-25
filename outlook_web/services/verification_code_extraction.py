@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from typing import Any, Dict, List, Optional
 
-# 验证码关键词列表（支持中英文及常见日文模板）
+# 关键词仅作为快速高置信度信号；结构化唯一候选不依赖邮件语言。
 VERIFICATION_KEYWORDS = [
     "验证码",
     "code",
@@ -34,7 +34,35 @@ VERIFICATION_KEYWORDS = [
     "検証コード",
 ]
 
-VERIFICATION_PATTERN = r"\b[A-Z0-9]{4,8}\b"
+VERIFICATION_PATTERN = r"(?<![A-Z0-9])[A-Z0-9]{4,8}(?![A-Z0-9])"
+
+NON_VERIFICATION_CONTEXT = (
+    "order",
+    "invoice",
+    "reference",
+    "tracking",
+    "ticket",
+    "receipt",
+    "transaction",
+    "amount",
+    "total",
+    "users",
+    "订单",
+    "订单号",
+    "参考",
+    "追踪",
+    "发票",
+    "交易",
+    "金额",
+    "总额",
+    "编号",
+    "注文",
+    "追跡",
+    "請求",
+    "取引",
+    "金額",
+    "番号",
+)
 
 # 带连字符字母数字验证码，例如 x.ai 的 84A-KMN
 HYPHENATED_VERIFICATION_PATTERN = r"(?<![A-Z0-9])([A-Z0-9]{2,4}-[A-Z0-9]{2,4})(?=$|[^A-Z0-9-]|[A-Z][a-z])"
@@ -126,10 +154,7 @@ class VerificationInput:
             subject=str(payload.get("subject") or "").strip(),
             body=str(payload.get("body") or "").strip(),
             body_preview=str(
-                payload.get("body_preview")
-                or payload.get("bodyPreview")
-                or payload.get("content_preview")
-                or ""
+                payload.get("body_preview") or payload.get("bodyPreview") or payload.get("content_preview") or ""
             ).strip(),
             body_html=str(payload.get("body_html") or payload.get("html_content") or "").strip(),
             html_content=str(payload.get("html_content") or "").strip(),
@@ -231,9 +256,107 @@ def build_code_regex(*, code_regex: str | None, code_length: str | None) -> re.P
 
     if code_length:
         min_len, max_len = _parse_code_length(code_length)
-        return re.compile(rf"\b[A-Za-z0-9]{{{min_len},{max_len}}}\b")
+        return re.compile(rf"(?<![A-Za-z0-9])[A-Za-z0-9]{{{min_len},{max_len}}}(?![A-Za-z0-9])")
 
-    return re.compile(r"\b\d{4,8}\b")
+    return re.compile(r"(?<![A-Za-z0-9])\d{4,8}(?![A-Za-z0-9])")
+
+
+def _is_valid_code_candidate(value: str) -> bool:
+    if not value or not any(char.isdigit() for char in value):
+        return False
+
+    if value.isdigit() and len(value) == 4:
+        number = int(value)
+        if 1900 <= number <= 2100:
+            return False
+        hour = int(value[:2])
+        minute = int(value[2:])
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            return False
+
+    return True
+
+
+def _collect_valid_code_matches(email_content: str, code_re: re.Pattern[str]) -> List[re.Match[str]]:
+    return [match for match in code_re.finditer(email_content) if _is_valid_code_candidate(match.group(0) or "")]
+
+
+def _is_match_inside_link_or_email(email_content: str, match: re.Match[str]) -> bool:
+    start = match.start()
+    end = match.end()
+    token_start = max(email_content.rfind(separator, 0, start) for separator in (" ", "\t", "\r", "\n")) + 1
+    token_ends = [position for separator in (" ", "\t", "\r", "\n") if (position := email_content.find(separator, end)) != -1]
+    token_end = min(token_ends) if token_ends else len(email_content)
+    token = email_content[token_start:token_end].strip("<>[](){}'\"，。；！？")
+    token_lower = token.lower()
+    return "://" in token_lower or token_lower.startswith("www.") or "@" in token
+
+
+def _has_non_verification_context(email_content: str, match: re.Match[str]) -> bool:
+    context = email_content[max(0, match.start() - 48) : match.start()].casefold()
+    return any(phrase.casefold() in context for phrase in NON_VERIFICATION_CONTEXT)
+
+
+def _is_structured_unique_code_candidate(
+    email_content: str,
+    code_re: re.Pattern[str],
+    candidate: str,
+) -> bool:
+    """识别与语言无关的验证码排版：唯一候选、独立行、边缘或强分隔符包围。"""
+    matches = [
+        match
+        for match in _collect_valid_code_matches(email_content, code_re)
+        if not _is_match_inside_link_or_email(email_content, match)
+    ]
+    unique_values = {str(match.group(0) or "").casefold() for match in matches}
+    if len(unique_values) != 1 or candidate.casefold() not in unique_values:
+        return False
+
+    if not candidate.isalnum():
+        return False
+
+    edge_chars = " \t\r:：=#＃()（）[]【】<>《》'\"“”‘’.,，。!！?？;；-–—"
+    paired_delimiters = {"(": ")", "（": "）", "[": "]", "【": "】", "<": ">", "《": "》"}
+    suffix_delimiters = ".,;:!?。 ，；：！？)]）】>》".replace(" ", "")
+
+    for match in matches:
+        before = email_content[: match.start()]
+        after = email_content[match.end() :]
+        line_start = before.rfind("\n") + 1
+        line_end = email_content.find("\n", match.end())
+        if line_end == -1:
+            line_end = len(email_content)
+        line = email_content[line_start:line_end].strip()
+        if line.strip(edge_chars).casefold() == candidate.casefold():
+            return True
+
+        before_trimmed = before.rstrip()
+        after_trimmed = after.lstrip()
+        ascii_alnum = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+        before_boundary = not before_trimmed or before_trimmed[-1] not in ascii_alnum
+        after_boundary = not after_trimmed or after_trimmed[0] not in ascii_alnum
+        if (
+            len(candidate) >= 6
+            and (not before_trimmed or not after_trimmed)
+            and before_boundary
+            and after_boundary
+            and not _has_non_verification_context(email_content, match)
+        ):
+            return True
+
+        prefix = before_trimmed[-1:] if before_trimmed else ""
+        suffix = after_trimmed[:1] if after_trimmed else ""
+        if prefix in paired_delimiters and paired_delimiters[prefix] == suffix:
+            return True
+        if (
+            len(candidate) >= 6
+            and prefix in ":：=#＃"
+            and (not suffix or suffix in suffix_delimiters)
+            and not _has_non_verification_context(email_content, match)
+        ):
+            return True
+
+    return False
 
 
 def _is_valid_hyphenated_code(code: str) -> bool:
@@ -370,26 +493,10 @@ def fallback_extract_code(email_content: str, code_re: re.Pattern[str]) -> Optio
     if not email_content:
         return None
 
-    candidates: List[str] = []
-    for match in code_re.finditer(email_content):
-        value = match.group(0) or ""
-        if not value or not any(c.isdigit() for c in value):
-            continue
-
-        if value.isdigit() and len(value) == 4:
-            year = int(value)
-            if 1900 <= year <= 2100:
-                continue
-            hour = int(value[:2])
-            minute = int(value[2:])
-            if 0 <= hour <= 23 and 0 <= minute <= 59:
-                continue
-            if 2020 <= year <= 2030:
-                continue
-
-        candidates.append(value)
-
-    return candidates[0] if candidates else None
+    matches = _collect_valid_code_matches(email_content, code_re)
+    preferred = [match for match in matches if not _is_match_inside_link_or_email(email_content, match)]
+    selected = preferred[0] if preferred else (matches[0] if matches else None)
+    return str(selected.group(0) or "") if selected else None
 
 
 def extract_links(email_content: str) -> List[str]:
@@ -449,6 +556,8 @@ def extract_verification_code_from_text(
     if not verification_code:
         verification_code = fallback_extract_code(source_text, code_re)
         if verification_code and caller_directed_code:
+            code_confidence = "high"
+        elif verification_code and _is_structured_unique_code_candidate(source_text, code_re, verification_code):
             code_confidence = "high"
 
     if not verification_code:

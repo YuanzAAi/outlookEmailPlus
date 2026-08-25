@@ -601,10 +601,7 @@ def enhance_verification_with_ai_fallback(
 
     code_confidence = str(result.get("code_confidence") or "low").lower()
     link_confidence = str(result.get("link_confidence") or "low").lower()
-    # 常规提取已经拿到验证码时直接返回；AI 只处理完全没有可用结果的复杂邮件。
-    # 这样不会因普通验证码被标为 low confidence 而额外等待外部 AI。
-    if result.get("verification_code"):
-        return _apply_output_policy(result)
+    # 结构明确的多语言验证码已由规则提权；只有仍为 low 的复杂候选才使用 AI。
     if code_confidence == "high" or link_confidence == "high":
         return _apply_output_policy(result)
 

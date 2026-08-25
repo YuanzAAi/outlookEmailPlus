@@ -43,6 +43,66 @@ class VerificationCodeExtractionModuleTests(unittest.TestCase):
         self.assertEqual(result.get("verification_code"), "123456")
         self.assertEqual(result.get("code_confidence"), "high")
 
+    def test_extract_unique_structured_code_without_language_keyword(self):
+        email = VerificationInput(
+            subject="إشعار تسجيل الدخول",
+            body="أدخل الرقم المؤقت التالي للمتابعة: 654321. تنتهي صلاحيته قريبًا.",
+        )
+        policy = VerificationPolicy(code_length="6-6", code_source="all")
+
+        result = extract_verification(email, policy)
+
+        self.assertEqual(result.get("verification_code"), "654321")
+        self.assertEqual(result.get("code_confidence"), "high")
+
+    def test_extract_code_adjacent_to_non_latin_text(self):
+        email = VerificationInput(subject="通知", body="临时号码123456")
+        policy = VerificationPolicy(code_length="6-6", code_source="all")
+
+        result = extract_verification(email, policy)
+
+        self.assertEqual(result.get("verification_code"), "123456")
+        self.assertEqual(result.get("code_confidence"), "high")
+
+    def test_business_reference_number_remains_low_confidence(self):
+        email = VerificationInput(subject="Order update", body="Order number: 445566.")
+        policy = VerificationPolicy(code_length="6-6", code_source="all")
+
+        result = extract_verification(email, policy)
+
+        self.assertEqual(result.get("verification_code"), "445566")
+        self.assertEqual(result.get("code_confidence"), "low")
+
+    def test_plain_report_number_remains_low_confidence(self):
+        email = VerificationInput(subject="System Report", body="There are 445566 active users this quarter.")
+        policy = VerificationPolicy(code_length="6-6", code_source="all")
+
+        result = extract_verification(email, policy)
+
+        self.assertEqual(result.get("verification_code"), "445566")
+        self.assertEqual(result.get("code_confidence"), "low")
+
+    def test_multiple_structured_numbers_remain_low_confidence(self):
+        email = VerificationInput(subject="إشعار", body="المرجع: 123456، والطلب: 654321.")
+        policy = VerificationPolicy(code_length="6-6", code_source="all")
+
+        result = extract_verification(email, policy)
+
+        self.assertEqual(result.get("verification_code"), "123456")
+        self.assertEqual(result.get("code_confidence"), "low")
+
+    def test_url_token_remains_low_confidence(self):
+        email = VerificationInput(
+            subject="Account notice",
+            body="Continue at https://example.com/session?token=AB1234",
+        )
+        policy = VerificationPolicy(code_length="6-6", code_source="all")
+
+        result = extract_verification(email, policy)
+
+        self.assertEqual(result.get("verification_code"), "AB1234")
+        self.assertEqual(result.get("code_confidence"), "low")
+
     def test_extract_preview_when_graph_body_is_empty(self):
         result = extract_verification_from_email_dict(
             {
