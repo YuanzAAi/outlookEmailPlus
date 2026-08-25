@@ -194,6 +194,7 @@ def get_emails_graph(
         folder_map = {
             "inbox": "inbox",
             "junkemail": "junkemail",
+            "sentitems": "sentitems",
             "deleteditems": "deleteditems",
             "trash": "deleteditems",
         }
@@ -261,6 +262,7 @@ def get_emails_graph_with_access_token(
     folder_map = {
         "inbox": "inbox",
         "junkemail": "junkemail",
+        "sentitems": "sentitems",
         "deleteditems": "deleteditems",
         "trash": "deleteditems",
     }

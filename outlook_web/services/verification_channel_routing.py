@@ -537,7 +537,7 @@ def _build_email_obj_from_channel_preview(latest: Dict[str, Any]) -> Dict[str, A
 
 
 def _preview_has_complete_verification_code(email_obj: Dict[str, Any], extracted: Dict[str, Any]) -> bool:
-    """仅信任主题中的验证码，或 bodyPreview 中完整独立行的高置信度验证码。"""
+    """信任主题或 bodyPreview 中已被规则判定为高置信度的完整验证码。"""
     code = str(extracted.get("verification_code") or "").strip()
     if not code or extracted.get("code_confidence") != "high":
         return False
@@ -547,7 +547,7 @@ def _preview_has_complete_verification_code(email_obj: Dict[str, Any], extracted
         return True
 
     preview = str(email_obj.get("body_preview") or "")
-    return any(line.strip().casefold() == code.casefold() for line in preview.splitlines())
+    return code.casefold() in preview.casefold()
 
 
 def _attach_channel_result_metadata(
@@ -627,8 +627,14 @@ def extract_verification_for_outlook(
     new_refresh_token = str((precheck_obj or {}).get("new_refresh_token") or "")
     verification_attempted = False
     last_log_channel = "unknown"
-    emails: List[Dict[str, Any]] = []
     detail_cache: Dict[tuple, Dict[str, Any]] = {}
+    ai_candidate: Optional[Dict[str, Any]] = None
+
+    from outlook_web.services.verification_extractor import (
+        apply_confidence_gate,
+        enhance_verification_with_ai_fallback,
+        extract_verification_info_with_options,
+    )
 
     for channel_phase in _verification_channel_phases(channel_plan):
         candidate_emails: List[Dict[str, Any]] = []
@@ -703,18 +709,10 @@ def extract_verification_for_outlook(
                 baseline_timestamp=baseline_timestamp,
             )
 
-        if phase_emails:
-            emails = phase_emails
-            break
+        if not phase_emails:
+            continue
 
-    if emails:
-        sorted_emails = sorted(emails, key=_message_sort_key, reverse=True)
-
-        from outlook_web.services.verification_extractor import (
-            apply_confidence_gate,
-            enhance_verification_with_ai_fallback,
-            extract_verification_info_with_options,
-        )
+        sorted_emails = sorted(phase_emails, key=_message_sort_key, reverse=True)
 
         # Graph/IMAP 列表通常已携带 bodyPreview。先扫描所有候选中的完整高置信度
         # 验证码，避免被较新的普通邮件挡住，也避免为简单验证码读取详情或调用 AI。
@@ -733,6 +731,16 @@ def extract_verification_for_outlook(
                     enforce_mutual_exclusion=False,
                 )
                 if not _preview_has_complete_verification_code(preview_obj, preview_extracted):
+                    candidate_key = _message_sort_key(latest)
+                    if ai_candidate is None or candidate_key > ai_candidate["sort_key"]:
+                        ai_candidate = {
+                            "sort_key": candidate_key,
+                            "latest": latest,
+                            "email_obj": preview_obj,
+                            "extracted": preview_extracted,
+                            "channel": str(latest.get("_verification_channel") or ""),
+                            "folder": str(latest.get("folder") or "inbox").strip().lower() or "inbox",
+                        }
                     continue
 
                 channel = str(latest.get("_verification_channel") or "")
@@ -792,17 +800,9 @@ def extract_verification_for_outlook(
                 code_source=code_source,
                 enforce_mutual_exclusion=False,
             )
-            extracted = enhance_verification_with_ai_fallback(
-                email=email_obj,
-                extracted=extracted,
-                code_regex=resolved_policy.get("code_regex"),
-                code_length=resolved_policy.get("code_length"),
-                code_source=code_source,
-                enforce_mutual_exclusion=False,
-            )
             extracted = apply_confidence_gate(extracted, enforce_mutual_exclusion=False)
 
-            extracted = _attach_channel_result_metadata(
+            local_extracted = _attach_channel_result_metadata(
                 extracted,
                 account=account,
                 latest=latest,
@@ -811,9 +811,9 @@ def extract_verification_for_outlook(
                 folder=folder,
                 expected_field=expected_field,
             )
-            last_extracted = extracted
+            last_extracted = local_extracted
 
-            if _is_extraction_success(extracted, expected_field):
+            if _is_extraction_success(local_extracted, expected_field):
                 try:
                     from outlook_web.repositories import accounts as accounts_repo
 
@@ -823,18 +823,73 @@ def extract_verification_for_outlook(
 
                 return {
                     "success": True,
-                    "data": extracted,
+                    "data": local_extracted,
                     "channel_used": channel,
-                    "_log_channel": extracted.get("_log_channel") or channel,
-                    "_log_used_ai": bool(extracted.get("_used_ai")),
+                    "_log_channel": local_extracted.get("_log_channel") or channel,
+                    "_log_used_ai": False,
                     "new_refresh_token": new_refresh_token,
                 }
 
+            candidate_key = _message_sort_key(latest)
+            if ai_candidate is None or candidate_key >= ai_candidate["sort_key"]:
+                ai_candidate = {
+                    "sort_key": candidate_key,
+                    "latest": latest,
+                    "email_obj": email_obj,
+                    "extracted": extracted,
+                    "channel": channel,
+                    "folder": folder,
+                }
+
             if expected_field and not _should_try_older_email_after_failed_extraction(
-                extracted,
+                local_extracted,
                 expected_field,
             ):
                 break
+
+    # 所有本地规则和可用通道均未命中后，才对最新候选调用一次 AI。
+    if ai_candidate:
+        latest = ai_candidate["latest"]
+        email_obj = ai_candidate["email_obj"]
+        channel = ai_candidate["channel"]
+        folder = ai_candidate["folder"]
+        extracted = enhance_verification_with_ai_fallback(
+            email=email_obj,
+            extracted=ai_candidate["extracted"],
+            code_regex=resolved_policy.get("code_regex"),
+            code_length=resolved_policy.get("code_length"),
+            code_source=code_source,
+            enforce_mutual_exclusion=False,
+        )
+        extracted = apply_confidence_gate(extracted, enforce_mutual_exclusion=False)
+        extracted = _attach_channel_result_metadata(
+            extracted,
+            account=account,
+            latest=latest,
+            email_obj=email_obj,
+            channel=channel,
+            folder=folder,
+            expected_field=expected_field,
+        )
+        last_extracted = extracted
+        verification_attempted = True
+
+        if _is_extraction_success(extracted, expected_field):
+            try:
+                from outlook_web.repositories import accounts as accounts_repo
+
+                accounts_repo.update_preferred_verification_channel(int(account["id"]), channel)
+            except Exception:
+                pass
+
+            return {
+                "success": True,
+                "data": extracted,
+                "channel_used": channel,
+                "_log_channel": extracted.get("_log_channel") or channel,
+                "_log_used_ai": bool(extracted.get("_used_ai")),
+                "new_refresh_token": new_refresh_token,
+            }
 
     if not any_channel_read_success:
         return {

@@ -319,9 +319,10 @@ def get_verification_summary_for_external(
 
     canonical_email = str(summary.get("email") or requested_email).strip()
     code = str(summary.get("latest_verification_code") or "").strip()
+    verification_folder = str(summary.get("latest_verification_folder") or "").strip().lower()
     received_raw = str(summary.get("latest_verification_received_at") or "").strip()
     received_at = _parse_datetime(received_raw)
-    if not code or not received_at:
+    if not code or not received_at or verification_folder not in {"inbox", "junkemail"}:
         raise VerificationCodeNotFoundError("未找到近期已提取的验证码", data={"email": canonical_email})
 
     now = _utcnow()
@@ -343,7 +344,7 @@ def get_verification_summary_for_external(
         "verification_code": code,
         "from": str(summary.get("latest_email_from") or "").strip() if same_message else "",
         "subject": str(summary.get("latest_email_subject") or "").strip() if same_message else "",
-        "folder": str(summary.get("latest_verification_folder") or "").strip(),
+        "folder": verification_folder,
         "received_at": received_text,
         "received_timestamp": received_timestamp,
         "method": "backend_summary",

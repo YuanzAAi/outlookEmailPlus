@@ -15,6 +15,7 @@ import requests
 from outlook_web.errors import build_error_payload
 from outlook_web.services.graph import get_access_token_graph
 from outlook_web.services.http import get_response_details
+from outlook_web.services.verification_code_extraction import html_to_visible_text
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -101,7 +102,9 @@ def get_email_body(msg) -> str:
     # 这解决了 Figma 等服务的邮件问题
     if len(plain_text.strip()) >= 20:
         return plain_text
-    return html_text or plain_text
+    if html_text:
+        return html_to_visible_text(html_text)
+    return plain_text
 
 
 def get_email_body_and_type(msg) -> tuple:

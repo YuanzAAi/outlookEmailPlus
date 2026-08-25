@@ -7,6 +7,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 _DEFAULT_TTL = 3600
+_UNAVAILABLE_TTL = 5
 _cache: Dict[str, Dict[str, Dict[str, Any]]] = {}
 _lock = threading.Lock()
 
@@ -17,7 +18,8 @@ def set_status(email: str, channel: str, *, available: bool) -> None:
             _cache[email] = {}
         _cache[email][channel] = {
             "status": "available" if available else "unavailable",
-            "expires_at": time.monotonic() + _DEFAULT_TTL,
+            # 读取失败可能只是短暂的上游抖动，不能让 URL 取码整小时跳过该渠道。
+            "expires_at": time.monotonic() + (_DEFAULT_TTL if available else _UNAVAILABLE_TTL),
         }
 
 
