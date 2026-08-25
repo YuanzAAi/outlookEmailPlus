@@ -3,6 +3,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
+import re
 from typing import Any, Dict, List, Optional
 
 from outlook_web.services import channel_capability_cache
@@ -547,7 +548,13 @@ def _preview_has_complete_verification_code(email_obj: Dict[str, Any], extracted
         return True
 
     preview = str(email_obj.get("body_preview") or "")
-    return code.casefold() in preview.casefold()
+    return bool(
+        re.search(
+            rf"(?<![A-Za-z0-9]){re.escape(code)}(?![A-Za-z0-9])",
+            preview,
+            re.IGNORECASE,
+        )
+    )
 
 
 def _attach_channel_result_metadata(
