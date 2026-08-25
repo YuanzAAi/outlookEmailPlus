@@ -649,7 +649,7 @@ def extract_verification_for_outlook(
 
         # Graph/IMAP 列表通常已携带 bodyPreview。先扫描所有候选中的完整高置信度
         # 验证码，避免被较新的普通邮件挡住，也避免为简单验证码读取详情或调用 AI。
-        if expected_field in (None, "verification_code"):
+        if expected_field == "verification_code":
             for latest in sorted_emails:
                 preview_obj = _build_email_obj_from_channel_preview(latest)
                 preview_extracted = extract_verification_info_with_options(
