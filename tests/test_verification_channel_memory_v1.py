@@ -21,6 +21,81 @@ class VerificationChannelMemoryV1Tests(unittest.TestCase):
 
         self.assertEqual(result.get("body_preview"), "この一時検証コードを入力してください: 123456")
 
+    def test_graph_preview_standalone_code_skips_detail_and_ai(self):
+        with self.app.app_context():
+            from outlook_web.services import verification_channel_routing as vcr
+
+            fake_account = {
+                "id": 10,
+                "email": "preview@outlook.com",
+                "account_type": "outlook",
+                "provider": "outlook",
+                "group_id": None,
+                "preferred_verification_channel": "graph_junk",
+                "client_id": "cid",
+                "refresh_token": "rt",
+            }
+            messages = [
+                {
+                    "id": "ordinary-msg",
+                    "subject": "Weekly update",
+                    "from": {"emailAddress": {"address": "news@example.com"}},
+                    "receivedDateTime": self._utc_iso(),
+                    "bodyPreview": "There are no verification details in this message.",
+                    "folder": "junkemail",
+                    "_verification_channel": "graph_junk",
+                },
+                {
+                    "id": "code-msg",
+                    "subject": "ChatGPT の一時的な認証コード",
+                    "from": {"emailAddress": {"address": "noreply@tm.openai.com"}},
+                    "receivedDateTime": self._utc_iso(minutes_delta=-1),
+                    "bodyPreview": "この一時検証コードを入力して続行してください:\r\n\r\n530636\r\n\r\nよろしくお願いいたします。",
+                    "folder": "inbox",
+                    "_verification_channel": "graph_inbox",
+                },
+            ]
+
+            with (
+                patch.object(vcr, "build_verification_channel_plan", return_value=["graph_junk", "graph_inbox"]),
+                patch.object(
+                    vcr.channel_capability_cache,
+                    "filter_channel_plan",
+                    return_value=["graph_junk", "graph_inbox"],
+                ),
+                patch.object(
+                    vcr,
+                    "fetch_emails_for_channel",
+                    side_effect=[
+                        {"success": True, "emails": [messages[0]]},
+                        {"success": True, "emails": [messages[1]]},
+                    ],
+                ),
+                patch.object(vcr, "fetch_email_detail_for_channel") as mock_detail,
+                patch(
+                    "outlook_web.services.graph.get_access_token_graph_result",
+                    return_value={"success": True, "scope": "Mail.Read"},
+                ),
+                patch("outlook_web.services.graph.has_mail_read_permission", return_value=True),
+                patch("outlook_web.services.verification_extractor._call_verification_ai") as mock_ai,
+            ):
+                result = vcr.extract_verification_for_outlook(
+                    account=fake_account,
+                    resolved_policy={"code_regex": None, "code_length": "6-6"},
+                    code_source="all",
+                    expected_field="verification_code",
+                    since_minutes=5,
+                )
+
+            data = result.get("data") or {}
+            self.assertTrue(result.get("success"))
+            self.assertEqual(data.get("verification_code"), "530636")
+            self.assertEqual(data.get("from"), "noreply@tm.openai.com")
+            self.assertEqual(data.get("subject"), "ChatGPT の一時的な認証コード")
+            self.assertEqual(data.get("folder"), "inbox")
+            mock_detail.assert_not_called()
+            mock_ai.assert_not_called()
+
     @classmethod
     def setUpClass(cls):
         cls.module = import_web_app_module()

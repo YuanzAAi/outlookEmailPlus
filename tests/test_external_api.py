@@ -1739,7 +1739,16 @@ class ExternalApiSystemErrorTests(ExternalApiBaseTest):
 
 
 class ExternalApiVerificationSummaryTests(ExternalApiBaseTest):
-    def _set_verification_summary(self, email_addr: str, *, code: str, received_at: str, folder: str = "inbox"):
+    def _set_verification_summary(
+        self,
+        email_addr: str,
+        *,
+        code: str,
+        received_at: str,
+        folder: str = "inbox",
+        sender: str = "",
+        subject: str = "",
+    ):
         with self.app.app_context():
             from outlook_web.db import get_db
 
@@ -1747,12 +1756,16 @@ class ExternalApiVerificationSummaryTests(ExternalApiBaseTest):
             db.execute(
                 """
                 UPDATE accounts
-                SET latest_verification_code = ?,
+                SET latest_email_from = ?,
+                    latest_email_subject = ?,
+                    latest_email_folder = ?,
+                    latest_email_received_at = ?,
+                    latest_verification_code = ?,
                     latest_verification_folder = ?,
                     latest_verification_received_at = ?
                 WHERE email = ? COLLATE NOCASE
                 """,
-                (code, folder, received_at, email_addr),
+                (sender, subject, folder, received_at, code, folder, received_at, email_addr),
             )
             db.commit()
 
@@ -1765,6 +1778,8 @@ class ExternalApiVerificationSummaryTests(ExternalApiBaseTest):
             code="654321",
             received_at=self._utc_iso(),
             folder="junkemail",
+            sender="noreply@example.com",
+            subject="Your verification code",
         )
 
         client = self.app.test_client()
@@ -1777,6 +1792,8 @@ class ExternalApiVerificationSummaryTests(ExternalApiBaseTest):
         data = resp.get_json().get("data", {})
         self.assertEqual(data.get("email"), email_addr)
         self.assertEqual(data.get("verification_code"), "654321")
+        self.assertEqual(data.get("from"), "noreply@example.com")
+        self.assertEqual(data.get("subject"), "Your verification code")
         self.assertEqual(data.get("folder"), "junkemail")
         self.assertEqual(data.get("method"), "backend_summary")
         mock_list_messages.assert_not_called()

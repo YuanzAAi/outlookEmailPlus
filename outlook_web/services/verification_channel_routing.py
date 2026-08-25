@@ -460,6 +460,68 @@ def _build_email_obj_from_channel_detail(*, detail: Dict[str, Any], latest: Dict
     }
 
 
+def _build_email_obj_from_channel_preview(latest: Dict[str, Any]) -> Dict[str, Any]:
+    raw_from = latest.get("from")
+    if isinstance(raw_from, dict):
+        email_address = raw_from.get("emailAddress") or {}
+        raw_from = email_address.get("address") or raw_from.get("address") or raw_from.get("email") or ""
+
+    return {
+        "subject": str(latest.get("subject") or ""),
+        "body": "",
+        "body_preview": str(latest.get("bodyPreview") or latest.get("body_preview") or latest.get("content_preview") or ""),
+        "body_html": "",
+        "raw_content": "",
+        "from": str(raw_from or latest.get("from_address") or latest.get("sender") or ""),
+        "date": str(
+            latest.get("receivedDateTime") or latest.get("date") or latest.get("created_at") or latest.get("received_at") or ""
+        ),
+    }
+
+
+def _preview_has_complete_verification_code(email_obj: Dict[str, Any], extracted: Dict[str, Any]) -> bool:
+    """仅信任主题中的验证码，或 bodyPreview 中完整独立行的高置信度验证码。"""
+    code = str(extracted.get("verification_code") or "").strip()
+    if not code or extracted.get("code_confidence") != "high":
+        return False
+
+    subject = str(email_obj.get("subject") or "")
+    if code.casefold() in subject.casefold():
+        return True
+
+    preview = str(email_obj.get("body_preview") or "")
+    return any(line.strip().casefold() == code.casefold() for line in preview.splitlines())
+
+
+def _attach_channel_result_metadata(
+    extracted: Dict[str, Any],
+    *,
+    account: Dict[str, Any],
+    latest: Dict[str, Any],
+    email_obj: Dict[str, Any],
+    channel: str,
+    folder: str,
+    expected_field: Any = None,
+) -> Dict[str, Any]:
+    result = dict(extracted)
+    result.update(
+        {
+            "email": account.get("email", ""),
+            "matched_email_id": latest.get("id", ""),
+            "from": email_obj["from"],
+            "subject": email_obj["subject"],
+            "received_at": email_obj["date"],
+            "folder": folder,
+            "method": _get_channel_display_name(channel),
+        }
+    )
+    result["_log_channel"] = (
+        "ai_fallback" if result.get("_used_ai") and _is_extraction_success(result, expected_field) else channel
+    )
+    result["_log_used_ai"] = bool(result.get("_used_ai"))
+    return result
+
+
 def extract_verification_for_outlook(
     *,
     account: Dict[str, Any],
@@ -579,6 +641,58 @@ def extract_verification_for_outlook(
     if emails:
         sorted_emails = sorted(emails, key=_message_sort_key, reverse=True)
 
+        from outlook_web.services.verification_extractor import (
+            apply_confidence_gate,
+            enhance_verification_with_ai_fallback,
+            extract_verification_info_with_options,
+        )
+
+        # Graph/IMAP 列表通常已携带 bodyPreview。先扫描所有候选中的完整高置信度
+        # 验证码，避免被较新的普通邮件挡住，也避免为简单验证码读取详情或调用 AI。
+        if expected_field in (None, "verification_code"):
+            for latest in sorted_emails:
+                preview_obj = _build_email_obj_from_channel_preview(latest)
+                preview_extracted = extract_verification_info_with_options(
+                    preview_obj,
+                    code_regex=resolved_policy.get("code_regex"),
+                    code_length=resolved_policy.get("code_length"),
+                    code_source=code_source,
+                    enforce_mutual_exclusion=False,
+                )
+                preview_extracted = apply_confidence_gate(
+                    preview_extracted,
+                    enforce_mutual_exclusion=False,
+                )
+                if not _preview_has_complete_verification_code(preview_obj, preview_extracted):
+                    continue
+
+                channel = str(latest.get("_verification_channel") or "")
+                folder = str(latest.get("folder") or "inbox").strip().lower() or "inbox"
+                extracted = _attach_channel_result_metadata(
+                    preview_extracted,
+                    account=account,
+                    latest=latest,
+                    email_obj=preview_obj,
+                    channel=channel,
+                    folder=folder,
+                    expected_field=expected_field,
+                )
+                try:
+                    from outlook_web.repositories import accounts as accounts_repo
+
+                    accounts_repo.update_preferred_verification_channel(int(account["id"]), channel)
+                except Exception:
+                    pass
+
+                return {
+                    "success": True,
+                    "data": extracted,
+                    "channel_used": channel,
+                    "_log_channel": extracted.get("_log_channel") or channel,
+                    "_log_used_ai": False,
+                    "new_refresh_token": new_refresh_token,
+                }
+
         for latest in sorted_emails:
             channel = str(latest.get("_verification_channel") or "")
             folder = str(latest.get("folder") or "inbox").strip().lower() or "inbox"
@@ -602,12 +716,6 @@ def extract_verification_for_outlook(
 
             email_obj = _build_email_obj_from_channel_detail(detail=detail, latest=latest)
 
-            from outlook_web.services.verification_extractor import (
-                apply_confidence_gate,
-                enhance_verification_with_ai_fallback,
-                extract_verification_info_with_options,
-            )
-
             extracted = extract_verification_info_with_options(
                 email_obj,
                 code_regex=resolved_policy.get("code_regex"),
@@ -625,21 +733,15 @@ def extract_verification_for_outlook(
             )
             extracted = apply_confidence_gate(extracted, enforce_mutual_exclusion=False)
 
-            extracted.update(
-                {
-                    "email": account.get("email", ""),
-                    "matched_email_id": latest.get("id", ""),
-                    "from": email_obj["from"],
-                    "subject": email_obj["subject"],
-                    "received_at": email_obj["date"],
-                    "folder": folder,
-                    "method": _get_channel_display_name(channel),
-                }
+            extracted = _attach_channel_result_metadata(
+                extracted,
+                account=account,
+                latest=latest,
+                email_obj=email_obj,
+                channel=channel,
+                folder=folder,
+                expected_field=expected_field,
             )
-            extracted["_log_channel"] = (
-                "ai_fallback" if extracted.get("_used_ai") and _is_extraction_success(extracted, expected_field) else channel
-            )
-            extracted["_log_used_ai"] = bool(extracted.get("_used_ai"))
             last_extracted = extracted
 
             if _is_extraction_success(extracted, expected_field):

@@ -331,9 +331,18 @@ def get_verification_summary_for_external(
         raise VerificationCodeNotFoundError("领取前的验证码不匹配", data={"email": canonical_email})
 
     received_text, received_timestamp = _format_datetime(received_at, received_raw)
+    latest_email_received_at = _parse_datetime(str(summary.get("latest_email_received_at") or ""))
+    same_message = bool(
+        latest_email_received_at
+        and int(latest_email_received_at.timestamp()) == int(received_at.timestamp())
+        and str(summary.get("latest_email_folder") or "").strip().lower()
+        == str(summary.get("latest_verification_folder") or "").strip().lower()
+    )
     return {
         "email": canonical_email,
         "verification_code": code,
+        "from": str(summary.get("latest_email_from") or "").strip() if same_message else "",
+        "subject": str(summary.get("latest_email_subject") or "").strip() if same_message else "",
         "folder": str(summary.get("latest_verification_folder") or "").strip(),
         "received_at": received_text,
         "received_timestamp": received_timestamp,
