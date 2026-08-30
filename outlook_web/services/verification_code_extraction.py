@@ -422,50 +422,20 @@ def smart_extract_verification_code(email_content: str) -> Optional[str]:
     if not email_content:
         return None
 
-    content_lower = email_content.lower()
-    for keyword in VERIFICATION_KEYWORDS:
-        keyword_lower = keyword.lower()
-        pos = content_lower.find(keyword_lower)
-        if pos == -1:
-            continue
-
-        start = max(0, pos - 50)
-        end = min(len(email_content), pos + len(keyword) + 50)
-        context = email_content[start:end]
-        matches = re.findall(VERIFICATION_PATTERN, context, re.IGNORECASE)
-        for match in matches:
-            if any(c.isdigit() for c in match):
-                return match
-
-    return smart_extract_hyphenated_verification_code(email_content)
+    code_re = re.compile(VERIFICATION_PATTERN, re.IGNORECASE)
+    return smart_extract_code_by_keywords(email_content, code_re) or smart_extract_hyphenated_verification_code(
+        email_content
+    )
 
 
 def fallback_extract_verification_code(email_content: str) -> Optional[str]:
     if not email_content:
         return None
 
-    filtered: List[str] = []
-    for match in re.findall(VERIFICATION_PATTERN, email_content, re.IGNORECASE):
-        if not any(c.isdigit() for c in match):
-            continue
-
-        if match.isdigit() and len(match) == 4:
-            year = int(match)
-            if 1900 <= year <= 2100:
-                continue
-            hour = int(match[:2])
-            minute = int(match[2:])
-            if 0 <= hour <= 23 and 0 <= minute <= 59:
-                continue
-            if 2020 <= year <= 2030:
-                continue
-
-        filtered.append(match)
-
-    if filtered:
-        return filtered[0]
-
-    return fallback_extract_hyphenated_verification_code(email_content)
+    code_re = re.compile(VERIFICATION_PATTERN, re.IGNORECASE)
+    return fallback_extract_code(email_content, code_re) or fallback_extract_hyphenated_verification_code(
+        email_content
+    )
 
 
 def smart_extract_code_by_keywords(email_content: str, code_re: re.Pattern[str]) -> Optional[str]:
@@ -475,17 +445,29 @@ def smart_extract_code_by_keywords(email_content: str, code_re: re.Pattern[str])
     content_lower = email_content.lower()
     for keyword in VERIFICATION_KEYWORDS:
         keyword_lower = keyword.lower()
-        pos = content_lower.find(keyword_lower)
-        if pos == -1:
+        if not keyword_lower:
             continue
 
-        start = max(0, pos - 50)
-        end = min(len(email_content), pos + len(keyword) + 50)
-        context = email_content[start:end]
-        for match in code_re.finditer(context):
-            value = match.group(0)
-            if value and any(c.isdigit() for c in value):
-                return value
+        # 同一关键词可能先出现在主题或链接说明中，不能只看第一次出现。
+        # 使用原文坐标调用 URL/邮箱排除逻辑，避免截断窗口丢失 ``https://`` 前缀。
+        search_from = 0
+        while search_from < len(email_content):
+            pos = content_lower.find(keyword_lower, search_from)
+            if pos == -1:
+                break
+
+            start = max(0, pos - 50)
+            end = min(len(email_content), pos + len(keyword) + 50)
+            for match in code_re.finditer(email_content, start, end):
+                value = match.group(0)
+                if (
+                    value
+                    and any(c.isdigit() for c in value)
+                    and not _is_match_inside_link_or_email(email_content, match)
+                ):
+                    return value
+
+            search_from = pos + max(len(keyword_lower), 1)
     return None
 
 

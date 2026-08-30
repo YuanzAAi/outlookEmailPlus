@@ -116,6 +116,26 @@ class VerificationCodeExtractionModuleTests(unittest.TestCase):
         self.assertEqual(result.get("verification_code"), "123456")
         self.assertEqual(result.get("code_confidence"), "high")
 
+    def test_extract_body_code_before_verification_url_token(self):
+        """正文验证码应优先于验证 URL 路径中的账号标识。"""
+        result = extract_verification_from_email_dict(
+            {
+                "subject": "Your GitHub launch code",
+                "bodyPreview": (
+                    "Continue signing up by entering the code below:\n"
+                    "70084349\n"
+                    "Paste the following link into your browser:\n"
+                    "https://github.com/account_verifications/confirm/"
+                    "c07770cf-f3f3-4317-a009-66f0e64e6015/70084349"
+                ),
+            },
+            code_length="4-8",
+            code_source="all",
+        )
+
+        self.assertEqual(result.get("verification_code"), "70084349")
+        self.assertEqual(result.get("code_confidence"), "high")
+
     def test_extract_html_ignores_css_color_and_keeps_hyphen_code(self):
         email = VerificationInput(
             subject="Verification",
