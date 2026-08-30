@@ -18,11 +18,12 @@ IMAP_SERVER_OLD = "outlook.office365.com"
 
 GRAPH_INBOX = "graph_inbox"
 GRAPH_JUNK = "graph_junk"
+GRAPH_SENTITEMS = "graph_sentitems"
 IMAP_NEW = "imap_new"
 IMAP_OLD = "imap_old"
 
-VALID_CHANNELS = {GRAPH_INBOX, GRAPH_JUNK, IMAP_NEW, IMAP_OLD}
-DEFAULT_CHANNELS = (GRAPH_INBOX, GRAPH_JUNK, IMAP_NEW, IMAP_OLD)
+VALID_CHANNELS = {GRAPH_INBOX, GRAPH_JUNK, GRAPH_SENTITEMS, IMAP_NEW, IMAP_OLD}
+DEFAULT_CHANNELS = (GRAPH_INBOX, GRAPH_JUNK, GRAPH_SENTITEMS, IMAP_NEW, IMAP_OLD)
 
 
 def is_terminal_refresh_token_failure(payload: Any) -> bool:
@@ -41,13 +42,17 @@ def normalize_channel(value: Any) -> Optional[str]:
 
 def _channel_for_method(method: str, folder: str) -> str:
     if method == "graph":
-        return GRAPH_JUNK if folder == "junkemail" else GRAPH_INBOX
+        if folder == "junkemail":
+            return GRAPH_JUNK
+        if folder == "sentitems":
+            return GRAPH_SENTITEMS
+        return GRAPH_INBOX
     return method
 
 
 def _method_for_channel(channel: Optional[str]) -> Optional[str]:
     channel = normalize_channel(channel)
-    if channel in (GRAPH_INBOX, GRAPH_JUNK):
+    if channel in (GRAPH_INBOX, GRAPH_JUNK, GRAPH_SENTITEMS):
         return "graph"
     if channel == IMAP_NEW:
         return IMAP_NEW
@@ -59,7 +64,7 @@ def _method_for_channel(channel: Optional[str]) -> Optional[str]:
 def build_plan(account: Dict[str, Any], folder: str = "inbox") -> List[str]:
     """Return a method plan with the remembered channel first."""
     folder = str(folder or "inbox").strip().lower() or "inbox"
-    if folder not in {"inbox", "junkemail"}:
+    if folder not in {"inbox", "junkemail", "sentitems"}:
         return ["graph", IMAP_NEW, IMAP_OLD]
     preferred = normalize_channel(account.get("preferred_verification_channel"))
     preferred_method = _method_for_channel(preferred)

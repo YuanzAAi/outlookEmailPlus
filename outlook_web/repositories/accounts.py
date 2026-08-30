@@ -19,6 +19,7 @@ COMPACT_SUMMARY_FIELDS = (
 VERIFICATION_CHANNEL_FIELDS = (
     "graph_inbox",
     "graph_junk",
+    "graph_sentitems",
     "imap_new",
     "imap_old",
 )

@@ -121,7 +121,7 @@ def _pick_latest_verification_message(
     for message in messages:
         if not message:
             continue
-        if str(message.get("folder") or "inbox").strip().lower() not in {"inbox", "junkemail"}:
+        if str(message.get("folder") or "inbox").strip().lower() not in {"inbox", "junkemail", "sentitems"}:
             continue
 
         candidate_payload = VerificationInput(

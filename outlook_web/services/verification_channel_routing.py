@@ -12,12 +12,14 @@ from outlook_web.services import imap as imap_service
 
 CHANNEL_GRAPH_INBOX = "graph_inbox"
 CHANNEL_GRAPH_JUNK = "graph_junk"
+CHANNEL_GRAPH_SENTITEMS = "graph_sentitems"
 CHANNEL_IMAP_NEW = "imap_new"
 CHANNEL_IMAP_OLD = "imap_old"
 
 DEFAULT_VERIFICATION_CHANNEL_CHAIN = (
     CHANNEL_GRAPH_INBOX,
     CHANNEL_GRAPH_JUNK,
+    CHANNEL_GRAPH_SENTITEMS,
     CHANNEL_IMAP_NEW,
     CHANNEL_IMAP_OLD,
 )
@@ -100,6 +102,8 @@ def _candidate_folders_for_channel(channel: str) -> List[str]:
         return ["inbox"]
     if normalized == CHANNEL_GRAPH_JUNK:
         return ["junkemail"]
+    if normalized == CHANNEL_GRAPH_SENTITEMS:
+        return ["sentitems"]
     if normalized in (CHANNEL_IMAP_NEW, CHANNEL_IMAP_OLD):
         return list(IMAP_VERIFICATION_FOLDERS)
     return []
@@ -107,7 +111,7 @@ def _candidate_folders_for_channel(channel: str) -> List[str]:
 
 def _channel_group(channel: str) -> str:
     normalized = normalize_verification_channel(channel)
-    if normalized in (CHANNEL_GRAPH_INBOX, CHANNEL_GRAPH_JUNK):
+    if normalized in (CHANNEL_GRAPH_INBOX, CHANNEL_GRAPH_JUNK, CHANNEL_GRAPH_SENTITEMS):
         return "graph"
     if normalized in (CHANNEL_IMAP_NEW, CHANNEL_IMAP_OLD):
         return "imap"
@@ -147,7 +151,11 @@ def map_method_to_verification_channel(method: str, *, folder: str = "inbox") ->
     method_text = str(method or "").strip().lower()
     folder_text = str(folder or "inbox").strip().lower()
     if method_text == "graph api":
-        return CHANNEL_GRAPH_JUNK if folder_text == "junkemail" else CHANNEL_GRAPH_INBOX
+        if folder_text == "junkemail":
+            return CHANNEL_GRAPH_JUNK
+        if folder_text == "sentitems":
+            return CHANNEL_GRAPH_SENTITEMS
+        return CHANNEL_GRAPH_INBOX
     if method_text == "imap (new)":
         return CHANNEL_IMAP_NEW
     if method_text == "imap (old)":
@@ -161,6 +169,8 @@ def channel_method_label(channel: str) -> str:
         return "Graph API (Inbox)"
     if normalized == CHANNEL_GRAPH_JUNK:
         return "Graph API (Junk)"
+    if normalized == CHANNEL_GRAPH_SENTITEMS:
+        return "Graph API (SentItems)"
     if normalized == CHANNEL_IMAP_NEW:
         return "IMAP (New)"
     if normalized == CHANNEL_IMAP_OLD:
@@ -195,14 +205,19 @@ def fetch_emails_for_channel(
             },
         }
 
-    if normalized in (CHANNEL_GRAPH_INBOX, CHANNEL_GRAPH_JUNK):
-        folder_name = "junkemail" if normalized == CHANNEL_GRAPH_JUNK else "inbox"
+    if normalized in (CHANNEL_GRAPH_INBOX, CHANNEL_GRAPH_JUNK, CHANNEL_GRAPH_SENTITEMS):
+        folder_name = {
+            CHANNEL_GRAPH_INBOX: "inbox",
+            CHANNEL_GRAPH_JUNK: "junkemail",
+            CHANNEL_GRAPH_SENTITEMS: "sentitems",
+        }[normalized]
         if graph_access_token and int(skip or 0) == 0:
             graph_result = graph_service.get_emails_graph_with_access_token(
                 graph_access_token,
                 folder=folder_name,
                 top=int(top or 20),
                 proxy_url=proxy_url,
+                include_body=True,
             )
         else:
             graph_result = graph_service.get_emails_graph(
@@ -267,7 +282,7 @@ def fetch_email_detail_for_channel(
     if not normalized or not message_id:
         return None
 
-    if normalized in (CHANNEL_GRAPH_INBOX, CHANNEL_GRAPH_JUNK):
+    if normalized in (CHANNEL_GRAPH_INBOX, CHANNEL_GRAPH_JUNK, CHANNEL_GRAPH_SENTITEMS):
         return graph_service.get_email_detail_graph(
             str(account.get("client_id") or ""),
             str(account.get("refresh_token") or ""),
@@ -317,7 +332,7 @@ def fetch_emails_and_detail_for_channel(
             "channel": "",
         }
 
-    if normalized in (CHANNEL_GRAPH_INBOX, CHANNEL_GRAPH_JUNK):
+    if normalized in (CHANNEL_GRAPH_INBOX, CHANNEL_GRAPH_JUNK, CHANNEL_GRAPH_SENTITEMS):
         return fetch_emails_for_channel(
             account=account,
             channel=normalized,
@@ -440,10 +455,52 @@ def _fetch_imap_folders_for_channel(
         return [(folder, future.result()) for folder, future in futures]
 
 
+def _fetch_graph_channels_for_phase(
+    *,
+    account: Dict[str, Any],
+    channels: List[str],
+    proxy_url: str,
+    graph_access_token: str,
+    top: int,
+) -> Dict[str, List[tuple[str, Dict[str, Any]]]]:
+    """并行读取 Graph 文件夹，共用预检得到的 access token。
+
+    Graph 的三个文件夹彼此独立；共享 token 后并行发起列表请求，避免
+    Inbox/Junk/SentItems 逐个等待。预检未拿到 token 时保留原有串行路径，
+    避免并发刷新同一个 refresh token。
+    """
+
+    def _fetch_one(channel: str) -> List[tuple[str, Dict[str, Any]]]:
+        folders = _candidate_folders_for_channel(channel) or ["inbox"]
+        return [
+            (
+                folder,
+                fetch_emails_for_channel(
+                    account=dict(account),
+                    channel=channel,
+                    proxy_url=proxy_url,
+                    graph_access_token=graph_access_token,
+                    folder=folder,
+                    top=top,
+                ),
+            )
+            for folder in folders
+        ]
+
+    if len(channels) <= 1 or not graph_access_token:
+        return {channel: _fetch_one(channel) for channel in channels}
+
+    with ThreadPoolExecutor(max_workers=len(channels), thread_name_prefix="graph-folder") as executor:
+        futures = [(channel, executor.submit(_fetch_one, channel)) for channel in channels]
+        # 按渠道计划顺序收集，保持错误聚合和候选排序的既有语义。
+        return {channel: future.result() for channel, future in futures}
+
+
 def _get_channel_display_name(channel: str) -> str:
     return {
         "graph_inbox": "Graph (Inbox)",
         "graph_junk": "Graph (Junk)",
+        "graph_sentitems": "Graph (SentItems)",
         "imap_new": "IMAP (New)",
         "imap_old": "IMAP (Old)",
     }.get(channel, channel)
@@ -524,11 +581,24 @@ def _build_email_obj_from_channel_preview(latest: Dict[str, Any]) -> Dict[str, A
         email_address = raw_from.get("emailAddress") or {}
         raw_from = email_address.get("address") or raw_from.get("address") or raw_from.get("email") or ""
 
+    body = latest.get("body")
+    body_text = ""
+    body_html = ""
+    if isinstance(body, dict):
+        body_type = str(body.get("contentType") or "text").lower()
+        body_content = str(body.get("content") or "")
+        if body_type == "html":
+            body_html = body_content
+        else:
+            body_text = body_content
+    elif body:
+        body_text = str(body)
+
     return {
         "subject": str(latest.get("subject") or ""),
-        "body": "",
+        "body": body_text,
         "body_preview": str(latest.get("bodyPreview") or latest.get("body_preview") or latest.get("content_preview") or ""),
-        "body_html": "",
+        "body_html": body_html,
         "raw_content": "",
         "from": str(raw_from or latest.get("from_address") or latest.get("sender") or ""),
         "date": str(
@@ -547,11 +617,45 @@ def _preview_has_complete_verification_code(email_obj: Dict[str, Any], extracted
     if code.casefold() in subject.casefold():
         return True
 
-    preview = str(email_obj.get("body_preview") or "")
+    preview = " ".join(
+        str(email_obj.get(key) or "")
+        for key in ("body_preview", "body", "body_html")
+    )
+    return bool(re.search(rf"(?<![A-Za-z0-9]){re.escape(code)}(?![A-Za-z0-9])", preview, re.IGNORECASE))
+
+
+def _has_verification_signal(email_obj: Dict[str, Any], extracted: Dict[str, Any]) -> bool:
+    """仅让含验证语义的候选进入 AI，普通邮件不触发远程请求。"""
+    if extracted.get("verification_code") or extracted.get("verification_link"):
+        return True
+
+    text = " ".join(
+        str(email_obj.get(key) or "")
+        for key in ("subject", "body", "body_preview", "body_html")
+    ).casefold()
+    if not text:
+        return False
+
+    from outlook_web.services.verification_extractor import (
+        CODE_CONTEXT_PHRASES,
+        LINK_CONTEXT_PHRASES,
+        VERIFICATION_KEYWORDS,
+    )
+
+    # 单独的 generic "code"/"验证" 太宽，会把代码评审、订单编号等普通邮件送进 AI。
+    weak_keywords = {"code", "验证"}
+    strong_signals = tuple(
+        str(signal or "").casefold()
+        for signal in (*VERIFICATION_KEYWORDS, *CODE_CONTEXT_PHRASES, *LINK_CONTEXT_PHRASES)
+        if str(signal or "").strip().casefold() not in weak_keywords
+    )
+    if any(signal and signal in text for signal in strong_signals):
+        return True
+
     return bool(
         re.search(
-            rf"(?<![A-Za-z0-9]){re.escape(code)}(?![A-Za-z0-9])",
-            preview,
+            r"\b(?:one[- ]time|passcode|authentication|auth|security\s+code|\d[- ]?digit\s+code)\b",
+            text,
             re.IGNORECASE,
         )
     )
@@ -645,11 +749,23 @@ def extract_verification_for_outlook(
 
     for channel_phase in _verification_channel_phases(channel_plan):
         candidate_emails: List[Dict[str, Any]] = []
+        graph_phase_results: Optional[Dict[str, List[tuple[str, Dict[str, Any]]]]] = None
+        if channel_phase and _channel_group(channel_phase[0]) == "graph":
+            graph_phase_results = _fetch_graph_channels_for_phase(
+                account=account,
+                channels=channel_phase,
+                proxy_url=proxy_url,
+                graph_access_token=graph_access_token,
+                top=VERIFICATION_FETCH_TOP,
+            )
+
         for channel in channel_phase:
             last_log_channel = channel or last_log_channel
             channel_available = False
             channel_folders = _candidate_folders_for_channel(channel) or ["inbox"]
-            if _channel_group(channel) == "imap":
+            if graph_phase_results is not None:
+                channel_folder_results = graph_phase_results.get(channel, [])
+            elif _channel_group(channel) == "imap":
                 channel_folder_results = _fetch_imap_folders_for_channel(
                     account=account,
                     channel=channel,
@@ -738,16 +854,17 @@ def extract_verification_for_outlook(
                     enforce_mutual_exclusion=False,
                 )
                 if not _preview_has_complete_verification_code(preview_obj, preview_extracted):
-                    candidate_key = _message_sort_key(latest)
-                    if ai_candidate is None or candidate_key > ai_candidate["sort_key"]:
-                        ai_candidate = {
-                            "sort_key": candidate_key,
-                            "latest": latest,
-                            "email_obj": preview_obj,
-                            "extracted": preview_extracted,
-                            "channel": str(latest.get("_verification_channel") or ""),
-                            "folder": str(latest.get("folder") or "inbox").strip().lower() or "inbox",
-                        }
+                    if _has_verification_signal(preview_obj, preview_extracted):
+                        candidate_key = _message_sort_key(latest)
+                        if ai_candidate is None or candidate_key > ai_candidate["sort_key"]:
+                            ai_candidate = {
+                                "sort_key": candidate_key,
+                                "latest": latest,
+                                "email_obj": preview_obj,
+                                "extracted": preview_extracted,
+                                "channel": str(latest.get("_verification_channel") or ""),
+                                "folder": str(latest.get("folder") or "inbox").strip().lower() or "inbox",
+                            }
                     continue
 
                 channel = str(latest.get("_verification_channel") or "")
@@ -837,16 +954,17 @@ def extract_verification_for_outlook(
                     "new_refresh_token": new_refresh_token,
                 }
 
-            candidate_key = _message_sort_key(latest)
-            if ai_candidate is None or candidate_key >= ai_candidate["sort_key"]:
-                ai_candidate = {
-                    "sort_key": candidate_key,
-                    "latest": latest,
-                    "email_obj": email_obj,
-                    "extracted": extracted,
-                    "channel": channel,
-                    "folder": folder,
-                }
+            if _has_verification_signal(email_obj, extracted):
+                candidate_key = _message_sort_key(latest)
+                if ai_candidate is None or candidate_key >= ai_candidate["sort_key"]:
+                    ai_candidate = {
+                        "sort_key": candidate_key,
+                        "latest": latest,
+                        "email_obj": email_obj,
+                        "extracted": extracted,
+                        "channel": channel,
+                        "folder": folder,
+                    }
 
             if expected_field and not _should_try_older_email_after_failed_extraction(
                 local_extracted,
@@ -854,8 +972,14 @@ def extract_verification_for_outlook(
             ):
                 break
 
+        # Graph 已成功返回并通过筛选的邮件时，当前请求应以 Graph 结果为准。
+        # 不再串行进入 IMAP，避免 Graph 邮件无验证码时额外等待多个连接超时；
+        # 只有 Graph 没有可用候选（phase_emails 为空）时才保留 IMAP fallback。
+        if graph_phase_results is not None and phase_emails:
+            break
+
     # 所有本地规则和可用通道均未命中后，才对最新候选调用一次 AI。
-    if ai_candidate:
+    if ai_candidate and _has_verification_signal(ai_candidate["email_obj"], ai_candidate["extracted"]):
         latest = ai_candidate["latest"]
         email_obj = ai_candidate["email_obj"]
         channel = ai_candidate["channel"]
@@ -906,6 +1030,7 @@ def extract_verification_for_outlook(
             "error_status": 401,
             "upstream_errors": upstream_errors,
             "graph_auth_expired": graph_auth_expired,
+            "new_refresh_token": new_refresh_token,
             "_log_channel": last_log_channel,
             "_log_used_ai": False,
         }

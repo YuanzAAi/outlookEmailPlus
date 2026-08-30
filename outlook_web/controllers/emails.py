@@ -1241,7 +1241,7 @@ def _parse_external_common_args(
     )
 
     folder = (request.args.get("folder") or "inbox").strip().lower() or "inbox"
-    if folder not in {"inbox", "junkemail", "deleteditems"}:
+    if folder not in {"inbox", "junkemail", "sentitems", "deleteditems"}:
         raise external_api_service.InvalidParamError("folder 参数无效")
 
     def _int_arg(name: str, default: int) -> int:
@@ -1584,6 +1584,7 @@ def api_external_get_verification_code() -> Any:
             code_length=code_length,
             code_source=code_source,
             baseline_timestamp=args.get("baseline_timestamp"),
+            auto_detect_code_length=True,
             expected_field="verification_code",
         )
         if not result.get("verification_code"):

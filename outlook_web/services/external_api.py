@@ -45,6 +45,10 @@ IMAP_SERVER_OLD = "outlook.office365.com"
 # wait-message 约束
 MAX_TIMEOUT_SECONDS = 120
 
+# 外部 URL 取码没有固定站点规则时，覆盖常见的 4–8 位验证码范围。
+# 显式 code_length/code_regex 或分组自定义 regex/长度时仍保持原策略。
+AUTO_VERIFICATION_CODE_LENGTH = "4-8"
+
 
 def _can_check_external_access() -> bool:
     try:
@@ -322,7 +326,7 @@ def get_verification_summary_for_external(
     verification_folder = str(summary.get("latest_verification_folder") or "").strip().lower()
     received_raw = str(summary.get("latest_verification_received_at") or "").strip()
     received_at = _parse_datetime(received_raw)
-    if not code or not received_at or verification_folder not in {"inbox", "junkemail"}:
+    if not code or not received_at or verification_folder not in {"inbox", "junkemail", "sentitems"}:
         raise VerificationCodeNotFoundError("未找到近期已提取的验证码", data={"email": canonical_email})
 
     now = _utcnow()
@@ -1189,6 +1193,16 @@ def _extract_verification_with_memory_for_outlook(  # noqa: C901
         baseline_timestamp=baseline_timestamp,
     )
 
+    # Graph refresh token 可能在预检阶段轮换；无论本轮是否命中邮件，都要先持久化，
+    # 否则失败分支会丢掉新 token，下一轮 URL 请求又从旧 token 开始。
+    new_refresh_token = str(result.get("new_refresh_token") or "").strip()
+    if new_refresh_token:
+        try:
+            if accounts_repo.update_refresh_token_if_changed(int(account["id"]), new_refresh_token):
+                account["refresh_token"] = new_refresh_token
+        except Exception:
+            pass
+
     if not result.get("success"):
         error_code = str(result.get("error_code") or "UNKNOWN")
         if error_code == "ACCOUNT_AUTH_EXPIRED":
@@ -1217,14 +1231,6 @@ def _extract_verification_with_memory_for_outlook(  # noqa: C901
                 "upstream_errors": result.get("upstream_errors"),
             },
         )
-
-    if result.get("new_refresh_token"):
-        try:
-            new_token = str(result.get("new_refresh_token") or "").strip()
-            if new_token and accounts_repo.update_refresh_token_if_changed(int(account["id"]), new_token):
-                account["refresh_token"] = new_token
-        except Exception:
-            pass
 
     shaped = _shape_verification_result_by_expected_field(result.get("data") or {}, expected_field)
     shaped["_log_channel"] = (
@@ -1275,9 +1281,10 @@ def _resolve_verification_policy_for_request(
     code_regex: str | None,
     group: Optional[Dict[str, Any]],
     apply_default_code_length: bool,
+    auto_detect_code_length: bool = False,
 ) -> Dict[str, Any]:
     try:
-        return groups_repo.resolve_group_verification_policy(
+        resolved = groups_repo.resolve_group_verification_policy(
             request_code_length=code_length,
             request_code_regex=code_regex,
             group=group,
@@ -1287,6 +1294,19 @@ def _resolve_verification_policy_for_request(
         )
     except groups_repo.GroupPolicyValidationError as exc:
         raise InvalidParamError("参数错误") from exc
+
+    # URL 外部接口面向不同站点，不应把系统默认的 6 位假设当成硬限制；
+    # 只有在调用方未显式指定规则、且分组没有自定义 regex/长度时才启用自动范围。
+    if (
+        auto_detect_code_length
+        and apply_default_code_length
+        and not str(code_length or "").strip()
+        and not str(code_regex or "").strip()
+        and not resolved.get("code_regex")
+        and str(resolved.get("code_length") or "").strip() == "6-6"
+    ):
+        resolved["code_length"] = AUTO_VERIFICATION_CODE_LENGTH
+    return resolved
 
 
 def _ensure_verification_ai_ready() -> None:
@@ -1478,6 +1498,7 @@ def get_verification_result(
     code_source: str = "all",
     baseline_timestamp: Optional[int] = None,
     apply_default_code_length: bool = True,
+    auto_detect_code_length: bool = False,
     expected_field: str | None = None,
     enable_channel_memory: bool = True,
 ) -> Dict[str, Any]:
@@ -1491,6 +1512,7 @@ def get_verification_result(
         code_regex=code_regex,
         group=group,
         apply_default_code_length=apply_default_code_length,
+        auto_detect_code_length=auto_detect_code_length,
     )
     _ensure_verification_ai_ready()
 

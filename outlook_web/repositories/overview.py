@@ -31,6 +31,7 @@ def _channel_label(channel: str) -> str:
     return {
         "graph_inbox": "Graph Inbox",
         "graph_junk": "Graph Junk",
+        "graph_sentitems": "Graph SentItems",
         "imap_new": "IMAP New",
         "imap_old": "IMAP Old",
         "temp_mail": "Temp Mail",
