@@ -515,6 +515,7 @@
                     }
                 } else if (page === 'temp-emails') {
                     actionsEl.innerHTML = `
+                        <button class="btn btn-sm btn-primary" onclick="loadTempEmails(true)">↻ 刷新</button>
                         <button class="btn btn-sm btn-primary" onclick="generateTempEmail()">＋ 创建邮箱</button>
                     `;
                 } else {

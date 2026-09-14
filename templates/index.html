@@ -364,7 +364,10 @@
                     <div class="workspace-panel accounts-column" id="tempEmailPanel" style="width:300px;">
                         <div class="column-header">
                             <span class="column-title">⚡ 临时邮箱</span>
-                            <button class="btn btn-sm btn-primary" onclick="generateTempEmail()">+ 创建</button>
+                            <div style="display:flex;gap:8px;">
+                                <button class="btn btn-sm btn-primary" onclick="loadTempEmails(true)">↻ 刷新</button>
+                                <button class="btn btn-sm btn-primary" onclick="generateTempEmail()">+ 创建</button>
+                            </div>
                         </div>
                         <div style="padding:12px;border-bottom:1px solid var(--border-light);display:flex;flex-direction:column;gap:8px;">
                             <select class="form-input" id="tempEmailProviderSelect" onchange="onTempEmailProviderChange(this.value)" title="选择创建邮箱的 Provider">
