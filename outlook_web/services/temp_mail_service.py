@@ -982,6 +982,8 @@ class TempMailService:
     ) -> dict[str, Any]:
         # 标准化 provider_name（空字符串视为未指定，回退到全局设置）
         normalized_pn = str(provider_name or "").strip() or None
+        if normalized_pn == EDU_MAIL_PROVIDER_NAME:
+            raise TempMailError("EDU_MAIL_READ_ONLY", "教育邮箱由转发配置管理，不能创建", status=403)
         normalized_prefix, normalized_domain = self._validate_prefix_and_domain(prefix, domain, provider_name=normalized_pn)
         if normalized_prefix and normalized_domain:
             requested_email = f"{normalized_prefix}@{normalized_domain}".casefold()
