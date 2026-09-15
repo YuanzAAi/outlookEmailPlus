@@ -14,6 +14,17 @@ from typing import Any
 from outlook_web.repositories import accounts as accounts_repo
 from outlook_web.repositories import settings as settings_repo
 from outlook_web.repositories import temp_emails as temp_emails_repo
+from outlook_web.services.edu_mail import (
+    EDU_MAIL_PROVIDER_NAME,
+    EDU_MAIL_SOURCE,
+    decorate_edu_mailbox,
+    filter_edu_mail_messages,
+    get_edu_mail_capabilities,
+    get_edu_mail_mapping,
+    get_edu_mail_mappings,
+    get_reserved_backing_emails,
+    message_matches_edu_mail,
+)
 from outlook_web.services.temp_mail_provider_custom import TempMailProviderReadError
 from outlook_web.services.temp_mail_provider_factory import (
     TempMailProviderFactoryError,
@@ -224,6 +235,24 @@ class TempMailService:
                 return self._get_mailbox_descriptor(temp_emails_repo.build_temp_mailbox_descriptor(email_or_mailbox))
 
         email_addr = str(email_or_mailbox or "").strip()
+        edu_mapping = get_edu_mail_mapping(email_addr)
+        if edu_mapping:
+            backing_email = edu_mapping["backing_email"]
+            descriptor = temp_emails_repo.get_temp_email_by_address(backing_email, view="descriptor")
+            if not descriptor:
+                account = accounts_repo.get_account_by_email(backing_email)
+                if str((account or {}).get("provider") or "").strip().lower() == settings_repo.CLOUDFLARE_TEMP_MAIL_PROVIDER:
+                    from outlook_web.services.mailbox_resolver import build_account_backed_temp_mailbox
+
+                    descriptor = build_account_backed_temp_mailbox(account)
+            if not descriptor:
+                descriptor = self.discover_user_mailbox(backing_email)
+            if not descriptor:
+                raise TempMailError("TEMP_EMAIL_NOT_FOUND", "教育邮箱转发地址不存在", status=404)
+            descriptor = decorate_edu_mailbox(descriptor, edu_mapping["email"])
+            self._ensure_account_backed_message_parent(descriptor)
+            return descriptor
+
         descriptor = temp_emails_repo.get_temp_email_by_address(email_addr, view="descriptor")
         if descriptor:
             return self._get_mailbox_descriptor(descriptor)
@@ -408,6 +437,7 @@ class TempMailService:
             "html_content": str(message.get("html_content") or ""),
             "has_html": bool(message.get("has_html") or message.get("html_content")),
             "created_at": str(message.get("created_at") or ""),
+            "received_for": message.get("received_for") or [],
         }
         saved = temp_emails_repo.save_temp_email_messages(canonical_email, [normalized_message])
         if saved != 1:
@@ -642,6 +672,8 @@ class TempMailService:
         discovered = self.discover_user_mailbox(str(mailbox.get("email") or ""), provider=provider)
         if not discovered:
             raise TempMailError("TEMP_EMAIL_NOT_FOUND", "临时邮箱不存在", status=404)
+        if mailbox.get("edu_mail"):
+            discovered = decorate_edu_mailbox(discovered, str(mailbox.get("display_email") or ""))
         return discovered
 
     def _provider_read_failed(
@@ -826,16 +858,54 @@ class TempMailService:
             view="record",
             order_by_latest_message=True,
         )
+        reserved_backings = get_reserved_backing_emails()
+        records_by_email = {str(record.get("email") or "").casefold(): record for record in records}
         results: list[dict[str, Any]] = []
         for record in records:
+            if str(record.get("email") or "").casefold() in reserved_backings:
+                continue
             mailbox = temp_emails_repo.build_temp_mailbox_descriptor(record)
             public = temp_emails_repo.build_temp_mailbox_public_dto(record)
             public["capabilities"] = self.get_mailbox_capabilities(mailbox)
+            results.append(public)
+
+        for mapping in get_edu_mail_mappings():
+            backing_email = mapping["backing_email"]
+            record = records_by_email.get(backing_email.casefold())
+            if not record:
+                record = temp_emails_repo.get_temp_email_by_address(backing_email, view="record")
+            if not record or str(record.get("status") or "active").strip().lower() != "active":
+                continue
+            public = temp_emails_repo.build_temp_mailbox_public_dto(record)
+            matching_rows = filter_edu_mail_messages(
+                temp_emails_repo.get_temp_email_messages(backing_email),
+                {"edu_mail": True, "received_for": mapping["email"]},
+            )
+            prefix, domain = mapping["email"].rsplit("@", 1)
+            capabilities = get_edu_mail_capabilities()
+            public.update(
+                {
+                    "email": mapping["email"],
+                    "prefix": prefix,
+                    "domain": domain,
+                    "source": EDU_MAIL_SOURCE,
+                    "provider_name": EDU_MAIL_PROVIDER_NAME,
+                    "provider_capabilities": capabilities,
+                    "capabilities": capabilities,
+                    "backing_email": backing_email,
+                    "edu_mail": True,
+                    "group_id": None,
+                    "tags": [],
+                    "latest_message_at": int(matching_rows[0].get("timestamp") or 0) if matching_rows else 0,
+                }
+            )
             results.append(public)
         return results
 
     def get_mailbox_capabilities(self, email_or_mailbox: str | dict[str, Any]) -> dict[str, bool]:
         mailbox = self._get_mailbox_descriptor(email_or_mailbox)
+        if mailbox.get("edu_mail"):
+            return get_edu_mail_capabilities()
         stored = dict((mailbox.get("meta") or {}).get("provider_capabilities") or {})
         try:
             provider = self._get_provider(mailbox=mailbox)
@@ -876,6 +946,8 @@ class TempMailService:
         return mailbox, self._get_provider(mailbox=mailbox)
 
     def get_mailbox(self, email_addr: str, *, view: str = "record") -> dict[str, Any]:
+        if get_edu_mail_mapping(email_addr):
+            return self._get_mailbox_descriptor(email_addr)
         record = temp_emails_repo.get_temp_email_by_address(email_addr, view=view)
         if not record:
             raise TempMailError("TEMP_EMAIL_NOT_FOUND", "临时邮箱不存在", status=404)
@@ -883,6 +955,8 @@ class TempMailService:
 
     def delete_mailbox(self, email_or_mailbox: str | dict[str, Any]) -> bool:
         mailbox = self._get_mailbox_descriptor(email_or_mailbox)
+        if mailbox.get("edu_mail"):
+            raise TempMailError("EDU_MAIL_READ_ONLY", "教育邮箱为只读转发邮箱", status=403)
         if mailbox.get("account_backed"):
             raise TempMailError(
                 "TEMP_EMAIL_POOL_ACCOUNT_MANAGED",
@@ -909,6 +983,10 @@ class TempMailService:
         # 标准化 provider_name（空字符串视为未指定，回退到全局设置）
         normalized_pn = str(provider_name or "").strip() or None
         normalized_prefix, normalized_domain = self._validate_prefix_and_domain(prefix, domain, provider_name=normalized_pn)
+        if normalized_prefix and normalized_domain:
+            requested_email = f"{normalized_prefix}@{normalized_domain}".casefold()
+            if requested_email in get_reserved_backing_emails():
+                raise TempMailError("TEMP_EMAIL_RESERVED", "该地址已被教育邮箱转发占用", status=409)
         provider = self._get_provider(provider_name=normalized_pn, purpose="runtime")
         result = self._create_mailbox(provider, prefix=normalized_prefix, domain=normalized_domain)
         if not result.get("success"):
@@ -921,6 +999,8 @@ class TempMailService:
         email_addr = str(result.get("email") or "").strip()
         if not email_addr:
             raise TempMailError("TEMP_EMAIL_CREATE_FAILED", "临时邮箱创建失败：缺少邮箱地址", status=502)
+        if email_addr.casefold() in get_reserved_backing_emails():
+            raise TempMailError("TEMP_EMAIL_RESERVED", "该地址已被教育邮箱转发占用", status=409)
         mailbox = self._create_or_load_mailbox_record(
             email_addr=email_addr,
             mailbox_type="user",
@@ -1150,7 +1230,9 @@ class TempMailService:
             provider = self._get_provider(mailbox=mailbox)
             self._sync_provider_messages(provider, mailbox)
             rows = temp_emails_repo.get_temp_email_messages(email_addr)
-        return [_message_summary(email_addr, row) for row in rows]
+        rows = filter_edu_mail_messages(rows, mailbox)
+        display_email = str(mailbox.get("display_email") or email_addr)
+        return [_message_summary(display_email, row) for row in rows]
 
     def get_message_detail(
         self,
@@ -1162,6 +1244,8 @@ class TempMailService:
         mailbox = self._get_mailbox_descriptor(email_or_mailbox)
         email_addr = str(mailbox.get("email") or "")
         row = temp_emails_repo.get_temp_email_message_by_id(message_id, email_addr=email_addr)
+        if row and not message_matches_edu_mail(row, mailbox.get("received_for")):
+            row = None
         if refresh_if_missing and row is None:
             # BUG-03: cache-only 场景（refresh_if_missing=False）不得依赖 provider 初始化。
             mailbox = self._ensure_provider_credentials(mailbox)
@@ -1178,17 +1262,22 @@ class TempMailService:
             if api_row:
                 temp_emails_repo.save_temp_email_messages(email_addr, [api_row])
                 row = temp_emails_repo.get_temp_email_message_by_id(message_id, email_addr=email_addr)
+                if row and not message_matches_edu_mail(row, mailbox.get("received_for")):
+                    row = None
         if not row:
             raise TempMailError("TEMP_EMAIL_MESSAGE_NOT_FOUND", "邮件不存在", status=404)
-        return _message_detail(email_addr, row)
+        return _message_detail(str(mailbox.get("display_email") or email_addr), row)
 
     def get_cached_message_row(self, email_or_mailbox: str | dict[str, Any], message_id: str) -> dict[str, Any] | None:
         mailbox = self._get_mailbox_descriptor(email_or_mailbox)
         email_addr = str(mailbox.get("email") or "")
-        return temp_emails_repo.get_temp_email_message_by_id(message_id, email_addr=email_addr)
+        row = temp_emails_repo.get_temp_email_message_by_id(message_id, email_addr=email_addr)
+        return row if row and message_matches_edu_mail(row, mailbox.get("received_for")) else None
 
     def refresh_message_detail(self, email_or_mailbox: str | dict[str, Any], message_id: str) -> dict[str, Any]:
         mailbox = self._get_mailbox_descriptor(email_or_mailbox)
+        if mailbox.get("edu_mail"):
+            return self.get_message_detail(mailbox, message_id, refresh_if_missing=False)
         mailbox = self._ensure_provider_credentials(mailbox)
         email_addr = str(mailbox.get("email") or "")
         provider = self._get_provider(mailbox=mailbox)
@@ -1210,6 +1299,8 @@ class TempMailService:
 
     def delete_message(self, email_or_mailbox: str | dict[str, Any], message_id: str) -> bool:
         mailbox = self._get_mailbox_descriptor(email_or_mailbox)
+        if mailbox.get("edu_mail"):
+            raise TempMailError("EDU_MAIL_READ_ONLY", "教育邮箱为只读转发邮箱", status=403)
         mailbox = self._ensure_provider_credentials(mailbox)
         email_addr = str(mailbox.get("email") or "")
         provider = self._get_provider(mailbox=mailbox)
@@ -1219,6 +1310,8 @@ class TempMailService:
 
     def clear_messages(self, email_or_mailbox: str | dict[str, Any]) -> bool:
         mailbox = self._get_mailbox_descriptor(email_or_mailbox)
+        if mailbox.get("edu_mail"):
+            raise TempMailError("EDU_MAIL_READ_ONLY", "教育邮箱为只读转发邮箱", status=403)
         mailbox = self._ensure_provider_credentials(mailbox)
         email_addr = str(mailbox.get("email") or "")
         provider = self._get_provider(mailbox=mailbox)

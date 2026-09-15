@@ -366,13 +366,14 @@
                             <span class="column-title">⚡ 临时邮箱</span>
                             <div style="display:flex;gap:8px;">
                                 <button class="btn btn-sm btn-primary" onclick="loadTempEmails(true)">↻ 刷新</button>
-                                <button class="btn btn-sm btn-primary" onclick="generateTempEmail()">+ 创建</button>
+                                <button class="btn btn-sm btn-primary temp-email-create-action" onclick="generateTempEmail()">+ 创建</button>
                             </div>
                         </div>
                         <div style="padding:12px;border-bottom:1px solid var(--border-light);display:flex;flex-direction:column;gap:8px;">
                             <select class="form-input" id="tempEmailProviderSelect" onchange="onTempEmailProviderChange(this.value)" title="选择创建邮箱的 Provider">
                                 <option value="legacy_bridge">🔧 GPTMail (Legacy Bridge)</option>
                                 <option value="cloudflare_temp_mail">☁ Cloudflare Temp Mail</option>
+                                <option value="edumail">🎓 Edu Mail</option>
                             </select>
                             <input type="text" class="form-input" id="tempEmailPrefixInput" placeholder="前缀（可选）" maxlength="64">
                             <select class="form-input" id="tempEmailDomainSelect" disabled>
@@ -385,7 +386,7 @@
                             <div class="empty-state">
                                 <span class="empty-icon">📭</span>
                                 <p>暂无临时邮箱</p>
-                                <button class="btn btn-primary" onclick="generateTempEmail()">创建第一个临时邮箱</button>
+                                <button class="btn btn-primary temp-email-create-action" onclick="generateTempEmail()">创建第一个临时邮箱</button>
                             </div>
                         </div>
                     </div>

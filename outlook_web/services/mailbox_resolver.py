@@ -6,6 +6,7 @@ from typing import Any
 from outlook_web.repositories import accounts as accounts_repo
 from outlook_web.repositories import temp_emails as temp_emails_repo
 from outlook_web.security.auth import get_external_api_consumer
+from outlook_web.services.edu_mail import decorate_edu_mailbox, get_edu_mail_mapping
 
 
 def _external_api_service():
@@ -108,6 +109,17 @@ def resolve_mailbox(email_addr: str, *, discover_remote: bool = True) -> dict[st
     requested_email = str(email_addr or "").strip()
     if not requested_email or "@" not in requested_email:
         raise external_api_service.InvalidParamError("email 参数无效")
+
+    edu_mapping = get_edu_mail_mapping(requested_email)
+    if edu_mapping:
+        backing_mailbox = resolve_mailbox(edu_mapping["backing_email"], discover_remote=discover_remote)
+        if backing_mailbox.get("kind") != "temp":
+            raise external_api_service.AccountNotFoundError(
+                "教育邮箱转发地址不存在",
+                data={"email": requested_email},
+            )
+        return decorate_edu_mailbox(backing_mailbox, edu_mapping["email"])
+
     account_lookup_email = normalize_alias_email(requested_email) or requested_email
 
     # BUG-04: accounts 与 temp_emails 同邮箱命中时，必须显式冲突（避免安全边界被绕开）
@@ -211,8 +223,12 @@ def ensure_mailbox_scope(
         return mailbox_meta
 
     allowed_emails = [str(item or "").strip().lower() for item in (consumer.get("allowed_emails") or [])]
-    target_email = str(target.get("email") or "").strip().lower()
-    if allowed_emails and target_email not in allowed_emails:
+    target_emails = {
+        str(target.get("email") or "").strip().lower(),
+        str(target.get("display_email") or "").strip().lower(),
+    }
+    target_emails.discard("")
+    if allowed_emails and target_emails.isdisjoint(allowed_emails):
         raise external_api_service.EmailScopeForbiddenError(
             "当前 API Key 无权访问该邮箱",
             data={

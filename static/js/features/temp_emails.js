@@ -12,6 +12,7 @@
         let tempEmailSentRequestSeq = 0;
         let tempEmailViewMode = 'inbox';
         let tempEmailSentItems = [];
+        const EDU_MAIL_PROVIDER_NAME = 'edumail';
 
         function getTempEmailOptionsProviderName(providerName = null) {
             const explicitProvider = String(providerName || '').trim();
@@ -22,6 +23,34 @@
 
         function getTempEmailOptionsCacheKey(providerName) {
             return getTempEmailOptionsProviderName(providerName) || '__default__';
+        }
+
+        function isEduMailProvider(providerName = null) {
+            return getTempEmailOptionsProviderName(providerName) === EDU_MAIL_PROVIDER_NAME;
+        }
+
+        function configureTempEmailProviderControls(providerName = null) {
+            const eduMode = isEduMailProvider(providerName);
+            const prefixInput = document.getElementById('tempEmailPrefixInput');
+            const domainSelect = document.getElementById('tempEmailDomainSelect');
+            const hint = document.getElementById('tempEmailOptionsHint');
+            const status = document.getElementById('tempEmailOptionsStatus');
+            if (prefixInput) prefixInput.disabled = eduMode;
+            document.querySelectorAll('.temp-email-create-action').forEach(button => {
+                button.disabled = eduMode;
+            });
+            if (eduMode) {
+                if (domainSelect) {
+                    domainSelect.disabled = true;
+                    domainSelect.innerHTML = `<option value="">${translateAppTextLocal('共享转发邮箱')}</option>`;
+                }
+                if (hint) hint.textContent = translateAppTextLocal('教育邮箱通过已配置的共享转发邮箱只读收信。');
+                if (status) {
+                    status.textContent = '';
+                    status.style.display = 'none';
+                }
+            }
+            return eduMode;
         }
 
         function getTempEmailProviderDisplayLabel(providerName, options) {
@@ -44,6 +73,9 @@
 
         async function loadTempEmailOptions(forceRefresh = false, providerName = null) {
             const resolvedProviderName = getTempEmailOptionsProviderName(providerName);
+            if (configureTempEmailProviderControls(resolvedProviderName)) {
+                return null;
+            }
             const cacheKey = getTempEmailOptionsCacheKey(resolvedProviderName);
             const requestSeq = ++tempEmailOptionsRequestSeq;
 
@@ -234,7 +266,11 @@
             const firstProvider = Array.isArray(mailboxes) && mailboxes.length
                 ? String(mailboxes[0]?.provider_name || '').trim()
                 : '';
-            const targetProvider = String(runtimeProvider || firstProvider || '').trim();
+            const selectedProvider = String(providerSelect?.value || '').trim();
+            const hasEduMail = Array.isArray(mailboxes) && mailboxes.some(mailbox => mailbox?.edu_mail === true);
+            const targetProvider = selectedProvider === EDU_MAIL_PROVIDER_NAME && hasEduMail
+                ? EDU_MAIL_PROVIDER_NAME
+                : String(runtimeProvider || firstProvider || '').trim();
             if (providerSelect && targetProvider && Array.from(providerSelect.options).some(option => option.value === targetProvider)) {
                 providerSelect.value = targetProvider;
             }
@@ -282,19 +318,24 @@
         function renderTempEmailList(emails) {
             const container = document.getElementById('accountList');
             const pageContainer = document.getElementById('tempEmailContainer');
+            const eduMode = isEduMailProvider();
+            const visibleEmails = (Array.isArray(emails) ? emails : []).filter(email => (
+                eduMode ? email?.edu_mail === true : email?.edu_mail !== true
+            ));
 
-            if (emails.length === 0) {
+            if (visibleEmails.length === 0) {
+                const emptyText = eduMode ? '暂无教育邮箱' : '暂无临时邮箱';
                 const emptyAccountHTML = `
                     <div class="empty-state">
-                        <span class="empty-icon">⚡</span>
-                        <p>${translateAppTextLocal('暂无临时邮箱')}<br>${translateAppTextLocal('点击按钮生成')}</p>
+                        <span class="empty-icon">${eduMode ? '🎓' : '⚡'}</span>
+                        <p>${translateAppTextLocal(emptyText)}${eduMode ? '' : `<br>${translateAppTextLocal('点击按钮生成')}`}</p>
                     </div>
                 `;
                 const emptyPageHTML = `
                     <div class="empty-state">
                         <span class="empty-icon">📭</span>
-                        <p>${translateAppTextLocal('暂无临时邮箱')}</p>
-                        <button class="btn btn-primary" onclick="generateTempEmail()">${translateAppTextLocal('创建第一个临时邮箱')}</button>
+                        <p>${translateAppTextLocal(emptyText)}</p>
+                        ${eduMode ? '' : `<button class="btn btn-primary temp-email-create-action" onclick="generateTempEmail()">${translateAppTextLocal('创建第一个临时邮箱')}</button>`}
                     </div>
                 `;
                 if (container) container.innerHTML = emptyAccountHTML;
@@ -308,9 +349,43 @@
                 .map(group => `<option value="${Number(group.id)}">${escapeHtml(group.name || '')}</option>`)
                 .join('');
 
-            const cardHTML = emails.map((email, idx) => {
+            const cardHTML = visibleEmails.map((email, idx) => {
                 const initial = (email.email || '?')[0].toUpperCase();
                 const color = colors[idx % colors.length];
+                const eduMail = email.edu_mail === true;
+                const backingEmail = String(email.backing_email || '').trim();
+                const identityDetails = eduMail
+                    ? `
+                        <div style="font-size:0.72rem;color:var(--text-muted);">${translateAppTextLocal('🎓 教育邮箱')}</div>
+                        <div onclick="event.stopPropagation(); copyEmail('${escapeJs(backingEmail)}')"
+                             style="font-size:0.72rem;color:var(--text-muted);cursor:pointer;overflow-wrap:anywhere;"
+                             title="点击复制转发邮箱">${translateAppTextLocal('转发邮箱：')}${escapeHtml(backingEmail)}</div>
+                    `
+                    : `
+                        <div style="font-size:0.72rem;color:var(--text-muted);">${translateAppTextLocal('⚡ 临时邮箱')}</div>
+                        <div class="temp-email-tag-list">${(email.tags || []).map(tag => `
+                            <button type="button" class="tag-badge" style="border-color:${escapeHtml(tag.color || '#888')}"
+                                onclick="event.stopPropagation(); removeTempEmailTag('${escapeJs(email.email)}', ${Number(tag.id)})"
+                                title="移除标签">${escapeHtml(tag.name || '')} ×</button>`).join('')}</div>
+                    `;
+                const actions = eduMail
+                    ? `
+                        <button class="btn btn-sm btn-accent" onclick="event.stopPropagation(); copyVerificationInfo('${escapeJs(email.email)}', this, { source: 'temp' })" title="提取验证码" style="font-size:0.72rem;padding:2px 8px;">🔑 验证码</button>
+                        <button class="btn-icon" onclick="event.stopPropagation(); copyEmail('${escapeJs(email.email)}')" title="复制教育邮箱">📋</button>
+                    `
+                    : `
+                        <select class="form-input" style="width:110px;padding:2px 5px;font-size:0.72rem;" title="所属分组"
+                            onclick="event.stopPropagation()"
+                            onchange="event.stopPropagation(); updateTempEmailGroup('${escapeJs(email.email)}', this.value)">
+                            <option value="">临时邮箱</option>
+                            ${groupOptions.replace(`value="${Number(email.group_id)}"`, `value="${Number(email.group_id)}" selected`)}
+                        </select>
+                        <button class="btn-icon" onclick="event.stopPropagation(); addTempEmailTag('${escapeJs(email.email)}')" title="添加标签">🏷</button>
+                        <button class="btn btn-sm btn-accent" onclick="event.stopPropagation(); copyVerificationInfo('${escapeJs(email.email)}', this, { source: 'temp' })" title="提取验证码" style="font-size:0.72rem;padding:2px 8px;">🔑 验证码</button>
+                        <button class="btn-icon" onclick="event.stopPropagation(); copyEmail('${escapeJs(email.email)}')" title="复制">📋</button>
+                        <button class="btn-icon" onclick="event.stopPropagation(); clearTempEmailMessages('${escapeJs(email.email)}')" title="清空">🧹</button>
+                        <button class="btn-icon" onclick="event.stopPropagation(); deleteTempEmail('${escapeJs(email.email)}')" title="删除" style="color:var(--clr-danger);">🗑️</button>
+                    `;
                 return `
                 <div class="account-card ${currentAccount === email.email ? 'active' : ''}"
                      onclick="selectTempEmail('${escapeJs(email.email)}')">
@@ -318,26 +393,12 @@
                         <div class="account-avatar" style="background:${color};">${initial}</div>
                         <div class="account-info">
                             <div class="account-email" onclick="event.stopPropagation(); copyEmail('${escapeJs(email.email)}')" style="cursor:pointer;" title="点击复制">${escapeHtml(email.email)}</div>
-                             <div style="font-size:0.72rem;color:var(--text-muted);">${translateAppTextLocal('⚡ 临时邮箱')}</div>
-                            <div class="temp-email-tag-list">${(email.tags || []).map(tag => `
-                                <button type="button" class="tag-badge" style="border-color:${escapeHtml(tag.color || '#888')}"
-                                    onclick="event.stopPropagation(); removeTempEmailTag('${escapeJs(email.email)}', ${Number(tag.id)})"
-                                    title="移除标签">${escapeHtml(tag.name || '')} ×</button>`).join('')}</div>
+                            ${identityDetails}
                          </div>
                     </div>
                     <div class="account-card-bottom">
                         <div class="account-actions">
-                            <select class="form-input" style="width:110px;padding:2px 5px;font-size:0.72rem;" title="所属分组"
-                                onclick="event.stopPropagation()"
-                                onchange="event.stopPropagation(); updateTempEmailGroup('${escapeJs(email.email)}', this.value)">
-                                <option value="">临时邮箱</option>
-                                ${groupOptions.replace(`value="${Number(email.group_id)}"`, `value="${Number(email.group_id)}" selected`)}
-                            </select>
-                            <button class="btn-icon" onclick="event.stopPropagation(); addTempEmailTag('${escapeJs(email.email)}')" title="添加标签">🏷</button>
-                            <button class="btn btn-sm btn-accent" onclick="event.stopPropagation(); copyVerificationInfo('${escapeJs(email.email)}', this, { source: 'temp' })" title="提取验证码" style="font-size:0.72rem;padding:2px 8px;">🔑 验证码</button>
-                            <button class="btn-icon" onclick="event.stopPropagation(); copyEmail('${escapeJs(email.email)}')" title="复制">📋</button>
-                            <button class="btn-icon" onclick="event.stopPropagation(); clearTempEmailMessages('${escapeJs(email.email)}')" title="清空">🧹</button>
-                            <button class="btn-icon" onclick="event.stopPropagation(); deleteTempEmail('${escapeJs(email.email)}')" title="删除" style="color:var(--clr-danger);">🗑️</button>
+                            ${actions}
                         </div>
                     </div>
                 </div>
@@ -402,10 +463,18 @@
 
         // 生成临时邮箱
         function onTempEmailProviderChange(selectedProvider) {
-            loadTempEmailOptions(false, selectedProvider);
+            const eduMode = configureTempEmailProviderControls(selectedProvider);
+            if (!eduMode) {
+                loadTempEmailOptions(false, selectedProvider);
+            }
+            renderTempEmailList(accountsCache['temp'] || []);
         }
 
         async function generateTempEmail() {
+            if (isEduMailProvider()) {
+                showToast(translateAppTextLocal('教育邮箱由转发配置管理，不能在此创建'), 'warning');
+                return;
+            }
             try {
                 const prefixInput = document.getElementById('tempEmailPrefixInput');
                 const domainSelect = document.getElementById('tempEmailDomainSelect');
