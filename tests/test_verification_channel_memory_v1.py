@@ -218,6 +218,7 @@ class VerificationChannelMemoryV1Tests(unittest.TestCase):
         subject: str = "Your verification code",
         sender: str = "noreply@example.com",
         received_at: str | None = None,
+        body_preview: str = "Your code is 123456",
     ):
         return {
             "id": message_id,
@@ -226,7 +227,7 @@ class VerificationChannelMemoryV1Tests(unittest.TestCase):
             "receivedDateTime": received_at or cls._utc_iso(),
             "isRead": False,
             "hasAttachments": False,
-            "bodyPreview": "Your code is 123456",
+            "bodyPreview": body_preview,
         }
 
     @classmethod
@@ -363,14 +364,19 @@ class VerificationChannelMemoryV1Tests(unittest.TestCase):
         self.assertEqual([call.kwargs.get("folder") for call in mock_imap_fetch.call_args_list], ["inbox", "junkemail"])
         self.assertEqual(self._get_preferred_channel(email_addr), "imap_new")
 
+    @patch(
+        "outlook_web.services.graph.get_access_token_graph_result",
+        return_value={"success": True, "access_token": "test-access-token", "scope": "Mail.Read"},
+    )
     @patch("outlook_web.services.graph.get_email_detail_graph")
-    @patch("outlook_web.services.graph.get_emails_graph")
+    @patch("outlook_web.services.graph.get_emails_graph_with_access_token")
     @patch("outlook_web.services.imap.get_emails_imap_with_server")
     def test_external_empty_or_invalid_preferred_checks_graph_folders(
         self,
         mock_imap_list,
         mock_graph_list,
         mock_graph_detail,
+        _mock_graph_token,
     ):
         self._set_external_api_key("abc123")
         client = self.app.test_client()
@@ -383,8 +389,8 @@ class VerificationChannelMemoryV1Tests(unittest.TestCase):
                 mock_graph_detail.reset_mock()
                 mock_imap_list.reset_mock()
 
-                mock_graph_list.side_effect = [
-                    {
+                graph_results = {
+                    "inbox": {
                         "success": True,
                         "emails": [
                             self._graph_email(
@@ -393,16 +399,23 @@ class VerificationChannelMemoryV1Tests(unittest.TestCase):
                             )
                         ],
                     },
-                    {
+                    "junkemail": {
                         "success": True,
                         "emails": [
                             self._graph_email(
                                 message_id=f"msg-junk-{preferred or 'none'}",
                                 received_at=self._utc_iso(),
+                                body_preview="Your code is 321654",
                             )
                         ],
                     },
-                ]
+                    "sentitems": {"success": True, "emails": []},
+                }
+
+                def _graph_side_effect(*_args, folder: str, **_kwargs):
+                    return graph_results[folder]
+
+                mock_graph_list.side_effect = _graph_side_effect
                 mock_graph_detail.return_value = self._graph_detail(body_text="Your code is 321654")
                 mock_imap_list.return_value = {"success": False, "error": {"message": "imap unavailable"}}
 
@@ -416,28 +429,34 @@ class VerificationChannelMemoryV1Tests(unittest.TestCase):
                 self.assertEqual(data.get("verification_code"), "321654")
                 self.assertNotIn("_matched_channel", data)
 
-                self.assertEqual(
+                self.assertCountEqual(
                     [call.kwargs.get("folder") for call in mock_graph_list.call_args_list],
-                    ["inbox", "junkemail"],
+                    ["inbox", "junkemail", "sentitems"],
                 )
+                mock_graph_detail.assert_not_called()
+                mock_imap_list.assert_not_called()
+                self.assertEqual(data.get("folder"), "junkemail")
+                self.assertEqual(data.get("matched_email_id"), f"msg-junk-{preferred or 'none'}")
                 self.assertEqual(self._get_preferred_channel(email_addr), "graph_junk")
 
+    @patch(
+        "outlook_web.services.graph.get_access_token_graph_result",
+        return_value={"success": True, "access_token": "test-access-token", "scope": "Mail.Read"},
+    )
     @patch("outlook_web.services.graph.get_email_detail_graph")
-    @patch("outlook_web.services.graph.get_emails_graph")
+    @patch("outlook_web.services.graph.get_emails_graph_with_access_token")
     @patch("outlook_web.services.verification_channel_routing.fetch_emails_and_detail_for_channel")
     def test_external_fallback_overwrites_channel(
         self,
         mock_imap_fetch,
         mock_graph_list,
         _mock_graph_detail,
+        _mock_graph_token,
     ):
         email_addr = self._insert_outlook_account(preferred_channel="graph_junk")
         self._set_external_api_key("abc123")
 
-        mock_graph_list.side_effect = [
-            {"success": False, "error": {"message": "graph junk failed"}},
-            {"success": False, "error": {"message": "graph inbox failed"}},
-        ]
+        mock_graph_list.return_value = {"success": False, "error": {"message": "graph unavailable"}}
 
         imap_old_detail = {
             "id": "imap-old-1",
@@ -479,7 +498,11 @@ class VerificationChannelMemoryV1Tests(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.get_json().get("data", {}).get("verification_code"), "987654")
         self.assertNotIn("_matched_channel", resp.get_json().get("data", {}))
-        self.assertEqual(
+        self.assertCountEqual(
+            [call.kwargs.get("folder") for call in mock_graph_list.call_args_list],
+            ["junkemail", "inbox", "sentitems"],
+        )
+        self.assertCountEqual(
             [(call.kwargs.get("channel"), call.kwargs.get("folder")) for call in mock_imap_fetch.call_args_list],
             [("imap_new", "inbox"), ("imap_new", "junkemail"), ("imap_old", "inbox"), ("imap_old", "junkemail")],
         )
@@ -558,22 +581,22 @@ class VerificationChannelMemoryV1Tests(unittest.TestCase):
         self.assertEqual([call.kwargs.get("folder") for call in mock_imap_fetch.call_args_list], ["inbox", "junkemail"])
         self.assertEqual(self._get_preferred_channel(email_addr), "imap_new")
 
+    @patch(
+        "outlook_web.services.graph.get_access_token_graph_result",
+        return_value={"success": True, "access_token": "test-access-token", "scope": "Mail.Read"},
+    )
     @patch("outlook_web.services.graph.get_email_detail_graph")
-    @patch("outlook_web.services.graph.get_emails_graph")
+    @patch("outlook_web.services.graph.get_emails_graph_with_access_token")
     @patch("outlook_web.services.verification_channel_routing.fetch_emails_and_detail_for_channel")
     def test_web_fallback_overwrites_channel(
         self,
         mock_imap_fetch,
         mock_graph_list,
         _mock_graph_detail,
+        _mock_graph_token,
     ):
         email_addr = self._insert_outlook_account(preferred_channel="graph_junk")
-        _mock_graph_detail.return_value = self._graph_detail(body_text="Use code 778899")
-
-        mock_graph_list.side_effect = [
-            {"success": False, "error": {"message": "graph junk failed"}},
-            {"success": False, "error": {"message": "graph inbox failed"}},
-        ]
+        mock_graph_list.return_value = {"success": False, "error": {"message": "graph unavailable"}}
 
         imap_old_detail = {
             "id": "imap-old-web-1",
@@ -612,7 +635,11 @@ class VerificationChannelMemoryV1Tests(unittest.TestCase):
 
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.get_json().get("data", {}).get("verification_code"), "778899")
-        self.assertEqual(
+        self.assertCountEqual(
+            [call.kwargs.get("folder") for call in mock_graph_list.call_args_list],
+            ["junkemail", "inbox", "sentitems"],
+        )
+        self.assertCountEqual(
             [(call.kwargs.get("channel"), call.kwargs.get("folder")) for call in mock_imap_fetch.call_args_list],
             [("imap_new", "inbox"), ("imap_new", "junkemail"), ("imap_old", "inbox"), ("imap_old", "junkemail")],
         )
