@@ -137,6 +137,7 @@ class ExternalApiBaseTest(unittest.TestCase):
         subject: str = "Your verification code",
         sender: str = "noreply@example.com",
         received_at: str | None = None,
+        body_preview: str = "Your code is 123456",
     ):
         return {
             "id": message_id,
@@ -145,7 +146,7 @@ class ExternalApiBaseTest(unittest.TestCase):
             "receivedDateTime": received_at or cls._utc_iso(),
             "isRead": False,
             "hasAttachments": False,
-            "bodyPreview": "Your code is 123456",
+            "bodyPreview": body_preview,
         }
 
     @classmethod
@@ -1663,7 +1664,10 @@ class ExternalApiVerificationErrorTests(ExternalApiBaseTest):
         """TC-VER-06: 邮件存在但无验证码 → 404 VERIFICATION_CODE_NOT_FOUND"""
         email_addr = self._insert_outlook_account()
         self._set_external_api_key("abc123")
-        mock_list.return_value = {"success": True, "emails": [self._graph_email()]}
+        mock_list.return_value = {
+            "success": True,
+            "emails": [self._graph_email(body_preview="Hello, this is a normal email with no code.")],
+        }
         mock_detail.return_value = self._graph_detail(body_text="Hello, this is a normal email with no code.")
         mock_raw.return_value = "RAW"
 
@@ -1863,6 +1867,7 @@ class ExternalApiVerificationConfidenceTests(ExternalApiBaseTest):
                 self._graph_email(
                     subject="Runpod - 50% OFF GPU Instances",
                     sender="marketing@runpod.io",
+                    body_preview="Save big on 1181 new GPU instances! Order now for $2999/month.",
                 )
             ],
         }
@@ -1937,7 +1942,12 @@ class ExternalApiVerificationConfidenceTests(ExternalApiBaseTest):
         self._set_external_api_key("abc123")
         mock_list.return_value = {
             "success": True,
-            "emails": [self._graph_email(subject="Your verification code")],
+            "emails": [
+                self._graph_email(
+                    subject="Your verification code",
+                    body_preview="Your verification code is 987654. Do not share this code.",
+                )
+            ],
         }
         mock_detail.return_value = self._graph_detail(
             body_text="Your verification code is 987654. Do not share this code.",
@@ -2049,7 +2059,12 @@ class ExternalApiVerificationConfidenceTests(ExternalApiBaseTest):
         self._set_external_api_key("abc123")
         mock_list.return_value = {
             "success": True,
-            "emails": [self._graph_email(subject="System Report")],
+            "emails": [
+                self._graph_email(
+                    subject="System Report",
+                    body_preview="There are 445566 active users this quarter.",
+                )
+            ],
         }
         # 关键：detail 的 subject 也要是非验证码主题
         report_detail = {
@@ -2084,7 +2099,12 @@ class ExternalApiVerificationConfidenceTests(ExternalApiBaseTest):
         self._set_external_api_key("abc123")
         mock_list.return_value = {
             "success": True,
-            "emails": [self._graph_email(subject="Your OTP code")],
+            "emails": [
+                self._graph_email(
+                    subject="Your OTP code",
+                    body_preview="Your OTP code is AB1234. Enter it within 5 minutes.",
+                )
+            ],
         }
         mock_detail.return_value = self._graph_detail(
             body_text="Your OTP code is AB1234. Enter it within 5 minutes.",

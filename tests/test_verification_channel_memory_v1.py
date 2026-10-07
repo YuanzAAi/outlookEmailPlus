@@ -314,7 +314,7 @@ class VerificationChannelMemoryV1Tests(unittest.TestCase):
             self.assertTrue(result.get("success"))
             self.assertEqual((result.get("data") or {}).get("matched_email_id"), "code-msg")
             self.assertEqual((result.get("data") or {}).get("verification_code"), "123456")
-            self.assertEqual(mock_detail.call_count, 2)
+            mock_detail.assert_not_called()
 
     @patch("outlook_web.services.graph.get_emails_graph")
     @patch("outlook_web.services.verification_channel_routing.fetch_emails_and_detail_for_channel")
