@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Optional
 
 from flask import g
 
-from outlook_web.db import get_db
+from outlook_web.db import create_sqlite_connection, get_db
 from outlook_web.security.auth import get_client_ip
 
 
@@ -35,6 +35,34 @@ def log_audit(action: str, resource_type: str, resource_id: str = None, details:
     except Exception:
         # 审计日志失败不应影响主流程
         pass
+
+
+def cleanup_external_api_audit_logs() -> int:
+    db = create_sqlite_connection()
+    deleted = 0
+    batch_size = 5000
+    try:
+        cutoff = db.execute("SELECT datetime('now', '-30 days')").fetchone()[0]
+        # 分批提交，避免历史日志清理长时间占用写锁。
+        while True:
+            cursor = db.execute(
+                """
+                DELETE FROM audit_logs
+                WHERE id IN (
+                    SELECT id FROM audit_logs
+                    WHERE resource_type = 'external_api' AND created_at < ?
+                    ORDER BY created_at, id
+                    LIMIT ?
+                )
+                """,
+                (cutoff, batch_size),
+            )
+            db.commit()
+            deleted += cursor.rowcount
+            if cursor.rowcount < batch_size:
+                return deleted
+    finally:
+        db.close()
 
 
 def query_audit_logs(

@@ -292,6 +292,31 @@ def _configure_pool_maintenance_jobs(scheduler) -> None:
     print("✓ 邮箱池维护 Job 已配置（expire: 60s，recover: 300s）")
 
 
+def _configure_audit_cleanup_job(scheduler) -> None:
+    from outlook_web.audit import cleanup_external_api_audit_logs
+
+    def _cleanup_task():
+        try:
+            deleted = cleanup_external_api_audit_logs()
+            if deleted:
+                print(f"[audit] Removed {deleted} external API logs older than 30 days")
+        except Exception as exc:
+            print(f"[audit] External API log cleanup failed: {exc}")
+
+    scheduler.add_job(
+        func=_cleanup_task,
+        trigger="interval",
+        days=1,
+        id="external_api_audit_cleanup",
+        name="External API audit log cleanup",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=3600,
+        next_run_time=datetime.now(),
+    )
+
+
 def configure_scheduler_jobs(scheduler, app, test_refresh_token) -> None:
     try:
         from apscheduler.triggers.cron import CronTrigger
@@ -324,6 +349,7 @@ def configure_scheduler_jobs(scheduler, app, test_refresh_token) -> None:
     _configure_probe_poll_job(scheduler, app)
     _configure_temp_mail_address_sync_job(scheduler, app)
     _configure_pool_maintenance_jobs(scheduler)
+    _configure_audit_cleanup_job(scheduler)
 
     # 刷新 Job：根据 enable_scheduled 决定是否启用
     try:
